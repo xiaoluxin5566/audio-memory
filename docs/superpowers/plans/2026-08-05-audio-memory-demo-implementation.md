@@ -94,7 +94,7 @@ scripts/
 - Produces: `GET /api/health -> {status, version, platform, architecture}`.
 - Application data root: `~/Library/Application Support/AudioMemory/`.
 
-- [ ] **Step 1: Write failing path and platform tests**
+- [x] **Step 1: Write failing path and platform tests**
 
 ```python
 def test_app_paths_are_all_under_local_support(tmp_path):
@@ -111,23 +111,23 @@ def test_platform_guard_rejects_non_arm64(monkeypatch):
         assert_supported_platform()
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `cd backend && uv run pytest tests/unit/test_config.py -v`
 
 Expected: FAIL because `AppPaths` and `assert_supported_platform` do not exist.
 
-- [ ] **Step 3: Implement paths, platform guard and kernel lock**
+- [x] **Step 3: Implement paths, platform guard and kernel lock**
 
 Use `fcntl.flock(fd, LOCK_EX | LOCK_NB)` on `paths.lock`, keep `fd` open for the process lifetime, and store diagnostic PID/start time only after the kernel lock succeeds. Never place the lock under the repository, bundle path, SMB, NFS, or a user-selected directory.
 
 `backend/pyproject.toml` must require Python `>=3.12,<3.13` and declare FastAPI, Uvicorn, Pydantic 2, SQLAlchemy 2, aiosqlite, Alembic, httpx, `pyobjc-framework-Security`, `mlx-whisper`, pytest, pytest-asyncio and respx. Commit `uv.lock` after dependency resolution so installation is reproducible.
 
-- [ ] **Step 4: Add FastAPI lifespan and health endpoint**
+- [x] **Step 4: Add FastAPI lifespan and health endpoint**
 
 The lifespan must acquire the instance lock before opening SQLite, create required directories with mode `0700`, and release resources in reverse order. `GET /api/health` returns HTTP 200 only after startup is complete.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run: `cd backend && uv run pytest tests/unit/test_config.py tests/integration/test_health.py -v`
 

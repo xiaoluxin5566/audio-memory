@@ -4,4 +4,5 @@ prototype/node_modules/
 prototype/dist/
 backend/.venv/
 backend/.pytest_cache/
+backend/.uv-cache/
 **/__pycache__/
