@@ -112,6 +112,12 @@ def test_boundary_keeps_genuinely_different_adjacent_sentences() -> None:
         ("测量值1.20", "测量值120"),
         ("版本v1.20发布", "版本v120发布"),
         ("版本2026/1/23", "版本2026-1-23"),
+        ("版本号2026/1/23", "版本号2026-1-23"),
+        ("版2026/1/23", "版2026-1-23"),
+        ("ver2026/1/23", "ver2026-1-23"),
+        ("version2026/1/23", "version2026-1-23"),
+        ("v2026/1/23", "v2026-1-23"),
+        ("ＶＥＲＳＩＯＮ２０２６／１／２３", "ＶＥＲＳＩＯＮ２０２６－１－２３"),
     ],
 )
 def test_boundary_preserves_semantic_conflicts(
@@ -138,6 +144,7 @@ def test_boundary_preserves_semantic_conflicts(
         ("重叠句子", "重叠语句"),
         ("金额是 1.20 元。", "金额是1.20元"),
         ("日期2026/08/05。", "日期2026-08-05"),
+        ("dev2026/08/05上线。", "dev2026-08-05上线"),
     ],
 )
 def test_boundary_merges_only_safe_text_variations(

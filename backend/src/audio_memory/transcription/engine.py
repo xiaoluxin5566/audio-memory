@@ -342,7 +342,9 @@ def _normalized_segment_text(text: str) -> str:
 
 _NEGATION_MARKERS = frozenset("不未没无非否莫勿别")
 _PROTECTED_NUMBER_TOKEN_PATTERN = re.compile(
-    r"(?:版本v?|v)?[+-]?(?:\d+(?:[.:/-]\d+)*|\.\d+)%?"
+    r"(?:(?:版本号?|版)v?|(?<![a-z])(?:version|ver|v))"
+    r"[+-]?(?:\d+(?:[.:/-]\d+)*|\.\d+)%?"
+    r"|[+-]?(?:\d+(?:[.:/-]\d+)*|\.\d+)%?"
     r"|[零〇一二两三四五六七八九十百千万亿]+"
 )
 _DATE_TOKEN_PATTERN = re.compile(r"(\d{4})([/\-])(\d{1,2})\2(\d{1,2})")
