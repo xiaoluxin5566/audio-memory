@@ -43,6 +43,7 @@ export function App() {
   const [promptEditing, setPromptEditing] = useState(false);
   const [promptDraft, setPromptDraft] = useState('');
   const fileInput = useRef(null);
+  const pendingUploadFiles = useRef([]);
 
   const refreshContent = useCallback(async () => {
     const [feedPayload, historyPayload] = await Promise.all([api.feed(), api.history()]);
@@ -101,7 +102,8 @@ export function App() {
     let jobId = state.job?.id;
     if (!jobId) jobId = (await api.createJob()).id;
     setState((current) => ({ ...current, job: { id: jobId, stage: 'uploading', progress: 0 } }));
-    for (const file of files) {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
       const localId = crypto.randomUUID();
       const pending = { id: localId, name: file.name, size: file.size, type: file.name.split('.').pop()?.toUpperCase(), progress: 0, invalid: false };
       setState((current) => ({ ...current, upload: { ...current.upload, files: [...current.upload.files, pending], error: '' } }));
@@ -111,6 +113,7 @@ export function App() {
         } });
         setState((current) => ({ ...current, upload: { ...current.upload, files: current.upload.files.map((item) => item.id === localId ? { ...item, id: uploaded.id, progress: 100, type: uploaded.extension.slice(1).toUpperCase() } : item) } }));
       } catch (error) {
+        if (error.code === 'unsupported_format') pendingUploadFiles.current = files.slice(index + 1);
         setState((current) => ({ ...current, upload: { files: current.upload.files.map((item) => item.id === localId ? { ...item, id: error.fileId || localId, invalid: true } : item), error: error.message, paused: error.code === 'unsupported_format' } }));
         break;
       }
@@ -118,11 +121,17 @@ export function App() {
   }
 
   async function removeFile(id) {
+    const removedInvalidFile = state.upload.files.some((file) => file.id === id && file.invalid);
     if (state.job?.id) await api.removeFile(state.job.id, id);
     setState((current) => {
       const files = current.upload.files.filter((file) => file.id !== id);
       return { ...current, upload: { files, error: files.some((file) => file.invalid) ? current.upload.error : '', paused: files.some((file) => file.invalid) } };
     });
+    if (removedInvalidFile && pendingUploadFiles.current.length) {
+      const pending = pendingUploadFiles.current;
+      pendingUploadFiles.current = [];
+      await addFiles(pending);
+    }
   }
 
   async function startAnalysis() {
