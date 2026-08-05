@@ -284,7 +284,7 @@ Commit: `git commit -m "feat: implement secure provider configuration"`
 - `POST /api/jobs/{job_id}/start` locks the file list and provider snapshot.
 - `GET /api/jobs/{job_id}/events` is an SSE stream with monotonic event IDs.
 
-- [ ] **Step 1: Write file validation and pause tests**
+- [x] **Step 1: Write file validation and pause tests**
 
 ```python
 @pytest.mark.parametrize("name,allowed", [
@@ -295,21 +295,21 @@ async def test_upload_format_contract(client, fixtures, name, allowed):
     assert (response.status_code == 201) is allowed
 ```
 
-- [ ] **Step 2: Implement streamed local upload**
+- [x] **Step 2: Implement streamed local upload**
 
 Write chunks to `staging/{job_uuid}/`, update SHA-256 and byte progress, reject duplicate `(sha256, size)` within the batch, fsync before marking uploaded, then run ffprobe. Unsupported or undecodable files pause subsequent client submissions until removed.
 
-- [ ] **Step 3: Implement manifest-backed cleanup**
+- [x] **Step 3: Implement manifest-backed cleanup**
 
 Register every temporary path in `temp_file_manifest` before creation. Cleanup resolves the real path and rejects deletion unless it is below `paths.staging`; remove physical content before deleting the manifest row. Startup runs the same cleanup for abandoned upload-stage jobs.
 
-- [ ] **Step 4: Implement XHR and SSE clients**
+- [x] **Step 4: Implement XHR and SSE clients**
 
 Use XHR for per-file upload percentage and EventSource for server job state. Reconnect SSE with `Last-Event-ID`; after reconnect always fetch `GET /api/jobs/{id}` as the state authority.
 
 The browser sends accepted files one at a time in the user's selection order. It does not begin the next file while the current upload is active or while the batch is paused by an unsupported file.
 
-- [ ] **Step 5: Run API and browser-client unit tests and commit**
+- [x] **Step 5: Run API and browser-client unit tests and commit**
 
 Run: `cd backend && uv run pytest tests/integration/test_upload_jobs.py -v && cd ../prototype && node --test tests/*.test.mjs`
 

@@ -14,12 +14,16 @@ from audio_memory.config import AppPaths, assert_supported_platform
 from audio_memory.db import Database, run_migrations
 from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
+from audio_memory.api.jobs import router as jobs_router
+from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
 from audio_memory.providers.types import PROVIDER_CONFIGS
 from audio_memory.providers.validation import ProviderValidationService
 from audio_memory.repositories import ProviderMetadataRepository
+from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
+from audio_memory.uploads.service import UploadService
 
 
 def create_app(*, paths: AppPaths | None = None) -> FastAPI:
@@ -40,6 +44,12 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
             await asyncio.to_thread(run_migrations, resolved_paths.database)
             database = Database(resolved_paths.database)
             app.state.database = database
+            await cleanup_abandoned_uploads(database, resolved_paths.staging)
+            job_events = JobEventBroker()
+            app.state.job_events = job_events
+            app.state.upload_service = UploadService(
+                database, resolved_paths, job_events
+            )
             adapters = {
                 "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
                 "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
@@ -72,6 +82,8 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
 
     app = FastAPI(title="Audio Memory", version=__version__, lifespan=lifespan)
     app.include_router(providers_router)
+    app.include_router(jobs_router)
+    app.include_router(events_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
