@@ -306,9 +306,11 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
     try {
       await api.saveProviderKey(providerId, key, sessionId.current);
       candidateProviders.current.delete(providerId);
+      await api.activateProvider(providerId);
       await refresh();
-      setKey(''); setStatus({ type: 'success', message: 'API Key 已安全保存并校验成功' });
-      onToast(`${state.providers[providerId].name} 已配置`);
+      setKey('');
+      onToast(`${state.providers[providerId].name} 已配置并设为当前模型`);
+      onClose();
     } catch (error) { setStatus({ type: 'error', message: error.message }); }
     finally { setChecking(false); }
   }

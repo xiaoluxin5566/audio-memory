@@ -25,3 +25,13 @@ test('provider key field is intentionally visible during entry', async () => {
   const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'))
   assert.match(source, /<input type="text" value=\{key\}/)
 })
+
+
+test('successful provider configuration activates it and closes the modal', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'))
+  const submitBody = source.slice(source.indexOf('async function submit()'), source.indexOf('async function revalidate()'))
+  assert.match(submitBody, /await api\.saveProviderKey/)
+  assert.match(submitBody, /await api\.activateProvider\(providerId\)/)
+  assert.match(submitBody, /onClose\(\)/)
+  assert.ok(submitBody.indexOf('activateProvider') < submitBody.indexOf('onClose()'))
+})
