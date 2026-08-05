@@ -1,5 +1,6 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 import pytest
 
@@ -60,3 +61,86 @@ def test_concurrent_edits_allow_only_one_version_winner(tmp_path: Path) -> None:
 
     assert sum(result is not None for result in results) == 1
     assert store.get("content").version == 2
+
+
+def write_existing_prompt(
+    root: Path, scene_id: str, *, content: str, version: int
+) -> None:
+    scene_root = root / scene_id
+    (scene_root / "versions").mkdir(parents=True)
+    (scene_root / "current.md").write_text(content)
+    (scene_root / "metadata.json").write_text(json.dumps({"version": version}))
+
+
+def test_new_install_records_packaged_default_provenance(tmp_path: Path) -> None:
+    store = PromptStore(tmp_path)
+
+    document = store.get("meeting")
+    metadata = json.loads((tmp_path / "meeting" / "metadata.json").read_text())
+
+    assert document.version == 1
+    assert metadata == {
+        "version": 1,
+        "packaged_default_version": 2,
+        "current_source": "packaged",
+    }
+
+
+def test_untouched_known_legacy_default_is_archived_then_upgraded(tmp_path: Path) -> None:
+    legacy = (
+        "识别本次音频中的独立会议，判断会议开始与结束范围。总结会议主题、核心结论、明确决策和会议待办；"
+        "忠于原始对话，不补造未讨论的事实。多个独立会议分别生成结果。"
+    )
+    write_existing_prompt(tmp_path, "meeting", content=legacy, version=4)
+    store = PromptStore(tmp_path)
+
+    upgraded = store.get("meeting")
+    metadata = json.loads((tmp_path / "meeting" / "metadata.json").read_text())
+    archives = list((tmp_path / "meeting" / "versions").glob("4-*.md"))
+
+    assert upgraded.version == 5
+    assert upgraded.content != legacy
+    assert len(archives) == 1
+    assert archives[0].read_text() == legacy
+    assert metadata == {
+        "version": 5,
+        "packaged_default_version": 2,
+        "current_source": "packaged",
+    }
+
+
+def test_user_edited_legacy_prompt_is_preserved_byte_for_byte(tmp_path: Path) -> None:
+    edited = "  用户自定义会议角度\n保留这些空白  \n"
+    write_existing_prompt(tmp_path, "meeting", content=edited, version=7)
+    store = PromptStore(tmp_path)
+
+    document = store.get("meeting")
+    metadata = json.loads((tmp_path / "meeting" / "metadata.json").read_text())
+
+    assert document.version == 7
+    assert (tmp_path / "meeting" / "current.md").read_text() == edited
+    assert document.content == edited
+    assert list((tmp_path / "meeting" / "versions").iterdir()) == []
+    assert metadata == {
+        "version": 7,
+        "packaged_default_version": 2,
+        "current_source": "user",
+    }
+
+
+def test_legacy_upgrade_is_idempotent_on_repeated_initialization(tmp_path: Path) -> None:
+    legacy = (
+        "识别本次音频中的独立会议，判断会议开始与结束范围。总结会议主题、核心结论、明确决策和会议待办；"
+        "忠于原始对话，不补造未讨论的事实。多个独立会议分别生成结果。"
+    )
+    write_existing_prompt(tmp_path, "meeting", content=legacy, version=1)
+    store = PromptStore(tmp_path)
+
+    first = store.get("meeting")
+    first_metadata = (tmp_path / "meeting" / "metadata.json").read_bytes()
+    second = store.get("meeting")
+    second_metadata = (tmp_path / "meeting" / "metadata.json").read_bytes()
+
+    assert first == second
+    assert first_metadata == second_metadata
+    assert len(list((tmp_path / "meeting" / "versions").iterdir())) == 1
