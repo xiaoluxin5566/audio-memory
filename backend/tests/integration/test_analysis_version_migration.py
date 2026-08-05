@@ -1,6 +1,7 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 
@@ -178,3 +179,88 @@ def test_0003_downgrade_restores_0002_data_and_schema(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT id, text FROM todos"
         ).fetchone() == ("todo-legacy", "跟进会议")
+
+
+def test_0003_backfills_exactly_one_version_for_each_legacy_batch(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "multiple-batches.sqlite3"
+    config = seed_version_0002_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO analysis_jobs "
+            "(id, stage, provider_id, model_id, prompt_snapshot_json, "
+            "staged_results_json, created_at, updated_at) VALUES "
+            "('job-no-prompt', 'completed', 'openai', 'gpt-5', '', '[]', "
+            "'2026-07-31T08:00:00+00:00', '2026-07-31T08:10:00+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO batches "
+            "(id, job_id, provider_id, model_id, uploaded_at, natural_date) "
+            "VALUES ('batch-no-prompt', 'job-no-prompt', 'openai', 'gpt-5', "
+            "'2026-07-31T08:10:00+00:00', '2026-07-31')"
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        versions_per_batch = connection.execute(
+            "SELECT batch_id, count(*) FROM analysis_versions "
+            "GROUP BY batch_id ORDER BY batch_id"
+        ).fetchall()
+        assert versions_per_batch == [
+            ("batch-legacy", 1),
+            ("batch-no-prompt", 1),
+        ]
+        assert connection.execute(
+            "SELECT prompt_snapshot_json FROM analysis_versions "
+            "WHERE batch_id = 'batch-no-prompt'"
+        ).fetchone() == ("{}",)
+
+
+def test_0003_rejects_orphan_batch_before_any_schema_or_data_change(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "orphan-batch.sqlite3"
+    config = seed_version_0002_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO batches "
+            "(id, job_id, provider_id, model_id, uploaded_at, natural_date) "
+            "VALUES ('batch-orphan-z', 'job-missing-z', NULL, NULL, 'now', '2026-08-05')"
+        )
+        connection.execute(
+            "INSERT INTO batches "
+            "(id, job_id, provider_id, model_id, uploaded_at, natural_date) "
+            "VALUES ('batch-orphan-a', 'job-missing-a', NULL, NULL, 'now', '2026-08-05')"
+        )
+        connection.commit()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"orphan.*batch-orphan-a.*batch-orphan-z",
+    ):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "analysis_versions" not in tables
+        assert "current_analysis_version_id" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(batches)")
+        }
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0002",)
+        assert connection.execute(
+            "SELECT id FROM batches ORDER BY id"
+        ).fetchall() == [
+            ("batch-legacy",),
+            ("batch-orphan-a",),
+            ("batch-orphan-z",),
+        ]

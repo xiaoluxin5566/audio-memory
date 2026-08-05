@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from audio_memory.db import Database
     from audio_memory.models import AnalysisVersion
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +19,7 @@ class AnalysisSnapshot:
 
 
 async def require_card_version(
-    database: Database,
+    session: AsyncSession,
     *,
     version_id: str | None,
     expected_batch_id: str,
@@ -28,18 +28,21 @@ async def require_card_version(
 
     The database column remains nullable so migration 0003 can rebuild legacy
     tables safely. Every new version-aware write path must call this boundary
-    before inserting Cards. The pre-version ``AnalysisPublisher`` deliberately
-    remains a compatibility path until Task 6 replaces it with
-    ``VersionPublisher``.
+    with its current publication transaction before inserting Cards. This
+    function never opens, commits, rolls back, or closes a session, so an
+    uncommitted AnalysisVersion can be validated atomically with its Cards.
+
+    The pre-version ``AnalysisPublisher`` deliberately remains a compatibility
+    path until Task 6 replaces it with ``VersionPublisher``; that publisher must
+    call this function from inside its publication transaction.
     """
     from audio_memory.models import AnalysisVersion
 
     if version_id is None or not version_id.strip():
         raise ValueError("analysis_version_id is required for versioned Card writes")
-    async with database.session() as session:
-        version = await session.get(AnalysisVersion, version_id)
-        if version is None:
-            raise LookupError(f"Unknown analysis version: {version_id}")
-        if version.batch_id != expected_batch_id:
-            raise ValueError("Analysis version does not belong to expected batch")
-        return version
+    version = await session.get(AnalysisVersion, version_id)
+    if version is None:
+        raise LookupError(f"Unknown analysis version: {version_id}")
+    if version.batch_id != expected_batch_id:
+        raise ValueError("Analysis version does not belong to expected batch")
+    return version

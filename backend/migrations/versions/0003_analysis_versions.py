@@ -18,8 +18,11 @@ down_revision: Union[str, Sequence[str], None] = "0002"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+LEGACY_PROMPT_SNAPSHOT_FALLBACK = "{}"
+
 
 def upgrade() -> None:
+    _assert_no_orphan_batches()
     op.create_table(
         "reanalysis_batches",
         sa.Column("id", sa.String(length=36), nullable=False),
@@ -243,7 +246,11 @@ def upgrade() -> None:
         "ix_todos_analysis_version_id", "todos", ["analysis_version_id"]
     )
     op.create_index(
-        "ix_todos_source_fingerprint", "todos", ["source_fingerprint"]
+        "uq_todos_source_fingerprint_non_null",
+        "todos",
+        ["source_fingerprint"],
+        unique=True,
+        sqlite_where=sa.text("source_fingerprint IS NOT NULL"),
     )
 
     _backfill_initial_versions()
@@ -282,7 +289,10 @@ def _backfill_initial_versions() -> None:
                 "batch_id": batch["batch_id"],
                 "provider_id": batch["provider_id"],
                 "model_id": batch["model_id"],
-                "prompt_snapshot_json": batch["prompt_snapshot_json"] or "{}",
+                "prompt_snapshot_json": (
+                    batch["prompt_snapshot_json"]
+                    or LEGACY_PROMPT_SNAPSHOT_FALLBACK
+                ),
                 "staged_results_json": batch["staged_results_json"] or "[]",
                 "created_at": batch["created_at"] or completed_at,
                 "completed_at": completed_at,
@@ -317,8 +327,31 @@ def _backfill_initial_versions() -> None:
         )
 
 
+def _assert_no_orphan_batches() -> None:
+    connection = op.get_bind()
+    orphan_ids = list(
+        connection.execute(
+            sa.text(
+                "SELECT batches.id FROM batches "
+                "LEFT JOIN analysis_jobs ON analysis_jobs.id = batches.job_id "
+                "WHERE analysis_jobs.id IS NULL ORDER BY batches.id"
+            )
+        ).scalars()
+    )
+    if orphan_ids:
+        joined_ids = ", ".join(orphan_ids)
+        raise RuntimeError(
+            "Cannot migrate orphan legacy batches without AnalysisJob rows: "
+            f"{joined_ids}"
+        )
+
+
 def downgrade() -> None:
-    op.drop_index("ix_todos_source_fingerprint", table_name="todos")
+    op.drop_index(
+        "uq_todos_source_fingerprint_non_null",
+        table_name="todos",
+        sqlite_where=sa.text("source_fingerprint IS NOT NULL"),
+    )
     op.drop_index("ix_todos_analysis_version_id", table_name="todos")
     with op.batch_alter_table("todos", recreate="always") as batch_op:
         batch_op.drop_constraint("fk_todos_source_job_id", type_="foreignkey")

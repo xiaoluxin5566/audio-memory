@@ -9,7 +9,13 @@ from sqlalchemy.exc import IntegrityError
 
 from audio_memory.analysis.versions import AnalysisSnapshot, require_card_version
 from audio_memory.db import Database, run_migrations
-from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, ProviderMetadata
+from audio_memory.models import (
+    AnalysisJob,
+    AnalysisVersion,
+    Batch,
+    ProviderMetadata,
+    Todo,
+)
 from audio_memory.repositories import AnalysisVersionRepository
 
 
@@ -463,30 +469,155 @@ async def test_versioned_card_writes_require_version_from_expected_batch(
             )
             await session.commit()
 
-        with pytest.raises(ValueError, match="required"):
-            await require_card_version(
-                database,
-                version_id=None,
-                expected_batch_id="batch-card-target",
-            )
-        with pytest.raises(LookupError, match="Unknown analysis version"):
-            await require_card_version(
-                database,
-                version_id="version-card-missing",
-                expected_batch_id="batch-card-target",
-            )
-        with pytest.raises(ValueError, match="expected batch"):
-            await require_card_version(
-                database,
-                version_id="version-card-other",
-                expected_batch_id="batch-card-target",
-            )
+        async with database.session() as session:
+            with pytest.raises(ValueError, match="required"):
+                await require_card_version(
+                    session,
+                    version_id=None,
+                    expected_batch_id="batch-card-target",
+                )
+            with pytest.raises(LookupError, match="Unknown analysis version"):
+                await require_card_version(
+                    session,
+                    version_id="version-card-missing",
+                    expected_batch_id="batch-card-target",
+                )
+            with pytest.raises(ValueError, match="expected batch"):
+                await require_card_version(
+                    session,
+                    version_id="version-card-other",
+                    expected_batch_id="batch-card-target",
+                )
 
-        validated = await require_card_version(
-            database,
-            version_id="version-card-other",
-            expected_batch_id="batch-card-other",
+            pending_version = AnalysisVersion(
+                id="version-card-pending",
+                source_job_id="job-card-target",
+                batch_id="batch-card-target",
+                provider_id="kimi",
+                model_id="moonshot-v1",
+                credential_generation=0,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="",
+                staged_results_json="{}",
+                status="running",
+            )
+            session.add(pending_version)
+            await session.flush()
+            validated = await require_card_version(
+                session,
+                version_id="version-card-pending",
+                expected_batch_id="batch-card-target",
+            )
+            assert validated is pending_version
+            await session.rollback()
+
+        async with database.session() as session:
+            assert await session.get(AnalysisVersion, "version-card-pending") is None
+    finally:
+        await database.dispose()
+
+
+def test_migrated_todo_fingerprints_are_unique_when_non_null(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "migrated-todo-fingerprints.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0002")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO analysis_jobs "
+            "(id, stage, prompt_snapshot_json, staged_results_json, created_at, updated_at) "
+            "VALUES ('job-todo-index', 'completed', '{}', '[]', 'now', 'now')"
         )
-        assert validated.id == "version-card-other"
+        connection.execute(
+            "INSERT INTO batches "
+            "(id, job_id, uploaded_at, natural_date) "
+            "VALUES ('batch-todo-index', 'job-todo-index', 'now', '2026-08-05')"
+        )
+        connection.execute(
+            "INSERT INTO todos "
+            "(id, batch_id, text, completed, created_at) "
+            "VALUES ('todo-index-1', 'batch-todo-index', 'one', 0, 'now')"
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT source_fingerprint FROM todos WHERE id = 'todo-index-1'"
+        ).fetchone() == ("legacy:todo-index-1",)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO todos "
+                "(id, batch_id, text, completed, created_at, source_fingerprint) "
+                "VALUES ('todo-index-2', 'batch-todo-index', 'two', 0, 'now', "
+                "'legacy:todo-index-1')"
+            )
+        connection.execute(
+            "INSERT INTO todos "
+            "(id, batch_id, text, completed, created_at, source_fingerprint) "
+            "VALUES ('todo-index-null-1', 'batch-todo-index', 'null one', 0, 'now', NULL)"
+        )
+        connection.execute(
+            "INSERT INTO todos "
+            "(id, batch_id, text, completed, created_at, source_fingerprint) "
+            "VALUES ('todo-index-null-2', 'batch-todo-index', 'null two', 0, 'now', NULL)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_fresh_schema_todo_fingerprints_are_unique_when_non_null(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "fresh-todo-fingerprints.sqlite3")
+    await database.create_schema()
+    try:
+        async with database.session() as session:
+            session.add(AnalysisJob(id="job-fresh-todo-index", stage="completed"))
+            await session.commit()
+            session.add(
+                Batch(
+                    id="batch-fresh-todo-index",
+                    job_id="job-fresh-todo-index",
+                    natural_date="2026-08-05",
+                )
+            )
+            await session.commit()
+            session.add_all(
+                [
+                    Todo(
+                        id="todo-fresh-index-1",
+                        batch_id="batch-fresh-todo-index",
+                        text="one",
+                        source_fingerprint="same",
+                    ),
+                    Todo(
+                        id="todo-fresh-index-2",
+                        batch_id="batch-fresh-todo-index",
+                        text="two",
+                        source_fingerprint="same",
+                    ),
+                ]
+            )
+            with pytest.raises(IntegrityError):
+                await session.commit()
+            await session.rollback()
+            session.add_all(
+                [
+                    Todo(
+                        id="todo-fresh-null-1",
+                        batch_id="batch-fresh-todo-index",
+                        text="null one",
+                    ),
+                    Todo(
+                        id="todo-fresh-null-2",
+                        batch_id="batch-fresh-todo-index",
+                        text="null two",
+                    ),
+                ]
+            )
+            await session.commit()
     finally:
         await database.dispose()

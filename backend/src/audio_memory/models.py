@@ -161,7 +161,7 @@ class Todo(Base):
     normalized_action: Mapped[str | None] = mapped_column(Text)
     normalized_object: Mapped[str | None] = mapped_column(Text)
     normalized_assignee: Mapped[str | None] = mapped_column(Text)
-    source_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(128))
     user_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     completion_source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="model"
@@ -170,6 +170,14 @@ class Todo(Base):
     due_at: Mapped[str | None] = mapped_column(String(40))
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+
+
+Index(
+    "uq_todos_source_fingerprint_non_null",
+    Todo.source_fingerprint,
+    unique=True,
+    sqlite_where=Todo.source_fingerprint.is_not(None),
+)
 
 
 class QAMessage(Base):
