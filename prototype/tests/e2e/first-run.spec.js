@@ -102,6 +102,12 @@ test('startup validation refreshes automatically without manual revalidation', a
         last_validated_at: providerReads <= 2 ? null : '2026-08-05T10:00:00Z',
       }] } })
     }
+    if (pathname === '/api/providers/validate-configured' && request.method() === 'POST') {
+      return route.fulfill({ json: { providers: [{
+        provider_id: 'deepseek', display_name: 'DeepSeek', active: true,
+        state: 'validating', last_validated_at: null,
+      }] } })
+    }
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
@@ -116,10 +122,32 @@ test('startup validation refreshes automatically without manual revalidation', a
 })
 
 test('initial page load validates configured providers once across route changes', async ({ page }) => {
-  const calls = await installApi(page)
+  let providers = { providers: [{
+    provider_id: 'deepseek', display_name: 'DeepSeek', active: true,
+    state: 'validating', last_validated_at: null,
+  }] }
+  const calls = []
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    calls.push(`${request.method()} ${pathname}`)
+    if (pathname === '/api/providers' && request.method() === 'GET') {
+      return route.fulfill({ json: providers })
+    }
+    if (pathname === '/api/providers/validate-configured' && request.method() === 'POST') {
+      providers = configuredDeepSeek()
+      return route.fulfill({ json: providers })
+    }
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
   await page.goto('/')
 
   await expect.poll(() => calls.filter((call) => call === 'POST /api/providers/validate-configured').length).toBe(1)
+  await expect(page.getByText('连接可用', { exact: false })).toBeVisible()
   await page.getByRole('button', { name: '音频历史' }).click()
   await expect(page.getByRole('heading', { name: '音频历史' })).toBeVisible()
   await page.getByRole('button', { name: 'Prompt 设置' }).click()
