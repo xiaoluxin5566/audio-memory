@@ -26,7 +26,10 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
       return route.fulfill({ status: 202, json: { id: 'job-recovery', stage: 'transcribing' } })
     }
     if (pathname === '/api/jobs/job-recovery' && request.method() === 'GET') {
-      return route.fulfill({ json: { id: 'job-recovery', stage: resumed ? 'transcribing' : 'interrupted' } })
+      return route.fulfill({ json: {
+        id: 'job-recovery', stage: resumed ? 'transcribing' : 'interrupted',
+        progress_percent: resumed ? 19 : 3,
+      } })
     }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
@@ -37,5 +40,6 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   await expect(page.getByText('unfinished.mp3')).toBeVisible()
   await page.getByRole('button', { name: '继续分析' }).click()
   await expect(page.getByText('本地 Whisper 转写中')).toBeVisible()
+  await expect(page.locator('.job-title span')).toHaveText('19%')
   expect(resumed).toBe(true)
 })

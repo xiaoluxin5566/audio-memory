@@ -172,7 +172,10 @@ export function App() {
     setState((current) => ({ ...current, upload: { files: [], error: '', paused: false }, job: null }));
     setToast('分析完成，新结果已添加到信息流');
   }, [refreshContent]);
-  useActiveJob(state.job?.stage === 'uploading' ? null : state.job?.id, onJobUpdate, onJobComplete);
+  const watchedJobId = ['transcribing', 'analyzing'].includes(state.job?.stage)
+    ? state.job.id
+    : null;
+  useActiveJob(watchedJobId, onJobUpdate, onJobComplete);
 
   async function resumeJob() {
     if (state.job.stage === 'failed') {
