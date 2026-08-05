@@ -98,7 +98,6 @@ class MacSecurityClient:
             security.kSecAttrAccount: account,
             security.kSecReturnData: True,
             security.kSecMatchLimit: security.kSecMatchLimitOne,
-            security.kSecUseDataProtectionKeychain: True,
         }
         status, value = security.SecItemCopyMatching(query, None)
         return int(status), bytes(value) if value is not None else None
@@ -109,7 +108,6 @@ class MacSecurityClient:
             security.kSecClass: security.kSecClassGenericPassword,
             security.kSecAttrService: service,
             security.kSecAttrAccount: account,
-            security.kSecUseDataProtectionKeychain: True,
         }
         return int(security.SecItemUpdate(query, {security.kSecValueData: value}))
 
@@ -124,7 +122,6 @@ class MacSecurityClient:
                 security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ),
             security.kSecAttrSynchronizable: False,
-            security.kSecUseDataProtectionKeychain: True,
         }
         result = security.SecItemAdd(attributes, None)
         status = result[0] if isinstance(result, tuple) else result

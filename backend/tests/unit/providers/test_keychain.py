@@ -84,13 +84,15 @@ def test_mac_security_add_extracts_status_from_pyobjc_tuple(monkeypatch) -> None
         kSecAttrAccessible = "accessible"
         kSecAttrAccessibleWhenUnlockedThisDeviceOnly = "when-unlocked"
         kSecAttrSynchronizable = "sync"
-        kSecUseDataProtectionKeychain = "data-protection"
+        received = None
 
         @staticmethod
         def SecItemAdd(attributes, result):
+            Security.received = attributes
             return ERR_SEC_SUCCESS, None
 
     client = MacSecurityClient()
     monkeypatch.setattr(client, "_security", lambda: Security)
 
     assert client.add("Audio Memory", "provider:deepseek", b"candidate") == 0
+    assert "data-protection" not in Security.received
