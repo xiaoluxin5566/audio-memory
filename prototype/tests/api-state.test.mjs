@@ -37,7 +37,7 @@ test('provider API preserves keychain and rate-limit recovery state', () => {
 
 test('feed groups cards by natural day and upload batch', () => {
   const normalized = normalizeFeed({
-    todos: [{ id: 't1', text: '回复客户', due_at: null, completed: false }],
+    todos: [{ id: 't1', text: '回复客户', due_at: '2026-08-04T08:00:00+00:00', completed: false, overdue: true }],
     days: [{ date: '2026-08-05', cards: [
       { id: 'c1', batch_id: 'b1', scene_id: 'meeting', uploaded_at: '2026-08-05T10:00:00Z', payload: { card: { title: '评审会', summary: '确认范围' }, detail_sections: [] }, qa: [
         { role: 'user', content: '决定是什么？' },
@@ -52,6 +52,7 @@ test('feed groups cards by natural day and upload batch', () => {
   assert.equal(normalized.feed[1].cards[0].label, '会议纪要')
   assert.deepEqual(normalized.feed[1].qa.c1, [{ q: '决定是什么？', a: '先做 macOS。' }])
   assert.equal(normalized.todos[0].text, '回复客户')
+  assert.equal(normalized.todos[0].overdue, true)
 })
 
 

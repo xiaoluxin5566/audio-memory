@@ -26,6 +26,18 @@ class QuestionAnswerer(Protocol):
     async def answer(self, **kwargs) -> str: ...
 
 
+def is_overdue(*, due_at: str | None, completed: bool, now: datetime) -> bool:
+    if completed or not due_at:
+        return False
+    try:
+        due = datetime.fromisoformat(due_at)
+    except ValueError:
+        return False
+    if due.tzinfo is None:
+        return False
+    return due.astimezone(UTC) < now
+
+
 class ContentService:
     def __init__(
         self, database: Database, paths: AppPaths, answerer: QuestionAnswerer
@@ -35,13 +47,9 @@ class ContentService:
         self.answerer = answerer
 
     async def feed(self) -> dict[str, object]:
-        await self._complete_expired_todos()
+        now = datetime.now(UTC)
         async with self.database.session() as session:
-            todos = list(
-                await session.scalars(
-                    select(Todo).order_by(Todo.completed.asc(), Todo.created_at.desc())
-                )
-            )
+            todos = list(await session.scalars(select(Todo)))
             rows = list(
                 (
                     await session.execute(
@@ -80,8 +88,18 @@ class ContentService:
                     "qa": qa_by_card[card.id],
                 }
             )
+        todos.sort(key=lambda item: item.created_at, reverse=True)
+        todos.sort(
+            key=lambda item: (
+                2
+                if item.completed
+                else 0
+                if is_overdue(due_at=item.due_at, completed=item.completed, now=now)
+                else 1
+            )
+        )
         return {
-            "todos": [self._todo_view(item) for item in todos],
+            "todos": [self._todo_view(item, now=now) for item in todos],
             "days": [
                 {"date": date, "cards": cards}
                 for date, cards in sorted(days.items(), reverse=True)
@@ -113,7 +131,13 @@ class ContentService:
         }
 
     async def update_todo(
-        self, todo_id: str, *, text: str | None, completed: bool | None
+        self,
+        todo_id: str,
+        *,
+        text: str | None,
+        completed: bool | None,
+        due_at: str | None,
+        update_due_at: bool,
     ) -> dict[str, object]:
         async with self.database.session() as session:
             todo = await session.get(Todo, todo_id)
@@ -125,9 +149,11 @@ class ContentService:
                 todo.text = text.strip()
             if completed is not None:
                 todo.completed = completed
+            if update_due_at:
+                todo.due_at = self._normalize_due_at(due_at)
             await session.commit()
             await session.refresh(todo)
-            return self._todo_view(todo)
+            return self._todo_view(todo, now=datetime.now(UTC))
 
     async def delete_todo(self, todo_id: str) -> None:
         async with self.database.session() as session:
@@ -218,22 +244,26 @@ class ContentService:
             )
         return "\n".join(row[0] for row in rows), json.loads(card.payload_json)
 
-    async def _complete_expired_todos(self) -> None:
-        now = datetime.now(UTC)
-        async with self.database.session() as session:
-            todos = list(await session.scalars(select(Todo).where(Todo.completed.is_(False), Todo.due_at.is_not(None))))
-            changed = False
-            for todo in todos:
-                try:
-                    expired = datetime.fromisoformat(todo.due_at) < now
-                except ValueError:
-                    expired = False
-                if expired:
-                    todo.completed = True
-                    changed = True
-            if changed:
-                await session.commit()
+    @staticmethod
+    def _normalize_due_at(due_at: str | None) -> str | None:
+        if due_at in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(due_at)
+        except ValueError as exc:
+            raise ValueError("Todo due date must be an ISO 8601 datetime") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("Todo due date must include a timezone")
+        return due_at
 
     @staticmethod
-    def _todo_view(todo: Todo) -> dict[str, object]:
-        return {"id": todo.id, "text": todo.text, "due_at": todo.due_at, "completed": todo.completed}
+    def _todo_view(todo: Todo, *, now: datetime) -> dict[str, object]:
+        return {
+            "id": todo.id,
+            "text": todo.text,
+            "due_at": todo.due_at,
+            "completed": todo.completed,
+            "overdue": is_overdue(
+                due_at=todo.due_at, completed=todo.completed, now=now
+            ),
+        }

@@ -10,6 +10,7 @@ router = APIRouter(prefix="/api", tags=["content"])
 
 class TodoUpdate(BaseModel):
     text: str | None = None
+    due_at: str | None = None
     completed: bool | None = None
 
 
@@ -40,7 +41,11 @@ async def history(request: Request):
 async def update_todo(todo_id: str, payload: TodoUpdate, request: Request):
     try:
         return await request.app.state.content_service.update_todo(
-            todo_id, text=payload.text, completed=payload.completed
+            todo_id,
+            text=payload.text,
+            completed=payload.completed,
+            due_at=payload.due_at,
+            update_due_at="due_at" in payload.model_fields_set,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -94,4 +99,3 @@ async def clear_history(payload: ClearInput, request: Request) -> Response:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(status_code=204)
-

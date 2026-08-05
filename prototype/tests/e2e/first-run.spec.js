@@ -114,3 +114,49 @@ test('startup validation refreshes automatically without manual revalidation', a
   await expect(page.locator('input[type=file]')).toBeEnabled()
   expect(providerReads).toBeGreaterThanOrEqual(3)
 })
+
+test('initial page load validates configured providers once across route changes', async ({ page }) => {
+  const calls = await installApi(page)
+  await page.goto('/')
+
+  await expect.poll(() => calls.filter((call) => call === 'POST /api/providers/validate-configured').length).toBe(1)
+  await page.getByRole('button', { name: '音频历史' }).click()
+  await expect(page.getByRole('heading', { name: '音频历史' })).toBeVisible()
+  await page.getByRole('button', { name: 'Prompt 设置' }).click()
+  await expect(page.getByRole('heading', { name: 'Prompt 设置' })).toBeVisible()
+  await expect.poll(() => calls.filter((call) => call === 'POST /api/providers/validate-configured').length).toBe(1)
+})
+
+test('overdue todo remains unchecked and saves a local deadline as ISO', async ({ page }) => {
+  let todo = {
+    id: 'todo-1', text: '整理会议结论', due_at: '2026-08-04T08:00:00+00:00', completed: false, overdue: true,
+  }
+  const updates = []
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/providers') return route.fulfill({ json: emptyProviders() })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: emptyProviders() })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [todo] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/todos/todo-1' && request.method() === 'PATCH') {
+      const update = request.postDataJSON()
+      updates.push(update)
+      todo = { ...todo, ...update, due_at: update.due_at || null, overdue: false }
+      return route.fulfill({ json: todo })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+  await page.goto('/')
+
+  await expect(page.getByText('已逾期')).toBeVisible()
+  await expect(page.locator('.todo-check')).not.toHaveClass(/checked/)
+  await page.getByRole('button', { name: '编辑' }).click()
+  await page.getByLabel('截止时间').fill('2026-08-06T09:30')
+  await page.getByRole('button', { name: '保存' }).click()
+
+  await expect.poll(() => updates.length).toBe(1)
+  expect(updates[0].due_at).toMatch(/^2026-08-06T.*Z$/)
+})

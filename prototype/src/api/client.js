@@ -43,6 +43,7 @@ export async function apiRequest(path, options = {}) {
 
 export const api = {
   providers: () => apiRequest('/providers'),
+  validateConfiguredProviders: () => apiRequest('/providers/validate-configured', { method: 'POST' }),
   validateProvider: (id) => apiRequest(`/providers/${id}/validate`, { method: 'POST' }),
   saveProviderKey: (id, apiKey, sessionId) => apiRequest(`/providers/${id}/key`, {
     method: 'PUT',

@@ -111,8 +111,9 @@ export function normalizeFeed(payload) {
     todos: (payload?.todos ?? []).map((item) => ({
       id: item.id,
       text: item.text,
+      dueAt: item.due_at ?? '',
       due: item.due_at ? new Date(item.due_at).toLocaleString('zh-CN') : '未设置截止时间',
-      overdue: false,
+      overdue: Boolean(item.overdue),
       completed: Boolean(item.completed),
     })),
   }

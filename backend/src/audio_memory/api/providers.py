@@ -65,6 +65,20 @@ async def list_providers(request: Request) -> ProviderList:
     )
 
 
+@router.post("/validate-configured")
+async def validate_configured(request: Request) -> ProviderList:
+    coordinator = coordinator_from(request)
+    await asyncio.gather(
+        *(
+            asyncio.wait_for(coordinator.validate_saved(provider_id), timeout=20)
+            for provider_id in PROVIDER_CONFIGS
+        )
+    )
+    return ProviderList(
+        providers=[ProviderView.from_state(item) for item in coordinator.list_states()]
+    )
+
+
 @router.post("/{provider_id}/validate")
 async def validate_provider(provider_id: str, request: Request) -> ProviderView:
     ensure_provider(provider_id)
@@ -113,4 +127,3 @@ async def activate_provider(provider_id: str, request: Request) -> ProviderView:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ProviderView.from_state(state)
-

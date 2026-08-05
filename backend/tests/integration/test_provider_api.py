@@ -25,7 +25,11 @@ class MemoryKeychain:
 
 
 class AlwaysValid:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def validate(self, secret: bytes) -> ValidationResult:
+        self.calls += 1
         return ValidationResult(True)
 
 
@@ -33,12 +37,32 @@ class AlwaysValid:
 def provider_app() -> FastAPI:
     app = FastAPI()
     keychain = MemoryKeychain()
+    validators = {provider_id: AlwaysValid() for provider_id in keychain.values}
+    app.state.keychain = keychain
+    app.state.validators = validators
     app.state.provider_coordinator = ProviderStateCoordinator(
         keychain=keychain,
-        validators={provider_id: AlwaysValid() for provider_id in keychain.values},
+        validators=validators,
     )
     app.include_router(router)
     return app
+
+
+@pytest.mark.asyncio
+async def test_validate_configured_only_calls_keychain_configured_providers(
+    provider_app: FastAPI,
+) -> None:
+    provider_app.state.keychain.values["deepseek"] = b"saved-key"
+    validators = provider_app.state.validators
+    transport = httpx.ASGITransport(app=provider_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/providers/validate-configured")
+
+    assert response.status_code == 200
+    states = {item["provider_id"]: item["state"] for item in response.json()["providers"]}
+    assert states["deepseek"] == "available"
+    assert validators["deepseek"].calls == 1
+    assert validators["kimi"].calls == 0
 
 
 @pytest.mark.asyncio
@@ -95,4 +119,3 @@ async def test_available_provider_activation_is_idempotent(provider_app: FastAPI
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json()["active"] is True
-
