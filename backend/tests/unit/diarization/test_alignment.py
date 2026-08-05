@@ -11,12 +11,111 @@ from audio_memory.diarization.engine import (
 )
 from audio_memory.transcription.engine import (
     FileSpeakerCoordinator,
+    MLXWhisperEngine,
+    SpeakerAwareTranscriptSegment,
     SpeechInterval,
     VoiceActivityDetector,
+    build_ownership_windows,
+    build_processing_windows,
     build_speech_mapping,
     map_compact_range,
+    reconcile_boundary_segments,
     valid_chunk_segments,
 )
+
+
+def boundary_segment(index: int, start_ms: int, end_ms: int, text: str):
+    return SpeakerAwareTranscriptSegment(
+        file_id="file-1",
+        index=index,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        text=text,
+        words=[],
+        speaker_id="speaker_00",
+    )
+
+
+def test_reverse_boundary_drift_keeps_one_sentence() -> None:
+    finalized, remaining = reconcile_boundary_segments(
+        [boundary_segment(0, 1_784_500, 1_786_500, "边界句子")],
+        [boundary_segment(10_000, 1_784_000, 1_785_000, "边界句子")],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert [item.text for item in finalized] == ["边界句子"]
+    assert remaining == []
+
+
+def test_forward_boundary_drift_deduplicates_one_sentence() -> None:
+    finalized, remaining = reconcile_boundary_segments(
+        [boundary_segment(0, 1_783_500, 1_785_000, "边界句子")],
+        [boundary_segment(10_000, 1_784_500, 1_786_500, "边界句子")],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert [item.text for item in finalized] == ["边界句子"]
+    assert remaining == []
+
+
+def test_boundary_deduplicates_minor_text_variation() -> None:
+    finalized, _ = reconcile_boundary_segments(
+        [boundary_segment(0, 1_783_500, 1_785_500, "项目进度确认")],
+        [boundary_segment(10_000, 1_784_500, 1_786_500, "项目进度已确认")],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert len(finalized) == 1
+
+
+def test_resume_deduplicates_minor_boundary_text_variation() -> None:
+    segment = boundary_segment(10_000, 1_784_000, 1_785_000, "重叠语句")
+
+    assert MLXWhisperEngine._duplicates_known_segment(
+        segment,
+        [(1_784_500, 1_786_500, "重叠句子")],
+    )
+
+
+def test_boundary_keeps_genuinely_different_adjacent_sentences() -> None:
+    finalized, _ = reconcile_boundary_segments(
+        [boundary_segment(0, 1_783_500, 1_785_500, "第一句到这里")],
+        [boundary_segment(10_000, 1_784_500, 1_786_500, "接着说第二句")],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert [item.text for item in finalized] == ["第一句到这里", "接着说第二句"]
+
+
+def test_sixty_one_minutes_use_bounded_overlapping_processing_windows() -> None:
+    canonical, _ = build_speech_mapping(
+        [SpeechInterval(0, 61 * 60 * 1000)],
+        duration_ms=61 * 60 * 1000,
+        padding_ms=0,
+    )
+
+    processing = build_processing_windows(canonical)
+    ownership = build_ownership_windows(processing)
+
+    assert processing[0].start_ms == ownership[0].start_ms == 0
+    assert processing[-1].end_ms == ownership[-1].end_ms == 61 * 60 * 1000
+    assert all(item.end_ms - item.start_ms <= 1_800_000 for item in processing)
+    assert all(
+        previous.end_ms - current.start_ms == 30_000
+        for previous, current in zip(processing, processing[1:])
+    )
+    assert all(
+        previous.end_ms == current.start_ms
+        for previous, current in zip(ownership, ownership[1:])
+    )
 
 
 def test_file_speaker_labels_do_not_reuse_local_ids_without_overlap() -> None:

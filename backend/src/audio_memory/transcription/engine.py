@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 import json
 import logging
 from pathlib import Path
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import time
 from typing import Callable
+import unicodedata
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -287,15 +289,183 @@ def build_processing_windows(
     canonical_windows: list[SpeechInterval],
 ) -> list[SpeechInterval]:
     processing: list[SpeechInterval] = []
-    for index, window in enumerate(canonical_windows):
-        start_ms = window.start_ms
-        if index and canonical_windows[index - 1].end_ms == window.start_ms:
-            start_ms = max(
-                canonical_windows[index - 1].start_ms,
-                window.start_ms - SPEECH_WINDOW_OVERLAP_MS,
-            )
-        processing.append(SpeechInterval(start_ms, window.end_ms))
+    groups: list[SpeechInterval] = []
+    for window in canonical_windows:
+        if groups and groups[-1].end_ms == window.start_ms:
+            groups[-1] = SpeechInterval(groups[-1].start_ms, window.end_ms)
+        else:
+            groups.append(window)
+
+    step_ms = MAX_SPEECH_WINDOW_MS - SPEECH_WINDOW_OVERLAP_MS
+    for group in groups:
+        start_ms = group.start_ms
+        while start_ms < group.end_ms:
+            end_ms = min(group.end_ms, start_ms + MAX_SPEECH_WINDOW_MS)
+            processing.append(SpeechInterval(start_ms, end_ms))
+            if end_ms == group.end_ms:
+                break
+            start_ms += step_ms
     return processing
+
+
+def build_ownership_windows(
+    processing_windows: list[SpeechInterval],
+) -> list[SpeechInterval]:
+    ownership: list[SpeechInterval] = []
+    for index, window in enumerate(processing_windows):
+        start_ms = window.start_ms
+        end_ms = window.end_ms
+        if index and processing_windows[index - 1].end_ms > window.start_ms:
+            start_ms = (
+                processing_windows[index - 1].end_ms + window.start_ms
+            ) // 2
+        if (
+            index + 1 < len(processing_windows)
+            and window.end_ms > processing_windows[index + 1].start_ms
+        ):
+            end_ms = (
+                window.end_ms + processing_windows[index + 1].start_ms
+            ) // 2
+        ownership.append(SpeechInterval(start_ms, end_ms))
+    return ownership
+
+
+def _normalized_segment_text(text: str) -> str:
+    return "".join(
+        character.casefold()
+        for character in unicodedata.normalize("NFKC", text)
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def _utterances_are_same(
+    first_start_ms: int,
+    first_end_ms: int,
+    first_text_value: str,
+    second_start_ms: int,
+    second_end_ms: int,
+    second_text_value: str,
+) -> bool:
+    time_overlap_ms = max(
+        0,
+        min(first_end_ms, second_end_ms) - max(first_start_ms, second_start_ms),
+    )
+    if time_overlap_ms == 0:
+        return False
+    shorter_duration_ms = min(
+        first_end_ms - first_start_ms,
+        second_end_ms - second_start_ms,
+    )
+    if shorter_duration_ms <= 0:
+        return False
+    if time_overlap_ms / shorter_duration_ms < 0.3:
+        return False
+    first_text = _normalized_segment_text(first_text_value)
+    second_text = _normalized_segment_text(second_text_value)
+    if not first_text or not second_text:
+        return False
+    if first_text == second_text:
+        return True
+    if min(len(first_text), len(second_text)) >= 3 and (
+        first_text in second_text or second_text in first_text
+    ):
+        return True
+    return SequenceMatcher(None, first_text, second_text).ratio() >= 0.72
+
+
+def _segments_are_same_utterance(
+    first: TranscriptSegment,
+    second: TranscriptSegment,
+) -> bool:
+    return _utterances_are_same(
+        first.start_ms,
+        first.end_ms,
+        first.text,
+        second.start_ms,
+        second.end_ms,
+        second.text,
+    )
+
+
+def _ownership_contains(
+    segment: TranscriptSegment,
+    ownership: SpeechInterval,
+) -> bool:
+    midpoint_ms = (segment.start_ms + segment.end_ms) // 2
+    return ownership.start_ms <= midpoint_ms < ownership.end_ms
+
+
+def reconcile_boundary_segments(
+    previous_segments: list[SpeakerAwareTranscriptSegment],
+    current_segments: list[SpeakerAwareTranscriptSegment],
+    *,
+    overlap: SpeechInterval,
+    previous_ownership: SpeechInterval,
+    current_ownership: SpeechInterval,
+) -> tuple[
+    list[SpeakerAwareTranscriptSegment],
+    list[SpeakerAwareTranscriptSegment],
+]:
+    def intersects(segment: TranscriptSegment) -> bool:
+        return min(segment.end_ms, overlap.end_ms) > max(
+            segment.start_ms, overlap.start_ms
+        )
+
+    previous_boundary = [item for item in previous_segments if intersects(item)]
+    current_boundary = [item for item in current_segments if intersects(item)]
+    finalized = [item for item in previous_segments if not intersects(item)]
+    remaining = [item for item in current_segments if not intersects(item)]
+
+    candidates: list[
+        tuple[float, int, int]
+    ] = []
+    for previous_index, previous in enumerate(previous_boundary):
+        for current_index, current in enumerate(current_boundary):
+            if not _segments_are_same_utterance(previous, current):
+                continue
+            first_text = _normalized_segment_text(previous.text)
+            second_text = _normalized_segment_text(current.text)
+            similarity = SequenceMatcher(None, first_text, second_text).ratio()
+            candidates.append((similarity, previous_index, current_index))
+
+    matched_previous: set[int] = set()
+    matched_current: set[int] = set()
+    selected: list[SpeakerAwareTranscriptSegment] = []
+    for _, previous_index, current_index in sorted(candidates, reverse=True):
+        if previous_index in matched_previous or current_index in matched_current:
+            continue
+        previous = previous_boundary[previous_index]
+        current = current_boundary[current_index]
+        previous_owned = _ownership_contains(previous, previous_ownership)
+        current_owned = _ownership_contains(current, current_ownership)
+        if previous_owned != current_owned:
+            representative = previous if previous_owned else current
+        else:
+            representative = max(
+                (previous, current),
+                key=lambda item: (
+                    len(_normalized_segment_text(item.text)),
+                    -item.index,
+                ),
+            )
+        selected.append(representative)
+        matched_previous.add(previous_index)
+        matched_current.add(current_index)
+
+    selected.extend(
+        item
+        for index, item in enumerate(previous_boundary)
+        if index not in matched_previous
+    )
+    selected.extend(
+        item
+        for index, item in enumerate(current_boundary)
+        if index not in matched_current
+    )
+    finalized.extend(selected)
+    finalized.sort(key=lambda item: (item.start_ms, item.end_ms, item.index))
+    return finalized, remaining
 
 
 def diarize_fail_open(diarization_engine, path: Path) -> list[SpeakerTurn]:
@@ -664,12 +834,13 @@ class MLXWhisperEngine:
                 )
                 await self._persist_speech_mapping(file, mapping)
                 speech_intervals = build_processing_windows(canonical_intervals)
+                ownership_intervals = build_ownership_windows(speech_intervals)
                 chunks = await self._extract_speech_intervals(
                     source, chunk_dir, speech_intervals
                 )
                 source_offsets = [item.start_ms for item in speech_intervals]
                 audio_durations = [
-                    item.end_ms - item.start_ms for item in canonical_intervals
+                    item.end_ms - item.start_ms for item in speech_intervals
                 ]
             else:
                 await self._persist_speech_mapping(file, [])
@@ -691,12 +862,22 @@ class MLXWhisperEngine:
                     or WHISPER_CHUNK_SECONDS * 1000
                     for index in range(len(chunks))
                 ]
+                speech_intervals = [
+                    SpeechInterval(
+                        source_offsets[index],
+                        source_offsets[index] + audio_durations[index],
+                    )
+                    for index in range(len(chunks))
+                ]
+                ownership_intervals = list(speech_intervals)
 
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
             speaker_coordinator = FileSpeakerCoordinator()
             known_segments = await self._existing_transcript_signatures(file.id)
+            pending_segments: list[SpeakerAwareTranscriptSegment] = []
+            pending_window_index: int | None = None
             for chunk_index, chunk in enumerate(chunks):
                 skip_transcription = (
                     (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from
@@ -715,37 +896,69 @@ class MLXWhisperEngine:
                 raw_segments = await loop.run_in_executor(
                     self._executor, _transcribe_worker, str(chunk), self.model_id,
                 )
-                valid_count = 0
-                for segment in valid_chunk_segments(
-                    file_id=file.id, chunk_index=chunk_index,
-                    chunk_seconds=WHISPER_CHUNK_SECONDS,
-                    raw_segments=raw_segments,
-                    turns=turns,
-                    source_offset_ms=source_offsets[chunk_index],
-                ):
-                    if vad_succeeded:
-                        canonical = canonical_intervals[chunk_index]
-                        midpoint_ms = (segment.start_ms + segment.end_ms) // 2
-                        if not (
-                            canonical.start_ms
-                            <= midpoint_ms
-                            < canonical.end_ms
-                        ):
-                            continue
+                current_segments = [
+                    segment
+                    for segment in valid_chunk_segments(
+                        file_id=file.id,
+                        chunk_index=chunk_index,
+                        chunk_seconds=WHISPER_CHUNK_SECONDS,
+                        raw_segments=raw_segments,
+                        turns=turns,
+                        source_offset_ms=source_offsets[chunk_index],
+                    )
+                    if segment.index >= resume_from
+                ]
+                finalized: list[SpeakerAwareTranscriptSegment] = []
+                if pending_window_index is None:
+                    pending_segments = current_segments
+                else:
+                    previous_window = speech_intervals[pending_window_index]
+                    current_window = speech_intervals[chunk_index]
+                    overlap_start_ms = max(
+                        previous_window.start_ms, current_window.start_ms
+                    )
+                    overlap_end_ms = min(
+                        previous_window.end_ms, current_window.end_ms
+                    )
+                    if overlap_end_ms > overlap_start_ms:
+                        finalized, pending_segments = reconcile_boundary_segments(
+                            pending_segments,
+                            current_segments,
+                            overlap=SpeechInterval(
+                                overlap_start_ms, overlap_end_ms
+                            ),
+                            previous_ownership=ownership_intervals[
+                                pending_window_index
+                            ],
+                            current_ownership=ownership_intervals[chunk_index],
+                        )
+                    else:
+                        finalized = pending_segments
+                        pending_segments = current_segments
+                pending_window_index = chunk_index
+
+                for segment in finalized:
                     if self._duplicates_known_segment(segment, known_segments):
                         continue
-                    if segment.index >= resume_from:
-                        valid_count += 1
-                        known_segments.append(
-                            (segment.start_ms, segment.end_ms, segment.text.strip())
-                        )
-                        yield segment
-                if valid_count:
+                    known_segments.append(
+                        (segment.start_ms, segment.end_ms, segment.text.strip())
+                    )
+                    yield segment
+
+                if current_segments:
                     self.eta_tracker.record(
                         file.job_id,
                         audio_durations[chunk_index],
                         time.monotonic() - started,
                     )
+
+            for segment in pending_segments:
+                if self._duplicates_known_segment(segment, known_segments):
+                    continue
+                known_segments.append(
+                    (segment.start_ms, segment.end_ms, segment.text.strip())
+                )
+                yield segment
         finally:
             safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
             if safe_dir.exists():
@@ -881,11 +1094,15 @@ class MLXWhisperEngine:
         segment: TranscriptSegment,
         known_segments: list[tuple[int, int, str]],
     ) -> bool:
-        text = segment.text.strip()
         return any(
-            text == known_text
-            and min(segment.end_ms, known_end_ms)
-            > max(segment.start_ms, known_start_ms)
+            _utterances_are_same(
+                segment.start_ms,
+                segment.end_ms,
+                segment.text,
+                known_start_ms,
+                known_end_ms,
+                known_text,
+            )
             for known_start_ms, known_end_ms, known_text in known_segments
         )
 

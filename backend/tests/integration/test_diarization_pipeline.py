@@ -479,14 +479,14 @@ async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
         index = int(Path(path).stem.split("-")[-1])
         if index == 0:
             return {
-                    "segments": [
-                        {"start": 10.0, "end": 11.0, "text": "首段"},
-                        {"start": 1798.0, "end": 1800.5, "text": "重叠"},
+                "segments": [
+                    {"start": 10.0, "end": 11.0, "text": "首段"},
+                    {"start": 1784.5, "end": 1786.5, "text": "重叠句子"},
                 ]
             }
         return {
             "segments": [
-                {"start": 29.5, "end": 31.5, "text": "重叠"},
+                {"start": 14.0, "end": 15.0, "text": "重叠语句"},
                 {"start": 35.0, "end": 36.0, "text": "尾段"},
             ]
         }
@@ -501,8 +501,8 @@ async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
         def diarize(self, _path):
             self.calls += 1
             if self.calls == 1:
-                return [SpeakerTurn(1_797_000, 1_800_000, "local_00")]
-            return [SpeakerTurn(27_000, 31_000, "local_00")]
+                return [SpeakerTurn(1_783_000, 1_787_000, "local_00")]
+            return [SpeakerTurn(13_000, 17_000, "local_00")]
 
     monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe))
     paths = AppPaths.from_home(tmp_path)
@@ -552,8 +552,8 @@ async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
         SpeechInterval(0, 1_800_000),
         SpeechInterval(1_770_000, 1_810_000),
     ]
-    assert [item.text for item in segments] == ["首段", "重叠", "尾段"]
-    overlap = next(item for item in segments if item.text == "重叠")
+    assert [item.text for item in segments] == ["首段", "重叠句子", "尾段"]
+    overlap = next(item for item in segments if item.text == "重叠句子")
     assert overlap.speaker_id == "speaker_00"
     assert json.loads(file.speech_mapping_json)[-1]["compact_end_ms"] == 1_810_000
     await engine.close()
