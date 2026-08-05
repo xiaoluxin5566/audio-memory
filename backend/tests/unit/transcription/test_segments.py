@@ -7,7 +7,7 @@ from audio_memory.transcription.segments import (
     ordered_text,
     progress_percent,
 )
-from audio_memory.transcription.engine import chunk_segment
+from audio_memory.transcription.engine import chunk_segment, valid_chunk_segments
 
 
 def test_segment_rejects_invalid_timestamps() -> None:
@@ -45,3 +45,15 @@ def test_chunk_segment_has_stable_global_index_and_timestamps() -> None:
     assert segment.start_ms == 601_500
     assert segment.end_ms == 604_000
     assert segment.text == " 继续讨论 "
+
+
+def test_invalid_whisper_segment_does_not_interrupt_remaining_chunk() -> None:
+    segments = list(valid_chunk_segments(
+        file_id="file-1", chunk_index=0, chunk_seconds=300,
+        raw_segments=[
+            {"start": 0, "end": 0, "text": ""},
+            {"start": 1, "end": 2, "text": "有效内容", "words": []},
+        ],
+    ))
+
+    assert [segment.text for segment in segments] == ["有效内容"]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import logging
 from typing import Protocol
 
 from sqlalchemy import select
@@ -13,6 +15,9 @@ from audio_memory.models import AnalysisJob, JobFile, ProfileFact, Transcript
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.schemas import SceneResult
 from audio_memory.prompts.store import PROMPT_SCENES, PromptStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class SceneAnalyzer(Protocol):
@@ -71,7 +76,11 @@ class AnalysisOrchestrator:
             delta = validate_profile_delta(raw_delta)
             results = [SceneResult.model_validate(staged[item]) for item in PROMPT_SCENES]
             return await self.publisher.publish(job_id, results, delta)
-        except BaseException:
+        except asyncio.CancelledError:
+            await self._fail(job_id)
+            raise
+        except Exception:
+            logger.exception("Model analysis failed for job %s", job_id)
             await self._fail(job_id)
             raise
 
@@ -144,4 +153,3 @@ class AnalysisOrchestrator:
     def _load_staged(raw: str) -> dict[str, dict[str, object]]:
         parsed = json.loads(raw)
         return parsed if isinstance(parsed, dict) else {}
-

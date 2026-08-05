@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
+import logging
 from pathlib import Path
 import shutil
 from uuid import uuid4
@@ -15,6 +16,7 @@ from audio_memory.uploads.cleanup import assert_staging_path, remove_staged_file
 
 WHISPER_CHUNK_SECONDS = 300
 CHUNK_SEGMENT_STRIDE = 10_000
+logger = logging.getLogger(__name__)
 
 
 def _transcribe_worker(audio_path: str, model_id: str) -> list[dict[str, object]]:
@@ -51,6 +53,21 @@ def chunk_segment(*, file_id: str, chunk_index: int, chunk_seconds: int,
     )
 
 
+def valid_chunk_segments(*, file_id: str, chunk_index: int, chunk_seconds: int,
+                         raw_segments: list[dict[str, object]]):
+    for local_index, raw in enumerate(raw_segments):
+        try:
+            yield chunk_segment(
+                file_id=file_id, chunk_index=chunk_index,
+                chunk_seconds=chunk_seconds, local_index=local_index, raw=raw,
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Skipping invalid Whisper segment file=%s chunk=%s segment=%s",
+                file_id, chunk_index, local_index,
+            )
+
+
 class MLXWhisperEngine:
     def __init__(
         self,
@@ -80,12 +97,11 @@ class MLXWhisperEngine:
                 raw_segments = await loop.run_in_executor(
                     self._executor, _transcribe_worker, str(chunk), self.model_id,
                 )
-                for local_index, raw in enumerate(raw_segments):
-                    segment = chunk_segment(
-                        file_id=file.id, chunk_index=chunk_index,
-                        chunk_seconds=WHISPER_CHUNK_SECONDS,
-                        local_index=local_index, raw=raw,
-                    )
+                for segment in valid_chunk_segments(
+                    file_id=file.id, chunk_index=chunk_index,
+                    chunk_seconds=WHISPER_CHUNK_SECONDS,
+                    raw_segments=raw_segments,
+                ):
                     if segment.index >= resume_from:
                         yield segment
         finally:

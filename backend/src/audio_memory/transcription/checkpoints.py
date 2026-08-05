@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import logging
 from typing import Protocol
 from uuid import uuid4
 
@@ -10,6 +12,9 @@ from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
+
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptionEngine(Protocol):
@@ -27,8 +32,14 @@ class TranscriptionService:
                 resume_from = await self._resume_index(file.id)
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
-        except BaseException:
+        except asyncio.CancelledError:
             await self._set_stage(job_id, JobStage.INTERRUPTED)
+            raise
+        except Exception:
+            logger.exception("Local transcription failed for job %s", job_id)
+            await self._set_stage(
+                job_id, JobStage.INTERRUPTED, error_code="transcription_failed"
+            )
             raise
         await self._set_stage(job_id, JobStage.ANALYZING)
 
@@ -40,6 +51,7 @@ class TranscriptionService:
             if job.stage != JobStage.INTERRUPTED.value:
                 raise ValueError("Only an interrupted transcription can resume")
             job.stage = JobStage.TRANSCRIBING.value
+            job.error_code = None
             await session.commit()
         await self.run_job(job_id, engine)
 
@@ -93,10 +105,13 @@ class TranscriptionService:
             )
             await session.commit()
 
-    async def _set_stage(self, job_id: str, stage: JobStage) -> None:
+    async def _set_stage(
+        self, job_id: str, stage: JobStage, *, error_code: str | None = None
+    ) -> None:
         async with self.database.session() as session:
             job = await session.get(AnalysisJob, job_id)
             if job is None:
                 raise LookupError(f"Unknown analysis job: {job_id}")
             job.stage = stage.value
+            job.error_code = error_code
             await session.commit()

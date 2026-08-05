@@ -61,6 +61,10 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
 
     with pytest.raises(RuntimeError):
         await service.run_job(job_id, engine)
+    async with database.session() as session:
+        interrupted = await session.get(AnalysisJob, job_id)
+        assert interrupted.stage == JobStage.INTERRUPTED.value
+        assert interrupted.error_code == "transcription_failed"
     await service.run_job(job_id, engine)
 
     async with database.session() as session:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -11,6 +12,7 @@ from audio_memory.domain import JobStage
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+logger = logging.getLogger("uvicorn.error")
 
 
 class FileView(BaseModel):
@@ -46,7 +48,14 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
     def finish(completed: asyncio.Task[None]) -> None:
         tasks.pop(job_id, None)
         if not completed.cancelled():
-            completed.exception()
+            error = completed.exception()
+            if error is not None:
+                logger.error(
+                    "Analysis pipeline failed for job %s: %s",
+                    job_id,
+                    error,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
 
     task.add_done_callback(finish)
 
