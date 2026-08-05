@@ -425,23 +425,23 @@ Commit: `git commit -m "feat: add versioned scene prompt engine"`
 - `ProfileMerger.merge(existing, delta, evidence) -> list[ProfileFact]`.
 - `Publisher.publish(job_id, scene_results, profile_delta) -> BatchView`.
 
-- [ ] **Step 1: Write scene-generation and no-empty-card tests**
+- [x] **Step 1: Write scene-generation and no-empty-card tests**
 
 Test `should_generate=false` omission, five card order, todo aggregation outside batch cards, one parenting/content/growth/inspiration card per upload, evidence ownership, and profile facts not leaking other speakers into the user subject.
 
-- [ ] **Step 2: Implement per-scene calls with checkpoints**
+- [x] **Step 2: Implement per-scene calls with checkpoints**
 
 Run the six scene Prompts as independently checkpointed requests against one locked provider/model/Prompt snapshot. After the scene calls, run one additional internal, non-user-editable profile-extraction request over the full transcript and existing profile; its output is a profile delta, not a visible card. Execute calls sequentially in phase one to reduce rate-limit bursts. Temporary network/provider failures retry at most twice with bounded backoff; auth, permission, balance, schema and protocol errors do not loop indefinitely.
 
-- [ ] **Step 3: Parse, validate and repair once**
+- [x] **Step 3: Parse, validate and repair once**
 
 Validate provider output against `SceneResult`. For JSON syntax/schema failure, issue one repair request containing only validation errors and the invalid JSON, never the API Key. If repair fails, mark model analysis failed and keep the complete transcript for retry or provider switch.
 
-- [ ] **Step 4: Merge hidden profile and publish atomically**
+- [x] **Step 4: Merge hidden profile and publish atomically**
 
 Profile facts include value, confidence, source audio, first/last seen time, evidence count, explicit/inferred flag, status and subject ID. Publish only after all six scenes and profile merge succeed; move audio from staging to `audio/{batch_id}/` using a commit manifest, then commit formal SQLite rows. Recovery reconciles a moved-file/database-rollback mismatch before exposing history.
 
-- [ ] **Step 5: Test provider switch without retranscription and commit**
+- [x] **Step 5: Test provider switch without retranscription and commit**
 
 Run: `cd backend && uv run pytest tests/unit/analysis tests/integration/test_analysis_pipeline.py -v`
 

@@ -50,6 +50,22 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
     task.add_done_callback(finish)
 
 
+async def run_pipeline(
+    request: Request,
+    job_id: str,
+    provider_snapshot: dict[str, str],
+    *,
+    resume: bool = False,
+) -> None:
+    transcription = request.app.state.transcription_service
+    engine = request.app.state.whisper_engine
+    if resume:
+        await transcription.resume_job(job_id, engine)
+    else:
+        await transcription.run_job(job_id, engine)
+    await request.app.state.analysis_orchestrator.run(job_id, provider_snapshot)
+
+
 @router.post("", status_code=201)
 async def create_job(request: Request) -> JobView:
     job = await service_from(request).create_job()
@@ -117,9 +133,15 @@ async def start_job(job_id: str, request: Request) -> JobView:
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
-    transcription = request.app.state.transcription_service
-    engine = request.app.state.whisper_engine
-    track_transcription(request, job_id, transcription.run_job(job_id, engine))
+    track_transcription(
+        request,
+        job_id,
+        run_pipeline(
+            request,
+            job_id,
+            {"provider_id": provider.provider_id, "model_id": provider.model_id},
+        ),
+    )
     return JobView.model_validate(job, from_attributes=True)
 
 
@@ -136,9 +158,18 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(
             status_code=409, detail="Only an interrupted transcription can resume"
         )
-    transcription = request.app.state.transcription_service
-    engine = request.app.state.whisper_engine
-    track_transcription(request, job_id, transcription.resume_job(job_id, engine))
+    if job.provider_id is None or job.model_id is None:
+        raise HTTPException(status_code=409, detail="Job has no provider snapshot")
+    track_transcription(
+        request,
+        job_id,
+        run_pipeline(
+            request,
+            job_id,
+            {"provider_id": job.provider_id, "model_id": job.model_id},
+            resume=True,
+        ),
+    )
     return {"id": job_id, "stage": JobStage.TRANSCRIBING.value}
 
 

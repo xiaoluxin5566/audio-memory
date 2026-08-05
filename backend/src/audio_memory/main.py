@@ -28,6 +28,13 @@ from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine
 from audio_memory.prompts.store import PromptStore
+from audio_memory.analysis.orchestrator import AnalysisOrchestrator
+from audio_memory.analysis.provider import (
+    ProviderAnalysisClient,
+    RemoteProfileExtractor,
+    RemoteSceneAnalyzer,
+)
+from audio_memory.analysis.publisher import AnalysisPublisher
 
 
 def create_app(*, paths: AppPaths | None = None) -> FastAPI:
@@ -70,6 +77,7 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
                 "openai": OpenAIAdapter(PROVIDER_CONFIGS["openai"]),
             }
             validators = {}
+            keychain_repository = KeychainRepository(MacSecurityClient())
             for provider_id, config in PROVIDER_CONFIGS.items():
                 client = httpx.AsyncClient(timeout=15.0)
                 provider_clients.append(client)
@@ -77,11 +85,23 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
                     config, client, adapters[provider_id]
                 )
             coordinator = ProviderStateCoordinator(
-                keychain=KeychainRepository(MacSecurityClient()),
+                keychain=keychain_repository,
                 validators=validators,
                 metadata=ProviderMetadataRepository(database),
             )
             app.state.provider_coordinator = coordinator
+            analysis_http_client = httpx.AsyncClient(timeout=120.0)
+            provider_clients.append(analysis_http_client)
+            analysis_client = ProviderAnalysisClient(
+                keychain_repository, analysis_http_client
+            )
+            app.state.analysis_orchestrator = AnalysisOrchestrator(
+                database=database,
+                prompt_store=prompt_store,
+                analyzer=RemoteSceneAnalyzer(analysis_client),
+                profile_extractor=RemoteProfileExtractor(analysis_client),
+                publisher=AnalysisPublisher(database, resolved_paths),
+            )
             initialization_task = asyncio.create_task(coordinator.initialize())
             yield
         finally:
