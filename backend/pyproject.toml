@@ -24,6 +24,10 @@ macos = [
 transcription = [
   "mlx-whisper>=0.4,<1",
 ]
+diarization = [
+  "sherpa-onnx>=1.10.28,<2",
+  "sherpa-onnx-core>=1.10.28,<2",
+]
 
 [dependency-groups]
 dev = [

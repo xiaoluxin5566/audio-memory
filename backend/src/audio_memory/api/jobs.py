@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
 
@@ -22,6 +22,9 @@ class FileView(BaseModel):
     extension: str
     size_bytes: int
     duration_ms: int | None
+    recording_started_at: str | None
+    recording_time_source: str
+    timezone: str | None
     position: int
     upload_progress: int
 
@@ -101,10 +104,19 @@ async def get_job(job_id: str, request: Request) -> JobView:
 
 @router.post("/{job_id}/files", status_code=201, response_model=FileView)
 async def upload_file(
-    job_id: str, request: Request, file: UploadFile = File(...)
+    job_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    file_modified: int | None = Form(None),
+    timezone: str | None = Form(None),
 ) -> FileView | JSONResponse:
     try:
-        uploaded = await service_from(request).upload(job_id, file)
+        uploaded = await service_from(request).upload(
+            job_id,
+            file,
+            file_modified=file_modified,
+            timezone=timezone,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UploadError as exc:

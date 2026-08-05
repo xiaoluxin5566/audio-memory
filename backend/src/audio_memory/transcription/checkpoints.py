@@ -109,6 +109,7 @@ class TranscriptionService:
                     end_ms=segment.end_ms,
                     text=segment.text.strip(),
                     words_json=json.dumps(segment.words, ensure_ascii=False),
+                    speaker_id=getattr(segment, "speaker_id", None),
                 )
             )
             await session.commit()

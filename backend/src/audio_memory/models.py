@@ -19,6 +19,11 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def transcript_segment_uid(context) -> str:
+    parameters = context.get_current_parameters()
+    return f"{parameters['job_file_id']}:{parameters['segment_index']}"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -71,6 +76,14 @@ class JobFile(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    recording_started_at: Mapped[str | None] = mapped_column(String(40))
+    recording_time_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown"
+    )
+    timezone: Mapped[str | None] = mapped_column(String(64))
+    speech_mapping_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     temporary_path: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -86,6 +99,10 @@ class Transcript(Base):
         ForeignKey("job_files.id", ondelete="CASCADE"), index=True
     )
     segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    segment_uid: Mapped[str] = mapped_column(
+        String(96), nullable=False, unique=True, default=transcript_segment_uid
+    )
+    speaker_id: Mapped[str | None] = mapped_column(String(40))
     start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -195,4 +212,3 @@ class FeedbackIndex(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     rating: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
-

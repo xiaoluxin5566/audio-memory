@@ -6,6 +6,11 @@ from pathlib import Path
 
 
 WHISPER_MODEL_ID = "mlx-community/whisper-large-v3-turbo"
+DIARIZATION_VAD_MODEL = "silero_vad.onnx"
+DIARIZATION_SEGMENTATION_MODEL = "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"
+DIARIZATION_EMBEDDING_MODEL = (
+    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+)
 
 
 class UnsupportedPlatformError(RuntimeError):
@@ -21,6 +26,7 @@ class AppPaths:
     feedback: Path
     staging: Path
     audio: Path
+    models: Path
     prompts: Path
 
     @classmethod
@@ -35,6 +41,7 @@ class AppPaths:
             feedback=root / "意见反馈",
             staging=root / "staging",
             audio=root / "audio",
+            models=root / "models",
             prompts=root / "prompts",
         )
 
@@ -46,8 +53,21 @@ class AppPaths:
             self.feedback,
             self.staging,
             self.audio,
+            self.models,
             self.prompts,
         )
+
+    @property
+    def diarization_segmentation_model(self) -> Path:
+        return self.models / "diarization" / DIARIZATION_SEGMENTATION_MODEL
+
+    @property
+    def diarization_vad_model(self) -> Path:
+        return self.models / "diarization" / DIARIZATION_VAD_MODEL
+
+    @property
+    def diarization_embedding_model(self) -> Path:
+        return self.models / "diarization" / DIARIZATION_EMBEDDING_MODEL
 
     def ensure_directories(self) -> None:
         for directory in self.required_directories:

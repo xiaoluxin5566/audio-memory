@@ -122,7 +122,7 @@ Commit: `git commit -m "fix: keep overdue todos incomplete"`
 
 ---
 
-### Task 2: 结构化转写元数据与本地说话人分段
+### Task 2: VAD 优先的结构化转写与本地说话人分段
 
 **Files:**
 - Create: `backend/migrations/versions/0002_structured_transcript.py`
@@ -145,8 +145,10 @@ Commit: `git commit -m "fix: keep overdue todos incomplete"`
 - Test: `tests/install-smoke.sh`
 
 **Interfaces:**
-- Produces: `Transcript.segment_uid: str`, `speaker_id: str | None` and absolute word timestamps.
+- Produces: `Transcript.segment_uid: str`, `speaker_id: str | None`, absolute segment timestamps, and optional word timestamps for selectively refined evidence segments.
 - Produces: `JobFile.recording_started_at`, `recording_time_source=embedded|file_modified|unknown`, and `timezone`.
+- Produces: `SpeechInterval(start_ms, end_ms)` and a persisted speech-only-to-source time mapping; analysis always cites the original audio timeline.
+- Produces: `VoiceActivityDetector.detect(path) -> list[SpeechInterval]` and `SelectiveRefiner.refine(segment_uids) -> list[AlignedTranscriptSegment]`.
 - Produces: `OfflineDiarizationEngine.diarize(path) -> list[SpeakerTurn]`.
 - Produces: `assign_speakers(words, turns) -> list[AlignedTranscriptSegment]`.
 
@@ -172,19 +174,19 @@ Expected: FAIL because columns and diarization modules do not exist.
 
 Backfill `segment_uid = job_file_id || ':' || segment_index` and create a unique index. Embedded `creation_time` overrides browser `File.lastModified`; browser time is stored as `file_modified` but may not resolve relative deadlines. Never substitute upload or analysis time.
 
-- [ ] **Step 4: Implement bounded sherpa-onnx diarization**
+- [ ] **Step 4: Implement bounded VAD-first decoding and sherpa-onnx diarization**
 
-Add `sherpa-onnx>=1.10.28,<2`; install official pyannote INT8 segmentation and Chinese 3D-Speaker embedding models. Decode 30-minute windows with 30-second overlap. Reconcile adjacent labels only when overlap speech exceeds 2 seconds; otherwise allocate a new global speaker label instead of guessing.
+Add `sherpa-onnx>=1.10.28,<2`; install local VAD, official pyannote INT8 segmentation and Chinese 3D-Speaker embedding models. Run VAD first with configurable padding around detected speech. Decode and diarize speech-bearing intervals only, in bounded windows no longer than 30 minutes with 30-second overlap. Preserve a lossless mapping from every compacted speech interval back to its original source offsets. Reconcile adjacent labels only when overlap speech exceeds 2 seconds; otherwise allocate a new global speaker label instead of guessing.
 
-- [ ] **Step 5: Enable Whisper word timestamps and fail-open alignment**
+- [ ] **Step 5: Default to segment timestamps and selectively refine evidence**
 
-Call MLX Whisper with `word_timestamps=True`, convert chunk timestamps to file-relative milliseconds and group adjacent words by assigned speaker. If diarization fails, preserve all text with `speaker_id=null`, record a normalized diagnostic and continue analysis.
+The default fast path calls MLX Whisper only for VAD-confirmed speech and uses sentence/segment timestamps. Convert every result back to file-relative milliseconds before persistence and event analysis. Do not enable full-file word timestamps by default. Only evidence segments selected for high-value conclusions or ambiguous boundaries may be re-decoded with `word_timestamps=True`; refined words must retain the same source-timeline mapping. Diarization runs only on speech-bearing intervals. If VAD fails, fall back to bounded full-audio segment decoding; if diarization or selective refinement fails, preserve all default text with `speaker_id=null` or segment-level timestamps, record a normalized diagnostic and continue analysis.
 
 - [ ] **Step 6: Run five-hour bounded-memory and installer tests**
 
 Run: `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/unit/diarization tests/integration/test_diarization_pipeline.py -q && cd .. && bash tests/install-smoke.sh`
 
-Expected: PASS; synthetic five-hour test never allocates five hours of PCM at once; installer is idempotent.
+Expected: PASS; synthetic five-hour sparse-audio test sends only detected speech plus padding to Whisper, never allocates five hours of PCM at once, preserves original offsets across compacted intervals, and installer is idempotent.
 
 Commit: `git commit -m "feat: add structured speaker-aware transcripts"`
 

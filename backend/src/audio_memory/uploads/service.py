@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,6 +40,9 @@ class UploadedFileView:
     extension: str
     size_bytes: int
     duration_ms: int | None
+    recording_started_at: str | None
+    recording_time_source: str
+    timezone: str | None
     position: int
     upload_progress: int = 100
 
@@ -136,7 +140,14 @@ class UploadService:
             )
         return await self.get_job(job_id) if job_id else None
 
-    async def upload(self, job_id: str, upload: UploadFile) -> UploadedFileView:
+    async def upload(
+        self,
+        job_id: str,
+        upload: UploadFile,
+        *,
+        file_modified: int | None = None,
+        timezone: str | None = None,
+    ) -> UploadedFileView:
         job = await self._get_job(job_id)
         if job.stage != JobStage.UPLOADING.value:
             raise UploadError("This job no longer accepts files", code="job_locked")
@@ -169,6 +180,17 @@ class UploadService:
         position = await self._next_position(job_id)
         probe = await probe_audio(target) if extension in {".mp3", ".aac"} else None
         accepted = supports(extension, probe)
+        recording_started_at = probe.creation_time if probe else None
+        recording_time_source = "embedded" if recording_started_at else "unknown"
+        if recording_started_at is None and file_modified is not None:
+            try:
+                recording_started_at = datetime.fromtimestamp(
+                    file_modified / 1000, UTC
+                ).isoformat(timespec="seconds")
+            except (OSError, OverflowError, ValueError):
+                recording_started_at = None
+            else:
+                recording_time_source = "file_modified"
         record = JobFile(
             id=file_id,
             job_id=job_id,
@@ -178,6 +200,9 @@ class UploadService:
             size_bytes=size,
             sha256=digest.hexdigest(),
             duration_ms=probe.duration_ms if accepted and probe else None,
+            recording_started_at=recording_started_at,
+            recording_time_source=recording_time_source,
+            timezone=timezone,
             position=position,
             temporary_path=str(target),
         )
@@ -332,6 +357,9 @@ class UploadService:
             extension=record.extension,
             size_bytes=record.size_bytes,
             duration_ms=record.duration_ms,
+            recording_started_at=record.recording_started_at,
+            recording_time_source=record.recording_time_source or "unknown",
+            timezone=record.timezone,
             position=record.position,
         )
 
