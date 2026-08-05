@@ -10,6 +10,7 @@ from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.segments import TranscriptSegment
 
 
@@ -97,6 +98,24 @@ async def test_startup_marks_paid_work_interrupted_without_auto_resume(tmp_path:
     assert changed == 2
     assert stages.count(JobStage.INTERRUPTED.value) == 2
     assert stages.count(JobStage.COMPLETED.value) == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resume_clears_stale_eta_samples(tmp_path: Path) -> None:
+    database = Database(tmp_path / "resume-eta.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.INTERRUPTED.value))
+        await session.commit()
+    tracker = TranscriptionEtaTracker()
+    tracker.record(job_id, 300_000, 30)
+    service = TranscriptionService(database, eta_tracker=tracker)
+
+    await service.resume_job(job_id, InterruptOnceEngine())
+
+    assert tracker.estimate_seconds(job_id, 600_000) is None
     await database.dispose()
 
 

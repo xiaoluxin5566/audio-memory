@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, getFeedbackFormState, orderCards } from '../src/store.js'
+import { createInitialState, formatJobEta, getFeedbackFormState, orderCards } from '../src/store.js'
 
 
 test('initial state has six fixed prompt scenes and no persisted content', () => {
@@ -31,4 +31,12 @@ test('feedback details are required only for inaccurate ratings', () => {
     showDetails: true,
     canSubmit: true,
   })
+})
+
+
+test('job ETA copy follows transcription and analysis states', () => {
+  assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'estimating' }), '正在估算剩余时间…')
+  assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 59 }), '预计不到 1 分钟')
+  assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 901 }), '预计还需约 16 分钟')
+  assert.equal(formatJobEta({ stage: 'analyzing' }), '正在生成分析结果…')
 })

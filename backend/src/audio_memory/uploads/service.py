@@ -15,6 +15,7 @@ from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, TempFileManifest, Transcript
 from audio_memory.transcription.segments import progress_percent
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.uploads.cleanup import remove_staged_file
 from audio_memory.uploads.probe import probe_audio, supports
 from audio_memory.api.events import JobEventBroker
@@ -51,6 +52,8 @@ class UploadJobView:
     model_id: str | None
     files: list[UploadedFileView]
     progress_percent: int = 0
+    eta_state: str = "unavailable"
+    eta_seconds: int | None = None
 
 
 class UploadService:
@@ -59,10 +62,12 @@ class UploadService:
         database: Database,
         paths: AppPaths,
         events: JobEventBroker | None = None,
+        eta_tracker: TranscriptionEtaTracker | None = None,
     ) -> None:
         self.database = database
         self.paths = paths
         self.events = events
+        self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
 
     async def create_job(self) -> AnalysisJob:
         job = AnalysisJob(id=str(uuid4()), stage=JobStage.UPLOADING.value)
@@ -94,6 +99,13 @@ class UploadService:
                     or 0
                 )
             total_ms = sum(int(item.duration_ms or 0) for item in file_rows)
+            eta_seconds = None
+            eta_state = "unavailable"
+            if job.stage == JobStage.TRANSCRIBING.value:
+                eta_seconds = self.eta_tracker.estimate_seconds(
+                    job.id, max(0, total_ms - processed_ms)
+                )
+                eta_state = "ready" if eta_seconds is not None else "estimating"
             return UploadJobView(
                 id=job.id,
                 stage=job.stage,
@@ -104,6 +116,8 @@ class UploadService:
                 progress_percent=progress_percent(
                     processed_ms=processed_ms, total_ms=total_ms
                 ),
+                eta_state=eta_state,
+                eta_seconds=eta_seconds,
             )
 
     async def get_active_job(self) -> UploadJobView | None:
@@ -247,6 +261,7 @@ class UploadService:
         return await self.get_job(job_id)
 
     async def cancel_job(self, job_id: str) -> None:
+        self.eta_tracker.clear(job_id)
         async with self.database.session() as session:
             async with session.begin():
                 job = await session.get(AnalysisJob, job_id)

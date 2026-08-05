@@ -18,6 +18,7 @@ from audio_memory.uploads.service import UploadService
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 
 
 class RetryCoordinator:
@@ -65,7 +66,10 @@ async def job_client(tmp_path: Path):
     database = Database(paths.database)
     await database.create_schema()
     app = FastAPI()
-    app.state.upload_service = UploadService(database, paths)
+    app.state.eta_tracker = TranscriptionEtaTracker()
+    app.state.upload_service = UploadService(
+        database, paths, eta_tracker=app.state.eta_tracker
+    )
     app.include_router(router)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -244,3 +248,31 @@ async def test_job_view_reports_real_transcription_progress(job_client):
 
     assert response.status_code == 200
     assert response.json()["progress_percent"] == 25
+    assert response.json()["eta_state"] == "estimating"
+    assert response.json()["eta_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_job_view_reports_dynamic_transcription_eta(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.TRANSCRIBING.value
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="long.mp3", extension=".mp3",
+            size_bytes=100, sha256="c" * 64, duration_ms=1_000_000, position=0,
+            temporary_path="/tmp/long.mp3",
+        ))
+        session.add(Transcript(
+            id=str(uuid4()), job_file_id=file_id, segment_index=0,
+            start_ms=0, end_ms=300_000, text="第一段", words_json="[]",
+        ))
+        await session.commit()
+    client._transport.app.state.eta_tracker.record(job_id, 300_000, 30)
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.json()["eta_state"] == "ready"
+    assert response.json()["eta_seconds"] == 70

@@ -12,6 +12,7 @@ from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,11 @@ class TranscriptionEngine(Protocol):
 
 
 class TranscriptionService:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, eta_tracker: TranscriptionEtaTracker | None = None
+    ) -> None:
         self.database = database
+        self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
 
     async def run_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         files = await self._files(job_id)
@@ -33,17 +37,21 @@ class TranscriptionService:
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
         except asyncio.CancelledError:
+            self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
             raise
         except Exception:
+            self.eta_tracker.clear(job_id)
             logger.exception("Local transcription failed for job %s", job_id)
             await self._set_stage(
                 job_id, JobStage.INTERRUPTED, error_code="transcription_failed"
             )
             raise
+        self.eta_tracker.clear(job_id)
         await self._set_stage(job_id, JobStage.ANALYZING)
 
     async def resume_job(self, job_id: str, engine: TranscriptionEngine) -> None:
+        self.eta_tracker.clear(job_id)
         async with self.database.session() as session:
             job = await session.get(AnalysisJob, job_id)
             if job is None:

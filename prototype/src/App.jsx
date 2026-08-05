@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { SCENES } from './defaults.js';
 import {
   createInitialState,
+  formatJobEta,
   getFeedbackFormState,
   orderCards,
 } from './store.js';
@@ -245,7 +246,7 @@ function JobPanel({ job, onRetry, onCancel }) {
   if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
   if (job.stage === 'failed') return <div className="job-card error"><b>模型分析失败</b><p>已保留完整转写；可修改当前厂商后重新分析，不会再次执行 Whisper。</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>重新分析</button></div></div>;
   const transcribing = job.stage === 'transcribing';
-  return <div className="job-card"><div className="job-title"><b>{transcribing ? '本地 Whisper 转写中' : '模型正在分析内容'}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />Whisper 转写<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />场景分析与结果生成<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
+  return <div className="job-card"><div className="job-title"><b>{transcribing ? '本地 Whisper 转写中' : '模型正在分析内容'}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p><div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />Whisper 转写<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />场景分析与结果生成<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {

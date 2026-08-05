@@ -36,3 +36,12 @@ export function getFeedbackFormState(rating, comment = '') {
     canSubmit: rating === 'accurate' || (showDetails && Boolean(comment.trim())),
   };
 }
+
+export function formatJobEta(job) {
+  if (job.stage === 'analyzing') return '正在生成分析结果…';
+  if (job.eta_state !== 'ready' || job.eta_seconds == null) {
+    return '正在估算剩余时间…';
+  }
+  if (job.eta_seconds < 60) return '预计不到 1 分钟';
+  return `预计还需约 ${Math.ceil(job.eta_seconds / 60)} 分钟`;
+}

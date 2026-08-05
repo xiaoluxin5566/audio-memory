@@ -30,6 +30,7 @@ from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
 from audio_memory.analysis.orchestrator import AnalysisOrchestrator
 from audio_memory.analysis.provider import (
@@ -73,12 +74,18 @@ def create_app(
             await cleanup_abandoned_uploads(database, resolved_paths.staging)
             job_events = JobEventBroker()
             app.state.job_events = job_events
+            eta_tracker = TranscriptionEtaTracker()
+            app.state.eta_tracker = eta_tracker
             app.state.upload_service = UploadService(
-                database, resolved_paths, job_events
+                database, resolved_paths, job_events, eta_tracker=eta_tracker
             )
-            whisper_engine = MLXWhisperEngine(database, resolved_paths)
+            whisper_engine = MLXWhisperEngine(
+                database, resolved_paths, eta_tracker=eta_tracker
+            )
             app.state.whisper_engine = whisper_engine
-            transcription_service = TranscriptionService(database)
+            transcription_service = TranscriptionService(
+                database, eta_tracker=eta_tracker
+            )
             await transcription_service.mark_abandoned_work_interrupted()
             app.state.transcription_service = transcription_service
             app.state.transcription_tasks = {}

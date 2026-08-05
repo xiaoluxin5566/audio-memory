@@ -29,6 +29,8 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
       return route.fulfill({ json: {
         id: 'job-recovery', stage: resumed ? 'transcribing' : 'interrupted',
         progress_percent: resumed ? 19 : 3,
+        eta_state: resumed ? 'estimating' : 'unavailable',
+        eta_seconds: null,
       } })
     }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
@@ -41,5 +43,6 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   await page.getByRole('button', { name: '继续分析' }).click()
   await expect(page.getByText('本地 Whisper 转写中')).toBeVisible()
   await expect(page.locator('.job-title span')).toHaveText('19%')
+  await expect(page.getByText('正在估算剩余时间…')).toBeVisible()
   expect(resumed).toBe(true)
 })

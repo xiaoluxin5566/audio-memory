@@ -5,12 +5,14 @@ from concurrent.futures import ProcessPoolExecutor
 import logging
 from pathlib import Path
 import shutil
+import time
 from uuid import uuid4
 
 from audio_memory.config import AppPaths, WHISPER_MODEL_ID
 from audio_memory.db import Database
 from audio_memory.models import JobFile, TempFileManifest
 from audio_memory.transcription.segments import TranscriptSegment
+from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.uploads.cleanup import assert_staging_path, remove_staged_file
 
 
@@ -75,10 +77,12 @@ class MLXWhisperEngine:
         paths: AppPaths,
         *,
         model_id: str = WHISPER_MODEL_ID,
+        eta_tracker: TranscriptionEtaTracker | None = None,
     ) -> None:
         self.database = database
         self.paths = paths
         self.model_id = model_id
+        self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
         self._executor: ProcessPoolExecutor | None = None
 
     async def transcribe_file(self, file: JobFile, resume_from: int):
@@ -94,16 +98,31 @@ class MLXWhisperEngine:
             for chunk_index, chunk in enumerate(chunks):
                 if (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from:
                     continue
+                started = time.monotonic()
                 raw_segments = await loop.run_in_executor(
                     self._executor, _transcribe_worker, str(chunk), self.model_id,
                 )
+                valid_count = 0
                 for segment in valid_chunk_segments(
                     file_id=file.id, chunk_index=chunk_index,
                     chunk_seconds=WHISPER_CHUNK_SECONDS,
                     raw_segments=raw_segments,
                 ):
                     if segment.index >= resume_from:
+                        valid_count += 1
                         yield segment
+                if valid_count:
+                    audio_ms = min(
+                        WHISPER_CHUNK_SECONDS * 1000,
+                        max(
+                            0,
+                            int(file.duration_ms or 0)
+                            - chunk_index * WHISPER_CHUNK_SECONDS * 1000,
+                        ),
+                    )
+                    self.eta_tracker.record(
+                        file.job_id, audio_ms, time.monotonic() - started
+                    )
         finally:
             safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
             if safe_dir.exists():
