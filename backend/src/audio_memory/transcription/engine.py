@@ -341,9 +341,12 @@ def _normalized_segment_text(text: str) -> str:
 
 
 _NEGATION_MARKERS = frozenset("不未没无非否莫勿别")
-_NUMBER_TOKEN_PATTERN = re.compile(
-    r"\d+(?:[.:]\d+)?|[零〇一二两三四五六七八九十百千万亿]+"
+_PROTECTED_NUMBER_TOKEN_PATTERN = re.compile(
+    r"(?:版本v?|v)?[+-]?(?:\d+(?:[.:/-]\d+)*|\.\d+)%?"
+    r"|[零〇一二两三四五六七八九十百千万亿]+"
 )
+_DATE_TOKEN_PATTERN = re.compile(r"(\d{4})([/\-])(\d{1,2})\2(\d{1,2})")
+_TIME_TOKEN_PATTERN = re.compile(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?")
 _LEADING_FILLERS = ("嗯", "呃", "额", "哦", "唔")
 _TRAILING_PARTICLES = ("啊", "呀", "呢", "吧", "哦", "啦", "嘛", "了")
 _SAFE_TEXT_EQUIVALENCES = (("语句", "句子"),)
@@ -360,7 +363,46 @@ def _safe_utterance_form(text: str) -> str:
     return normalized.replace("已", "")
 
 
+def _lightly_normalized_text(text: str) -> str:
+    return "".join(
+        character.casefold()
+        for character in unicodedata.normalize("NFKC", text)
+        if not character.isspace()
+    )
+
+
+def _normalize_protected_number_token(token: str) -> str:
+    date_match = _DATE_TOKEN_PATTERN.fullmatch(token)
+    if date_match is not None:
+        year, _, month, day = date_match.groups()
+        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+            return f"date:{int(year)}-{int(month)}-{int(day)}"
+
+    time_match = _TIME_TOKEN_PATTERN.fullmatch(token)
+    if time_match is not None:
+        hour, minute, second = time_match.groups()
+        if (
+            0 <= int(hour) <= 23
+            and 0 <= int(minute) <= 59
+            and (second is None or 0 <= int(second) <= 59)
+        ):
+            parts = (hour, minute) if second is None else (hour, minute, second)
+            return "time:" + ":".join(str(int(part)) for part in parts)
+
+    return token
+
+
+def _protected_number_tokens(text: str) -> tuple[str, ...]:
+    lightly_normalized = _lightly_normalized_text(text)
+    return tuple(
+        _normalize_protected_number_token(match.group())
+        for match in _PROTECTED_NUMBER_TOKEN_PATTERN.finditer(lightly_normalized)
+    )
+
+
 def _has_conflicting_protected_tokens(first_text: str, second_text: str) -> bool:
+    first_text = _lightly_normalized_text(first_text)
+    second_text = _lightly_normalized_text(second_text)
     first_negations = tuple(
         character for character in first_text if character in _NEGATION_MARKERS
     )
@@ -369,8 +411,8 @@ def _has_conflicting_protected_tokens(first_text: str, second_text: str) -> bool
     )
     if first_negations != second_negations:
         return True
-    return tuple(_NUMBER_TOKEN_PATTERN.findall(first_text)) != tuple(
-        _NUMBER_TOKEN_PATTERN.findall(second_text)
+    return _protected_number_tokens(first_text) != _protected_number_tokens(
+        second_text
     )
 
 
@@ -396,11 +438,11 @@ def _utterances_are_same(
         return False
     if time_overlap_ms / shorter_duration_ms < 0.3:
         return False
+    if _has_conflicting_protected_tokens(first_text_value, second_text_value):
+        return False
     first_text = _normalized_segment_text(first_text_value)
     second_text = _normalized_segment_text(second_text_value)
     if not first_text or not second_text:
-        return False
-    if _has_conflicting_protected_tokens(first_text, second_text):
         return False
     return _safe_utterance_form(first_text) == _safe_utterance_form(second_text)
 
