@@ -88,3 +88,29 @@ test('failed configuration keeps the visible key until the modal is closed', asy
   await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeHidden()
   expect(calls.some((call) => call.startsWith('DELETE /api/providers/deepseek/candidate/'))).toBe(true)
 })
+
+test('startup validation refreshes automatically without manual revalidation', async ({ page }) => {
+  let providerReads = 0
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/providers') {
+      providerReads += 1
+      return route.fulfill({ json: { providers: [{
+        provider_id: 'deepseek', display_name: 'DeepSeek', active: true,
+        state: providerReads <= 2 ? 'validating' : 'available',
+        last_validated_at: providerReads <= 2 ? null : '2026-08-05T10:00:00Z',
+      }] } })
+    }
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+  await page.goto('/')
+
+  await expect(page.getByText('连接可用', { exact: false })).toBeVisible({ timeout: 5_000 })
+  await expect(page.locator('input[type=file]')).toBeEnabled()
+  expect(providerReads).toBeGreaterThanOrEqual(3)
+})

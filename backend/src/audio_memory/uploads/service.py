@@ -13,7 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, JobFile, TempFileManifest
+from audio_memory.models import AnalysisJob, JobFile, TempFileManifest, Transcript
+from audio_memory.transcription.segments import progress_percent
 from audio_memory.uploads.cleanup import remove_staged_file
 from audio_memory.uploads.probe import probe_audio, supports
 from audio_memory.api.events import JobEventBroker
@@ -49,6 +50,7 @@ class UploadJobView:
     provider_id: str | None
     model_id: str | None
     files: list[UploadedFileView]
+    progress_percent: int = 0
 
 
 class UploadService:
@@ -80,13 +82,28 @@ class UploadService:
                 .where(JobFile.job_id == job_id)
                 .order_by(JobFile.position)
             )
+            file_rows = list(files)
+            processed_ms = 0
+            for item in file_rows:
+                processed_ms += int(
+                    await session.scalar(
+                        select(func.max(Transcript.end_ms)).where(
+                            Transcript.job_file_id == item.id
+                        )
+                    )
+                    or 0
+                )
+            total_ms = sum(int(item.duration_ms or 0) for item in file_rows)
             return UploadJobView(
                 id=job.id,
                 stage=job.stage,
                 error_code=job.error_code,
                 provider_id=job.provider_id,
                 model_id=job.model_id,
-                files=[self._view(item) for item in files],
+                files=[self._view(item) for item in file_rows],
+                progress_percent=progress_percent(
+                    processed_ms=processed_ms, total_ms=total_ms
+                ),
             )
 
     async def get_active_job(self) -> UploadJobView | None:

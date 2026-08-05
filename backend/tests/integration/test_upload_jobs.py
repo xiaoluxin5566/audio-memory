@@ -4,6 +4,7 @@ import subprocess
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from audio_memory.db import Database
 from audio_memory.uploads.service import UploadService
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob
+from audio_memory.models import AnalysisJob, JobFile, Transcript
 
 
 class RetryCoordinator:
@@ -218,3 +219,28 @@ async def test_active_job_endpoint_returns_latest_recoverable_job(job_client):
     assert response.status_code == 200
     assert response.json()["id"] == latest_id
     assert response.json()["stage"] == JobStage.INTERRUPTED.value
+
+
+@pytest.mark.asyncio
+async def test_job_view_reports_real_transcription_progress(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.TRANSCRIBING.value
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="long.mp3", extension=".mp3",
+            size_bytes=100, sha256="b" * 64, duration_ms=1_000_000, position=0,
+            temporary_path="/tmp/long.mp3",
+        ))
+        session.add(Transcript(
+            id=str(uuid4()), job_file_id=file_id, segment_index=0,
+            start_ms=0, end_ms=250_000, text="已完成四分之一", words_json="[]",
+        ))
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["progress_percent"] == 25

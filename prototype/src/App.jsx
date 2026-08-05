@@ -79,7 +79,7 @@ export function App() {
       if (!job) return;
       setState((current) => ({
         ...current,
-        job: { ...job, progress: job.stage === 'analyzing' ? 80 : 5 },
+        job: { ...job, progress: job.stage === 'analyzing' ? 80 : (job.progress_percent ?? 0) },
         upload: {
           files: (job.files ?? []).map((file) => ({
             id: file.id,
@@ -160,11 +160,11 @@ export function App() {
     if (provider?.state !== 'available') { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
     const job = await api.startJob(state.job.id);
-    setState((current) => ({ ...current, job: { ...job, progress: 5 } }));
+    setState((current) => ({ ...current, job: { ...job, progress: job.progress_percent ?? 0 } }));
   }
 
   const onJobUpdate = useCallback((job) => {
-    const progress = job.stage === 'transcribing' ? 45 : job.stage === 'analyzing' ? 80 : 0;
+    const progress = job.stage === 'transcribing' ? (job.progress_percent ?? 0) : job.stage === 'analyzing' ? 80 : 0;
     setState((current) => ({ ...current, job: { ...current.job, ...job, progress } }));
   }, []);
   const onJobComplete = useCallback(async () => {
@@ -181,7 +181,7 @@ export function App() {
       return;
     }
     await api.resumeJob(state.job.id);
-    setState((current) => ({ ...current, job: { ...current.job, stage: 'transcribing', progress: 5 } }));
+    setState((current) => ({ ...current, job: { ...current.job, stage: 'transcribing', progress: 0 } }));
   }
   async function cancelJob() {
     if (state.job?.id) await api.cancelJob(state.job.id);

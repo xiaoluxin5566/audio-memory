@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 from audio_memory.config import AppPaths, WHISPER_MODEL_ID
 from audio_memory.db import Database
 from audio_memory.models import JobFile, TempFileManifest
 from audio_memory.transcription.segments import TranscriptSegment
-from audio_memory.uploads.cleanup import remove_staged_file
+from audio_memory.uploads.cleanup import assert_staging_path, remove_staged_file
+
+
+WHISPER_CHUNK_SECONDS = 300
+CHUNK_SEGMENT_STRIDE = 10_000
 
 
 def _transcribe_worker(audio_path: str, model_id: str) -> list[dict[str, object]]:
@@ -20,6 +25,30 @@ def _transcribe_worker(audio_path: str, model_id: str) -> list[dict[str, object]
     if not isinstance(segments, list):
         raise RuntimeError("Whisper returned an invalid segment list")
     return segments
+
+
+def chunk_segment(*, file_id: str, chunk_index: int, chunk_seconds: int,
+                  local_index: int, raw: dict[str, object]) -> TranscriptSegment:
+    offset_seconds = chunk_index * chunk_seconds
+    words = raw.get("words", [])
+    shifted_words: list[dict[str, object]] = []
+    if isinstance(words, list):
+        for word in words:
+            if not isinstance(word, dict):
+                continue
+            shifted = dict(word)
+            for key in ("start", "end"):
+                if isinstance(shifted.get(key), (int, float)):
+                    shifted[key] = float(shifted[key]) + offset_seconds
+            shifted_words.append(shifted)
+    return TranscriptSegment(
+        file_id=file_id,
+        index=chunk_index * CHUNK_SEGMENT_STRIDE + local_index,
+        start_ms=round((offset_seconds + float(raw.get("start", 0))) * 1000),
+        end_ms=round((offset_seconds + float(raw.get("end", 0))) * 1000),
+        text=str(raw.get("text", "")),
+        words=shifted_words,
+    )
 
 
 class MLXWhisperEngine:
@@ -37,36 +66,32 @@ class MLXWhisperEngine:
 
     async def transcribe_file(self, file: JobFile, resume_from: int):
         source = Path(file.temporary_path)
-        normalized = source.with_name(f"{file.id}.normalized.wav")
+        chunk_dir = source.with_name(f"{file.id}.whisper-chunks")
         manifest_id = str(uuid4())
-        await self._register(file.job_id, manifest_id, normalized)
+        await self._register(file.job_id, manifest_id, chunk_dir)
         try:
-            await self._normalize(source, normalized)
+            chunks = await self._normalize_to_chunks(source, chunk_dir)
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
-            raw_segments = await loop.run_in_executor(
-                self._executor,
-                _transcribe_worker,
-                str(normalized),
-                self.model_id,
-            )
-            for index, raw in enumerate(raw_segments):
-                if index < resume_from:
+            for chunk_index, chunk in enumerate(chunks):
+                if (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from:
                     continue
-                start_ms = round(float(raw.get("start", 0)) * 1000)
-                end_ms = round(float(raw.get("end", 0)) * 1000)
-                words = raw.get("words", [])
-                yield TranscriptSegment(
-                    file_id=file.id,
-                    index=index,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    text=str(raw.get("text", "")),
-                    words=words if isinstance(words, list) else [],
+                raw_segments = await loop.run_in_executor(
+                    self._executor, _transcribe_worker, str(chunk), self.model_id,
                 )
+                for local_index, raw in enumerate(raw_segments):
+                    segment = chunk_segment(
+                        file_id=file.id, chunk_index=chunk_index,
+                        chunk_seconds=WHISPER_CHUNK_SECONDS,
+                        local_index=local_index, raw=raw,
+                    )
+                    if segment.index >= resume_from:
+                        yield segment
         finally:
-            remove_staged_file(normalized, self.paths.staging)
+            safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
+            if safe_dir.exists():
+                shutil.rmtree(safe_dir)
             await self._remove_manifest(manifest_id)
 
     async def close(self) -> None:
@@ -99,6 +124,28 @@ class MLXWhisperEngine:
                 f"Audio normalization failed ({process.returncode}): "
                 f"{stderr.decode('utf-8', errors='replace')[-200:]}"
             )
+
+    @staticmethod
+    async def _normalize_to_chunks(source: Path, target_dir: Path) -> list[Path]:
+        target_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
+        pattern = target_dir / "chunk-%05d.wav"
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-loglevel", "error", "-i", str(source),
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+            "-f", "segment", "-segment_time", str(WHISPER_CHUNK_SECONDS),
+            "-reset_timestamps", "1", "-y", str(pattern),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Audio chunking failed ({process.returncode}): "
+                f"{stderr.decode('utf-8', errors='replace')[-200:]}"
+            )
+        chunks = sorted(target_dir.glob("chunk-*.wav"))
+        if not chunks:
+            raise RuntimeError("Audio chunking produced no output")
+        return chunks
 
     async def _register(self, job_id: str, manifest_id: str, path: Path) -> None:
         async with self.database.session() as session:

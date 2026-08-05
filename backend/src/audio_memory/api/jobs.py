@@ -31,6 +31,7 @@ class JobView(BaseModel):
     provider_id: str | None = None
     model_id: str | None = None
     files: list[FileView] = PydanticField(default_factory=list)
+    progress_percent: int = 0
 
 
 def service_from(request: Request) -> UploadService:
