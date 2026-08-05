@@ -118,6 +118,9 @@ class Batch(Base):
     )
     provider_id: Mapped[str | None] = mapped_column(String(32))
     model_id: Mapped[str | None] = mapped_column(String(120))
+    current_analysis_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="RESTRICT")
+    )
     uploaded_at: Mapped[str] = mapped_column(String(40), default=utc_now, index=True)
     natural_date: Mapped[str] = mapped_column(String(10), nullable=False)
 
@@ -128,6 +131,9 @@ class Card(Base):
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     batch_id: Mapped[str] = mapped_column(
         ForeignKey("batches.id", ondelete="CASCADE"), index=True
+    )
+    analysis_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="CASCADE"), index=True
     )
     scene_id: Mapped[str] = mapped_column(String(40), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -143,6 +149,22 @@ class Todo(Base):
     )
     source_card_id: Mapped[str | None] = mapped_column(
         ForeignKey("cards.id", ondelete="SET NULL")
+    )
+    analysis_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="SET NULL"), index=True
+    )
+    source_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE")
+    )
+    source_event_id: Mapped[str | None] = mapped_column(String(80))
+    evidence_segment_ids_json: Mapped[str | None] = mapped_column(Text)
+    normalized_action: Mapped[str | None] = mapped_column(Text)
+    normalized_object: Mapped[str | None] = mapped_column(Text)
+    normalized_assignee: Mapped[str | None] = mapped_column(Text)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
+    user_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    completion_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="model"
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     due_at: Mapped[str | None] = mapped_column(String(40))
@@ -161,6 +183,150 @@ class QAMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+
+
+class ReanalysisBatch(Base):
+    __tablename__ = "reanalysis_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(48), nullable=False)
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    credential_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    profile_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    fixed_rules_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(40), default=utc_now, onupdate=utc_now
+    )
+    completed_at: Mapped[str | None] = mapped_column(String(40))
+
+
+class AnalysisVersion(Base):
+    __tablename__ = "analysis_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_job_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_jobs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("batches.id", ondelete="CASCADE"), index=True
+    )
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    credential_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    profile_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    fixed_rules_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    event_map_json: Mapped[str | None] = mapped_column(Text)
+    event_map_hash: Mapped[str | None] = mapped_column(String(64))
+    staged_results_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    reanalysis_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("reanalysis_batches.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+    completed_at: Mapped[str | None] = mapped_column(String(40))
+
+
+Index(
+    "uq_analysis_versions_running_source_job",
+    AnalysisVersion.source_job_id,
+    unique=True,
+    sqlite_where=AnalysisVersion.status == "running",
+)
+
+
+class TodoCandidate(Base):
+    __tablename__ = "todo_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_version_id",
+            "source_fingerprint",
+            name="uq_todo_candidate_version_fingerprint",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    analysis_version_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_job_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    source_event_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    evidence_segment_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_action: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_object: Mapped[str | None] = mapped_column(Text)
+    normalized_assignee: Mapped[str | None] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    due_at: Mapped[str | None] = mapped_column(String(40))
+    source_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class TodoTombstone(Base):
+    __tablename__ = "todo_tombstones"
+
+    source_fingerprint: Mapped[str] = mapped_column(String(128), primary_key=True)
+    deleted_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+
+
+class ProfileCandidate(Base):
+    __tablename__ = "profile_candidates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    analysis_version_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    subject_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    dimension: Mapped[str] = mapped_column(String(80), nullable=False)
+    value_json: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence_segment_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class ReanalysisItem(Base):
+    __tablename__ = "reanalysis_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "reanalysis_batch_id",
+            "source_batch_id",
+            name="uq_reanalysis_item_source_batch",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reanalysis_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("reanalysis_batches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("batches.id", ondelete="CASCADE"), nullable=False
+    )
+    analysis_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_versions.id", ondelete="SET NULL")
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(40), default=utc_now, onupdate=utc_now
+    )
+    completed_at: Mapped[str | None] = mapped_column(String(40))
 
 
 class ProfileFact(Base):

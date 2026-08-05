@@ -1,4 +1,5 @@
 import sqlite3
+from json import loads
 from pathlib import Path
 
 import pytest
@@ -6,8 +7,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.exc import IntegrityError
 
+from audio_memory.analysis.versions import AnalysisSnapshot, require_card_version
 from audio_memory.db import Database, run_migrations
-from audio_memory.models import ProviderMetadata
+from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, ProviderMetadata
+from audio_memory.repositories import AnalysisVersionRepository
 
 
 def migration_config(database_path: Path) -> Config:
@@ -136,6 +139,56 @@ def test_structured_transcript_segment_uid_is_unique(tmp_path: Path) -> None:
             )
 
 
+def test_analysis_version_source_and_running_attempt_constraints(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "analysis-version-constraints.sqlite3"
+    run_migrations(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]: row for row in connection.execute(
+                "PRAGMA table_info(analysis_versions)"
+            )
+        }
+        assert columns["source_job_id"][3] == 1
+        assert columns["batch_id"][3] == 0
+
+        connection.execute(
+            "INSERT INTO analysis_jobs "
+            "(id, stage, prompt_snapshot_json, staged_results_json, created_at, updated_at) "
+            "VALUES ('job-running', 'analyzing', '{}', '[]', 'now', 'now')"
+        )
+        values = (
+            "job-running",
+            "kimi",
+            "moonshot-v1",
+            "{}",
+            "[]",
+            "",
+            "[]",
+            "running",
+            "now",
+        )
+        connection.execute(
+            "INSERT INTO analysis_versions "
+            "(id, source_job_id, provider_id, model_id, credential_generation, "
+            "prompt_snapshot_json, profile_snapshot_json, fixed_rules_hash, "
+            "staged_results_json, status, created_at) "
+            "VALUES ('version-running-1', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            values,
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO analysis_versions "
+                "(id, source_job_id, provider_id, model_id, credential_generation, "
+                "prompt_snapshot_json, profile_snapshot_json, fixed_rules_hash, "
+                "staged_results_json, status, created_at) "
+                "VALUES ('version-running-2', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+
+
 @pytest.mark.asyncio
 async def test_only_one_provider_can_be_active(tmp_path: Path) -> None:
     database = Database(tmp_path / "active.sqlite3")
@@ -151,5 +204,289 @@ async def test_only_one_provider_can_be_active(tmp_path: Path) -> None:
             )
             with pytest.raises(IntegrityError):
                 await session.commit()
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_analysis_attempt_persists_an_immutable_snapshot(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "analysis-attempt.sqlite3")
+    await database.create_schema()
+    repository = AnalysisVersionRepository(database)
+    snapshot = AnalysisSnapshot(
+        provider_id="kimi",
+        model_id="moonshot-v1",
+        credential_generation=7,
+        prompt_snapshot={"meeting": {"version": 3, "content": "新 Prompt"}},
+        profile_snapshot=[{"subject_id": "user", "dimension": "interest"}],
+        fixed_rules_hash="f" * 64,
+    )
+
+    try:
+        async with database.session() as session:
+            session.add(AnalysisJob(id="job-attempt", stage="analyzing"))
+            await session.commit()
+
+        version = await repository.create_attempt(
+            source_job_id="job-attempt",
+            batch_id=None,
+            snapshot=snapshot,
+            reanalysis_batch_id=None,
+        )
+
+        assert version.source_job_id == "job-attempt"
+        assert version.batch_id is None
+        assert version.status == "running"
+        assert version.provider_id == "kimi"
+        assert version.model_id == "moonshot-v1"
+        assert version.credential_generation == 7
+        assert loads(version.prompt_snapshot_json) == snapshot.prompt_snapshot
+        assert loads(version.profile_snapshot_json) == snapshot.profile_snapshot
+        assert version.fixed_rules_hash == "f" * 64
+        assert loads(version.staged_results_json) == {}
+        assert version.completed_at is None
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_analysis_attempt_rejects_empty_source_job_id(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "empty-source.sqlite3")
+    await database.create_schema()
+    repository = AnalysisVersionRepository(database)
+    snapshot = AnalysisSnapshot(
+        provider_id="kimi",
+        model_id="moonshot-v1",
+        credential_generation=0,
+        prompt_snapshot={},
+        profile_snapshot=[],
+        fixed_rules_hash="f" * 64,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="source_job_id"):
+            await repository.create_attempt(
+                source_job_id="",
+                batch_id=None,
+                snapshot=snapshot,
+                reanalysis_batch_id=None,
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_analysis_attempt_allows_only_one_running_per_source_job(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "one-running.sqlite3")
+    await database.create_schema()
+    repository = AnalysisVersionRepository(database)
+    snapshot = AnalysisSnapshot(
+        provider_id="kimi",
+        model_id="moonshot-v1",
+        credential_generation=0,
+        prompt_snapshot={},
+        profile_snapshot=[],
+        fixed_rules_hash="f" * 64,
+    )
+
+    try:
+        async with database.session() as session:
+            session.add(AnalysisJob(id="job-one-running", stage="analyzing"))
+            await session.commit()
+        await repository.create_attempt(
+            source_job_id="job-one-running",
+            batch_id=None,
+            snapshot=snapshot,
+            reanalysis_batch_id=None,
+        )
+
+        with pytest.raises(IntegrityError):
+            await repository.create_attempt(
+                source_job_id="job-one-running",
+                batch_id=None,
+                snapshot=snapshot,
+                reanalysis_batch_id=None,
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mark_current_requires_completed_version_from_target_batch(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "mark-current.sqlite3")
+    await database.create_schema()
+    repository = AnalysisVersionRepository(database)
+
+    try:
+        async with database.session() as session:
+            session.add_all(
+                [
+                    AnalysisJob(id="job-target", stage="completed"),
+                    AnalysisJob(id="job-other", stage="completed"),
+                ]
+            )
+            await session.commit()
+            session.add_all(
+                [
+                    Batch(
+                        id="batch-target",
+                        job_id="job-target",
+                        natural_date="2026-08-05",
+                    ),
+                    Batch(
+                        id="batch-other",
+                        job_id="job-other",
+                        natural_date="2026-08-04",
+                    ),
+                ]
+            )
+            await session.commit()
+            session.add_all(
+                [
+                    AnalysisVersion(
+                        id="version-running",
+                        source_job_id="job-target",
+                        batch_id="batch-target",
+                        provider_id="kimi",
+                        model_id="moonshot-v1",
+                        credential_generation=0,
+                        prompt_snapshot_json="{}",
+                        profile_snapshot_json="[]",
+                        fixed_rules_hash="",
+                        staged_results_json="{}",
+                        status="running",
+                    ),
+                    AnalysisVersion(
+                        id="version-other",
+                        source_job_id="job-other",
+                        batch_id="batch-other",
+                        provider_id="kimi",
+                        model_id="moonshot-v1",
+                        credential_generation=0,
+                        prompt_snapshot_json="{}",
+                        profile_snapshot_json="[]",
+                        fixed_rules_hash="",
+                        staged_results_json="{}",
+                        status="completed",
+                    ),
+                    AnalysisVersion(
+                        id="version-completed",
+                        source_job_id="job-target",
+                        batch_id="batch-target",
+                        provider_id="kimi",
+                        model_id="moonshot-v1",
+                        credential_generation=0,
+                        prompt_snapshot_json="{}",
+                        profile_snapshot_json="[]",
+                        fixed_rules_hash="",
+                        staged_results_json="{}",
+                        status="completed",
+                    ),
+                ]
+            )
+            await session.commit()
+
+        with pytest.raises(ValueError, match="completed"):
+            await repository.mark_current(
+                batch_id="batch-target", version_id="version-running"
+            )
+        with pytest.raises(ValueError, match="belong"):
+            await repository.mark_current(
+                batch_id="batch-target", version_id="version-other"
+            )
+        assert await repository.current_for_batch("batch-target") is None
+
+        await repository.mark_current(
+            batch_id="batch-target", version_id="version-completed"
+        )
+
+        current = await repository.current_for_batch("batch-target")
+        assert current is not None
+        assert current.id == "version-completed"
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_versioned_card_writes_require_version_from_expected_batch(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "card-version-validation.sqlite3")
+    await database.create_schema()
+
+    try:
+        async with database.session() as session:
+            session.add_all(
+                [
+                    AnalysisJob(id="job-card-target", stage="completed"),
+                    AnalysisJob(id="job-card-other", stage="completed"),
+                ]
+            )
+            await session.commit()
+            session.add_all(
+                [
+                    Batch(
+                        id="batch-card-target",
+                        job_id="job-card-target",
+                        natural_date="2026-08-05",
+                    ),
+                    Batch(
+                        id="batch-card-other",
+                        job_id="job-card-other",
+                        natural_date="2026-08-04",
+                    ),
+                ]
+            )
+            await session.commit()
+            session.add(
+                AnalysisVersion(
+                    id="version-card-other",
+                    source_job_id="job-card-other",
+                    batch_id="batch-card-other",
+                    provider_id="kimi",
+                    model_id="moonshot-v1",
+                    credential_generation=0,
+                    prompt_snapshot_json="{}",
+                    profile_snapshot_json="[]",
+                    fixed_rules_hash="",
+                    staged_results_json="{}",
+                    status="completed",
+                )
+            )
+            await session.commit()
+
+        with pytest.raises(ValueError, match="required"):
+            await require_card_version(
+                database,
+                version_id=None,
+                expected_batch_id="batch-card-target",
+            )
+        with pytest.raises(LookupError, match="Unknown analysis version"):
+            await require_card_version(
+                database,
+                version_id="version-card-missing",
+                expected_batch_id="batch-card-target",
+            )
+        with pytest.raises(ValueError, match="expected batch"):
+            await require_card_version(
+                database,
+                version_id="version-card-other",
+                expected_batch_id="batch-card-target",
+            )
+
+        validated = await require_card_version(
+            database,
+            version_id="version-card-other",
+            expected_batch_id="batch-card-other",
+        )
+        assert validated.id == "version-card-other"
     finally:
         await database.dispose()
