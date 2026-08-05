@@ -6,8 +6,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import httpx
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from audio_memory import __version__
 from audio_memory.config import AppPaths, assert_supported_platform
@@ -42,8 +44,15 @@ from audio_memory.content.feedback import FeedbackWriter
 from audio_memory.content.clear import HistoryCleaner
 
 
-def create_app(*, paths: AppPaths | None = None) -> FastAPI:
+def create_app(
+    *,
+    paths: AppPaths | None = None,
+    frontend_dir: Path | None = None,
+) -> FastAPI:
     resolved_paths = paths or AppPaths.from_home(Path.home())
+    resolved_frontend = frontend_dir or (
+        Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -153,6 +162,17 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
             "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
             "architecture": platform.machine(),
         }
+
+    if resolved_frontend.is_dir() and (resolved_frontend / "index.html").is_file():
+        assets = resolved_frontend / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="frontend-assets")
+
+        @app.get("/{frontend_path:path}", include_in_schema=False)
+        async def frontend(frontend_path: str) -> FileResponse:
+            if frontend_path not in {"", "history", "settings/prompts"}:
+                raise HTTPException(status_code=404, detail="Not found")
+            return FileResponse(resolved_frontend / "index.html")
 
     return app
 
