@@ -152,7 +152,7 @@ Commit: `git commit -m "feat: add local backend runtime foundation"`
 - Produces tables: `provider_metadata`, `analysis_jobs`, `job_files`, `transcripts`, `batches`, `cards`, `todos`, `qa_messages`, `profile_facts`, `prompt_versions`, `temp_file_manifest`, `feedback_index`.
 - `analysis_jobs.stage`: `uploading | transcribing | analyzing | ready_to_commit | completed | failed | interrupted | cancelled`.
 
-- [ ] **Step 1: Write migration and invariant tests**
+- [x] **Step 1: Write migration and invariant tests**
 
 ```python
 async def test_only_one_provider_can_be_active(session):
@@ -169,21 +169,21 @@ async def test_uncommitted_batch_is_absent_from_feed(session, repository):
     assert await repository.list_feed_batches() == []
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `cd backend && uv run pytest tests/integration/test_database_schema.py tests/integration/test_atomic_batch_commit.py -v`
 
 Expected: FAIL because models and migrations do not exist.
 
-- [ ] **Step 3: Implement schema and indexes**
+- [x] **Step 3: Implement schema and indexes**
 
 Use UUID text primary keys, UTC ISO timestamps, foreign keys with explicit delete behavior, `UNIQUE(provider_id)`, and a SQLite partial unique index ensuring at most one `active = 1`. Store JSON payloads as text validated through Pydantic before write; never store API Keys.
 
-- [ ] **Step 4: Implement atomic publication transaction**
+- [x] **Step 4: Implement atomic publication transaction**
 
 `publish_batch(job_id)` must insert the batch, audio history, cards, todos, QA roots and profile deltas, mark the job completed, and expose the batch to feed queries within one SQLite transaction. Any failure rolls back every formal row.
 
-- [ ] **Step 5: Run migration twice, test rollback and commit**
+- [x] **Step 5: Run migration twice, test rollback and commit**
 
 Run: `cd backend && uv run alembic upgrade head && uv run alembic upgrade head && uv run pytest tests/integration/test_database_schema.py tests/integration/test_atomic_batch_commit.py -v`
 

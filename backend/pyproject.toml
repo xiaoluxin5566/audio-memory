@@ -14,6 +14,7 @@ dependencies = [
 database = [
   "aiosqlite>=0.21,<1",
   "alembic>=1.16,<2",
+  "greenlet>=3.2,<4",
   "sqlalchemy>=2.0,<3",
 ]
 macos = [
@@ -40,4 +41,3 @@ packages = ["src/audio_memory"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-

@@ -26,3 +26,15 @@ async def test_health_is_ready_after_application_startup(tmp_path: Path) -> None
         "platform": "macOS",
         "architecture": "arm64",
     }
+
+
+@pytest.mark.asyncio
+async def test_startup_migrates_and_opens_the_local_database(tmp_path: Path) -> None:
+    paths = AppPaths.from_home(tmp_path)
+    app = create_app(paths=paths)
+
+    async with app.router.lifespan_context(app):
+        assert paths.database.is_file()
+        assert app.state.database.path == paths.database
+
+    assert app.state.database.engine.sync_engine.pool.checkedout() == 0
