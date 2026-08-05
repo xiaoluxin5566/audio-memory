@@ -6,6 +6,7 @@ import pytest
 from audio_memory.providers.types import ValidationErrorCode
 from audio_memory.providers.validation import ProviderValidationService
 from audio_memory.providers.adapters.openai import OpenAIAdapter
+from audio_memory.providers.adapters.deepseek import DeepSeekAdapter
 from audio_memory.providers.types import PROVIDER_CONFIGS
 
 
@@ -87,3 +88,12 @@ def test_openai_responses_adapter_uses_small_non_stored_request() -> None:
         "store": False,
     }
     assert adapter.extract_text({"output_text": "OK"}) == "OK"
+
+
+def test_deepseek_validation_disables_thinking_for_short_protocol_response() -> None:
+    adapter = DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"])
+
+    payload = adapter.validation_payload()
+
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["max_tokens"] >= 8
