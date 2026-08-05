@@ -2,6 +2,8 @@
 .DS_Store
 prototype/node_modules/
 prototype/dist/
+prototype/test-results/
+prototype/playwright-report/
 backend/.venv/
 backend/.pytest_cache/
 backend/.uv-cache/

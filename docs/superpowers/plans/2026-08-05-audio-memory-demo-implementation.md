@@ -519,7 +519,7 @@ Commit: `git commit -m "feat: add persistent content and feedback APIs"`
 - Browser state is a projection of backend responses; localStorage may keep only non-authoritative UI preferences such as last route.
 - Existing routes remain `/`, `/history`, `/settings/prompts` in one tab.
 
-- [ ] **Step 1: Add API contract fixtures and failing reducer tests**
+- [x] **Step 1: Add API contract fixtures and failing reducer tests**
 
 Cover provider `initializing/keychain_unavailable/rate_limited`, candidate session cancellation, upload pause, transcription/analysis progress, interrupted recovery, completed publication, detail QA, feedback modal and clear-history reset.
 
@@ -527,15 +527,15 @@ Cover provider `initializing/keychain_unavailable/rate_limited`, candidate sessi
 
 Move responsibilities into focused pages/components while preserving existing classes, spacing, typography, card anatomy, detail overlay, feedback modal and navigation. Do not import old `designs/` review frames.
 
-- [ ] **Step 3: Replace simulation with backend state**
+- [x] **Step 3: Replace simulation with backend state**
 
 Use `/api/providers`, job APIs/SSE, feed/history/Prompt APIs and content mutations. The right feed retains its prior content during upload/transcription/analysis and refreshes only after a completed publication event.
 
-- [ ] **Step 4: Implement all frozen provider interactions**
+- [x] **Step 4: Implement all frozen provider interactions**
 
 Use one modal session UUID per open. Keep candidate Key only in component memory; abort the request on close; never store or echo masked Key. Implement cooldown with a monotonic client countdown and refresh providers when it reaches zero.
 
-- [ ] **Step 5: Run frontend tests, build and visual QA**
+- [x] **Step 5: Run frontend tests, build and visual QA**
 
 Run: `cd prototype && node --test tests/*.test.mjs && npm run build && npm run test:sites`
 
@@ -561,23 +561,23 @@ Commit: `git commit -m "feat: connect product UI to local backend"`
 - `./scripts/start.sh` starts one local service and prints/opens its localhost URL.
 - `./scripts/doctor.sh` performs read-only checks and prints copyable fixes.
 
-- [ ] **Step 1: Write installer smoke assertions**
+- [x] **Step 1: Write installer smoke assertions**
 
 Check Darwin/arm64 rejection messages, paths containing spaces, idempotent second install, missing ffmpeg, unavailable model files, occupied port, existing healthy service and nonzero exit on fatal dependency failure.
 
-- [ ] **Step 2: Implement deterministic install**
+- [x] **Step 2: Implement deterministic install**
 
 Use `uv` to install pinned Python 3.12 dependencies into the application directory, `npm ci` for the frontend, `npm run build`, ffmpeg presence verification and an explicit MLX model download with checksum/manifest. Do not modify shell profile files.
 
-- [ ] **Step 3: Serve built frontend from FastAPI**
+- [x] **Step 3: Serve built frontend from FastAPI**
 
 Serve Vite assets and return `index.html` for `/`, `/history`, `/settings/prompts`; keep `/api/*` separate. Bind only to `127.0.0.1`, choose a configured fixed port, and require the kernel instance lock before listening.
 
-- [ ] **Step 4: Implement doctor output**
+- [x] **Step 4: Implement doctor output**
 
 Report platform, free disk, Python/Node/ffmpeg, MLX model, writable Application Support, Keychain accessibility, SQLite migration, current backend health and last normalized error. Never print Keychain data or raw provider responses.
 
-- [ ] **Step 5: Test clean install and commit**
+- [x] **Step 5: Test clean install and commit**
 
 Run: `bash tests/install-smoke.sh && cd backend && uv run pytest tests/integration/test_static_routes.py -v`
 
