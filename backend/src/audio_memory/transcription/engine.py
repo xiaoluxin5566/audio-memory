@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 import json
 import logging
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -339,6 +340,40 @@ def _normalized_segment_text(text: str) -> str:
     )
 
 
+_NEGATION_MARKERS = frozenset("不未没无非否莫勿别")
+_NUMBER_TOKEN_PATTERN = re.compile(
+    r"\d+(?:[.:]\d+)?|[零〇一二两三四五六七八九十百千万亿]+"
+)
+_LEADING_FILLERS = ("嗯", "呃", "额", "哦", "唔")
+_TRAILING_PARTICLES = ("啊", "呀", "呢", "吧", "哦", "啦", "嘛", "了")
+_SAFE_TEXT_EQUIVALENCES = (("语句", "句子"),)
+
+
+def _safe_utterance_form(text: str) -> str:
+    normalized = _normalized_segment_text(text)
+    for variant, canonical in _SAFE_TEXT_EQUIVALENCES:
+        normalized = normalized.replace(variant, canonical)
+    while normalized.startswith(_LEADING_FILLERS):
+        normalized = normalized[1:]
+    while normalized.endswith(_TRAILING_PARTICLES):
+        normalized = normalized[:-1]
+    return normalized.replace("已", "")
+
+
+def _has_conflicting_protected_tokens(first_text: str, second_text: str) -> bool:
+    first_negations = tuple(
+        character for character in first_text if character in _NEGATION_MARKERS
+    )
+    second_negations = tuple(
+        character for character in second_text if character in _NEGATION_MARKERS
+    )
+    if first_negations != second_negations:
+        return True
+    return tuple(_NUMBER_TOKEN_PATTERN.findall(first_text)) != tuple(
+        _NUMBER_TOKEN_PATTERN.findall(second_text)
+    )
+
+
 def _utterances_are_same(
     first_start_ms: int,
     first_end_ms: int,
@@ -365,13 +400,9 @@ def _utterances_are_same(
     second_text = _normalized_segment_text(second_text_value)
     if not first_text or not second_text:
         return False
-    if first_text == second_text:
-        return True
-    if min(len(first_text), len(second_text)) >= 3 and (
-        first_text in second_text or second_text in first_text
-    ):
-        return True
-    return SequenceMatcher(None, first_text, second_text).ratio() >= 0.72
+    if _has_conflicting_protected_tokens(first_text, second_text):
+        return False
+    return _safe_utterance_form(first_text) == _safe_utterance_form(second_text)
 
 
 def _segments_are_same_utterance(
@@ -464,7 +495,7 @@ def reconcile_boundary_segments(
         if index not in matched_current
     )
     finalized.extend(selected)
-    finalized.sort(key=lambda item: (item.start_ms, item.end_ms, item.index))
+    finalized.sort(key=lambda item: (item.index, item.start_ms, item.end_ms))
     return finalized, remaining
 
 

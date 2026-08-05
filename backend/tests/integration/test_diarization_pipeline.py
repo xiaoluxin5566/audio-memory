@@ -688,6 +688,118 @@ async def test_checkpoint_resume_after_partial_second_speech_interval(
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+        index = int(Path(path).stem.split("-")[-1])
+        if index == 0:
+            return {
+                "segments": [
+                    {
+                        "start": 1784.8,
+                        "end": 1786.8,
+                        "text": "前窗后句记录完成",
+                    }
+                ]
+            }
+        return {
+            "segments": [
+                {"start": 14.0, "end": 15.0, "text": "后窗前句转入讨论"}
+            ]
+        }
+
+    class LongSpeechVad:
+        def detect(self, _path):
+            return [SpeechInterval(0, 1_810_000)]
+
+    class NoSpeakerDiarizer:
+        def diarize(self, _path):
+            return []
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe))
+    paths = AppPaths.from_home(tmp_path)
+    paths.ensure_directories()
+    database = Database(paths.database)
+    await database.create_schema()
+    source_dir = paths.staging / "job-1"
+    source_dir.mkdir()
+    source = source_dir / "source.mp3"
+    source.write_bytes(b"reverse boundary checkpoint audio")
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=33,
+                sha256="e" * 64,
+                duration_ms=1_810_000,
+                position=0,
+                temporary_path=str(source),
+            )
+        )
+        await session.commit()
+
+    engine = MLXWhisperEngine(
+        database,
+        paths,
+        voice_activity_detector=LongSpeechVad(),
+        diarization_engine=NoSpeakerDiarizer(),
+        speech_padding_ms=0,
+    )
+    engine._executor = ThreadPoolExecutor(max_workers=1)
+
+    async def extract_speech(_source, target_dir, intervals):
+        target_dir.mkdir()
+        clips = []
+        for index, _interval in enumerate(intervals):
+            clip = target_dir / f"speech-{index:05d}.wav"
+            clip.write_bytes(b"pcm")
+            clips.append(clip)
+        return clips
+
+    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+
+    class InterruptBetweenBoundarySegments:
+        async def transcribe_file(self, file, resume_from):
+            stream = engine.transcribe_file(file, resume_from)
+            emitted = 0
+            try:
+                async for segment in stream:
+                    yield segment
+                    emitted += 1
+                    if emitted == 1:
+                        raise RuntimeError("simulated boundary interruption")
+            finally:
+                await stream.aclose()
+
+    service = TranscriptionService(database)
+    with pytest.raises(RuntimeError, match="simulated boundary interruption"):
+        await service.run_job("job-1", InterruptBetweenBoundarySegments())
+
+    await service.resume_job("job-1", engine)
+
+    async with database.session() as session:
+        rows = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert [item.segment_uid for item in rows] == ["file-1:0", "file-1:10000"]
+    assert len({item.segment_uid for item in rows}) == 2
+    assert [(item.start_ms, item.end_ms, item.text) for item in rows] == [
+        (1_784_800, 1_786_800, "前窗后句记录完成"),
+        (1_784_000, 1_785_000, "后窗前句转入讨论"),
+    ]
+
+    await engine.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_whisper_pipeline_continues_when_vad_fails(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:

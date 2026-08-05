@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from audio_memory.diarization.alignment import Word, assign_speakers
 from audio_memory.diarization.engine import (
     OfflineDiarizationEngine,
@@ -93,6 +95,56 @@ def test_boundary_keeps_genuinely_different_adjacent_sentences() -> None:
     )
 
     assert [item.text for item in finalized] == ["第一句到这里", "接着说第二句"]
+
+
+@pytest.mark.parametrize(
+    ("previous_text", "current_text"),
+    [
+        ("项目已完成", "项目未完成"),
+        ("他不会参加", "他会参加"),
+        ("预算是100万", "预算是200万"),
+        ("会议8月5日10点", "会议8月6日11点"),
+        ("项目由腾讯团队负责", "项目由阿里团队负责"),
+    ],
+)
+def test_boundary_preserves_semantic_conflicts(
+    previous_text: str,
+    current_text: str,
+) -> None:
+    finalized, remaining = reconcile_boundary_segments(
+        [boundary_segment(0, 1_784_000, 1_786_000, previous_text)],
+        [boundary_segment(10_000, 1_784_500, 1_786_500, current_text)],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert [item.text for item in finalized] == [previous_text, current_text]
+    assert remaining == []
+
+
+@pytest.mark.parametrize(
+    ("previous_text", "current_text"),
+    [
+        ("项目已经完成。", "项目已经完成"),
+        ("项目已经完成", "嗯，项目已经完成了"),
+        ("重叠句子", "重叠语句"),
+    ],
+)
+def test_boundary_merges_only_safe_text_variations(
+    previous_text: str,
+    current_text: str,
+) -> None:
+    finalized, remaining = reconcile_boundary_segments(
+        [boundary_segment(0, 1_784_000, 1_786_000, previous_text)],
+        [boundary_segment(10_000, 1_784_500, 1_786_500, current_text)],
+        overlap=SpeechInterval(1_770_000, 1_800_000),
+        previous_ownership=SpeechInterval(0, 1_785_000),
+        current_ownership=SpeechInterval(1_785_000, 1_810_000),
+    )
+
+    assert len(finalized) == 1
+    assert remaining == []
 
 
 def test_sixty_one_minutes_use_bounded_overlapping_processing_windows() -> None:
