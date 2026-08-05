@@ -1,5 +1,7 @@
 # Audio Memory 六场景 Prompt 系统 Implementation Plan
 
+> **执行状态：已并入主计划。** 本文件保留早期六场景技术细节；实际开发顺序、分析版本、历史重分析和 PRD V1.1 决策以 `docs/superpowers/plans/2026-08-05-prd-v1-1-implementation.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将带时间与说话人的转写先转换为共享事件地图，再由同一厂商按六套固定 Schema 生成可直接发布、可追溯且不串事件的高质量卡片。

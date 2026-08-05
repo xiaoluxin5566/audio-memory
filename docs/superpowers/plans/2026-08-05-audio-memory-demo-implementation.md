@@ -1,5 +1,7 @@
 # Audio Memory 第一阶段真实 Demo Implementation Plan
 
+> **执行状态：基础能力历史计划。** 已完成项目以复选框为准；PRD V1.1 剩余开发统一从 `docs/superpowers/plans/2026-08-05-prd-v1-1-implementation.md` 继续，本文件不再作为新需求执行入口。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将现有全屏交互原型升级为可在 macOS Apple Silicon 本地安装、真实运行 Whisper、调用 Kimi/DeepSeek/OpenAI 并长期保存全部历史的第一阶段体验版 Demo。
