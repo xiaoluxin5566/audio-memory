@@ -17,6 +17,7 @@ from audio_memory.api.providers import router as providers_router
 from audio_memory.api.jobs import router as jobs_router
 from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
+from audio_memory.api.content import router as content_router
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
@@ -32,9 +33,13 @@ from audio_memory.analysis.orchestrator import AnalysisOrchestrator
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
     RemoteProfileExtractor,
+    RemoteQuestionAnswerer,
     RemoteSceneAnalyzer,
 )
 from audio_memory.analysis.publisher import AnalysisPublisher
+from audio_memory.content.service import ContentService
+from audio_memory.content.feedback import FeedbackWriter
+from audio_memory.content.clear import HistoryCleaner
 
 
 def create_app(*, paths: AppPaths | None = None) -> FastAPI:
@@ -102,6 +107,17 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
                 profile_extractor=RemoteProfileExtractor(analysis_client),
                 publisher=AnalysisPublisher(database, resolved_paths),
             )
+            app.state.content_service = ContentService(
+                database,
+                resolved_paths,
+                RemoteQuestionAnswerer(analysis_client, coordinator),
+            )
+            app.state.feedback_writer = FeedbackWriter(
+                database, resolved_paths.feedback
+            )
+            app.state.history_cleaner = HistoryCleaner(
+                database, resolved_paths.audio
+            )
             initialization_task = asyncio.create_task(coordinator.initialize())
             yield
         finally:
@@ -127,6 +143,7 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(events_router)
     app.include_router(prompts_router)
+    app.include_router(content_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

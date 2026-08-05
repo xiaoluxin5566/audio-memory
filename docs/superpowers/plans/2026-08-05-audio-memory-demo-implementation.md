@@ -469,23 +469,23 @@ Commit: `git commit -m "feat: implement multi-scene analysis pipeline"`
 - `POST /api/cards/{id}/feedback`.
 - `DELETE /api/history` with body `{confirm: true}`.
 
-- [ ] **Step 1: Write feed/history ordering tests**
+- [x] **Step 1: Write feed/history ordering tests**
 
 Assert natural-day grouping, newest batch first, fixed card order, global todos above dates, completed todos last, overdue incomplete todos highlighted, and history containing completed batches only.
 
-- [ ] **Step 2: Implement todo and scoped QA services**
+- [x] **Step 2: Implement todo and scoped QA services**
 
 Todo edits trim but do not silently replace blank text; completion is user-driven; delete is immediate local deletion. QA context contains only current card content, its transcript, relevant profile facts and complete prior QA for that card.
 
-- [ ] **Step 3: Implement feedback files**
+- [x] **Step 3: Implement feedback files**
 
 Write one UTF-8 JSON record per submission under `意见反馈/{date}/{feedback_id}.json` using temp file + fsync + atomic replace. Include scene, audio metadata, full transcript, complete generated content, provider/model/Prompt/Schema versions, rating/comment and complete QA. `内容不准` requires a non-empty comment.
 
-- [ ] **Step 4: Implement clear-history boundary**
+- [x] **Step 4: Implement clear-history boundary**
 
 Within a coordinated maintenance lock, cancel active work, delete formal audio/transcripts/cards/todos/QA/profile/history rows and associated files, then vacuum asynchronously. Preserve provider metadata, Keychain entries, Prompt files/versions and feedback files.
 
-- [ ] **Step 5: Run content boundary tests and commit**
+- [x] **Step 5: Run content boundary tests and commit**
 
 Run: `cd backend && uv run pytest tests/integration/test_content_api.py tests/integration/test_feedback_files.py tests/integration/test_clear_history.py -v`
 

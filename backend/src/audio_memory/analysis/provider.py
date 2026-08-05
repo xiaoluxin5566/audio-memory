@@ -181,3 +181,27 @@ class RemoteProfileExtractor:
         except ValidationError as exc:
             raise ProviderAnalysisError("Profile response failed schema validation") from exc
         return [item.model_dump(mode="json") for item in envelope.facts]
+
+
+class RemoteQuestionAnswerer:
+    def __init__(self, client: ProviderAnalysisClient, coordinator) -> None:
+        self.client = client
+        self.coordinator = coordinator
+
+    async def answer(self, *, card, transcript, profile, history, question) -> str:
+        provider = await self.coordinator.snapshot_active()
+        return await self.client.generate(
+            provider.provider_id,
+            model_id=provider.model_id,
+            system=(
+                "仅根据当前卡片和其来源音频转写回答用户问题。"
+                "不知道时明确说明，不引用其他会议或其他上传批次。"
+            ),
+            user=(
+                f"卡片：{json.dumps(card, ensure_ascii=False)}\n"
+                f"相关用户画像：{json.dumps(profile, ensure_ascii=False)}\n"
+                f"历史问答：{json.dumps(history, ensure_ascii=False)}\n"
+                f"<transcript>\n{transcript}\n</transcript>\n"
+                f"问题：{question}"
+            ),
+        )
