@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+WHISPER_MODEL_ID = "mlx-community/whisper-large-v3-turbo"
+
+
 class UnsupportedPlatformError(RuntimeError):
     """Raised when the backend is started outside the phase-one platform."""
 
@@ -57,4 +60,3 @@ def assert_supported_platform() -> None:
         raise UnsupportedPlatformError(
             "Audio Memory 第一阶段仅支持 macOS Apple Silicon。"
         )
-

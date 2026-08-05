@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
 
 from audio_memory.uploads.service import UploadError, UploadService
+from audio_memory.domain import JobStage
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -32,6 +35,19 @@ class JobView(BaseModel):
 
 def service_from(request: Request) -> UploadService:
     return request.app.state.upload_service
+
+
+def track_transcription(request: Request, job_id: str, coroutine) -> None:
+    tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
+    task = asyncio.create_task(coroutine)
+    tasks[job_id] = task
+
+    def finish(completed: asyncio.Task[None]) -> None:
+        tasks.pop(job_id, None)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(finish)
 
 
 @router.post("", status_code=201)
@@ -101,4 +117,40 @@ async def start_job(job_id: str, request: Request) -> JobView:
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+    transcription = request.app.state.transcription_service
+    engine = request.app.state.whisper_engine
+    track_transcription(request, job_id, transcription.run_job(job_id, engine))
     return JobView.model_validate(job, from_attributes=True)
+
+
+@router.post("/{job_id}/resume", status_code=202)
+async def resume_job(job_id: str, request: Request) -> dict[str, str]:
+    tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
+    if job_id in tasks:
+        raise HTTPException(status_code=409, detail="Transcription is already running")
+    try:
+        job = await service_from(request).get_job(job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.stage != JobStage.INTERRUPTED.value:
+        raise HTTPException(
+            status_code=409, detail="Only an interrupted transcription can resume"
+        )
+    transcription = request.app.state.transcription_service
+    engine = request.app.state.whisper_engine
+    track_transcription(request, job_id, transcription.resume_job(job_id, engine))
+    return {"id": job_id, "stage": JobStage.TRANSCRIBING.value}
+
+
+@router.delete("/{job_id}", status_code=204)
+async def cancel_job(job_id: str, request: Request) -> Response:
+    tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
+    task = tasks.get(job_id)
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    try:
+        await service_from(request).cancel_job(job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)

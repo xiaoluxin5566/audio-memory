@@ -213,6 +213,33 @@ class UploadService:
         )
         return await self.get_job(job_id)
 
+    async def cancel_job(self, job_id: str) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                job = await session.get(AnalysisJob, job_id)
+                if job is None:
+                    raise LookupError("Unknown upload job")
+                files = list(
+                    await session.scalars(
+                        select(JobFile).where(JobFile.job_id == job_id)
+                    )
+                )
+                for file in files:
+                    remove_staged_file(Path(file.temporary_path), self.paths.staging)
+                manifests = list(
+                    await session.scalars(
+                        select(TempFileManifest).where(
+                            TempFileManifest.task_uuid == job_id
+                        )
+                    )
+                )
+                for manifest in manifests:
+                    path = Path(manifest.file_path)
+                    remove_staged_file(path, self.paths.staging)
+                    await session.delete(manifest)
+                await session.delete(job)
+        await self._emit(job_id, "job.cancelled", {})
+
     async def _get_job(self, job_id: str) -> AnalysisJob:
         async with self.database.session() as session:
             job = await session.get(AnalysisJob, job_id)

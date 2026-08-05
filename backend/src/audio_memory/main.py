@@ -24,6 +24,8 @@ from audio_memory.providers.validation import ProviderValidationService
 from audio_memory.repositories import ProviderMetadataRepository
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
+from audio_memory.transcription.checkpoints import TranscriptionService
+from audio_memory.transcription.engine import MLXWhisperEngine
 
 
 def create_app(*, paths: AppPaths | None = None) -> FastAPI:
@@ -40,6 +42,7 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
         database: Database | None = None
         provider_clients: list[httpx.AsyncClient] = []
         initialization_task: asyncio.Task[None] | None = None
+        whisper_engine: MLXWhisperEngine | None = None
         try:
             await asyncio.to_thread(run_migrations, resolved_paths.database)
             database = Database(resolved_paths.database)
@@ -50,6 +53,12 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
             app.state.upload_service = UploadService(
                 database, resolved_paths, job_events
             )
+            whisper_engine = MLXWhisperEngine(database, resolved_paths)
+            app.state.whisper_engine = whisper_engine
+            transcription_service = TranscriptionService(database)
+            await transcription_service.mark_abandoned_work_interrupted()
+            app.state.transcription_service = transcription_service
+            app.state.transcription_tasks = {}
             adapters = {
                 "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
                 "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
@@ -76,6 +85,14 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
                 await asyncio.gather(initialization_task, return_exceptions=True)
             for client in provider_clients:
                 await client.aclose()
+            for task in getattr(app.state, "transcription_tasks", {}).values():
+                task.cancel()
+            if getattr(app.state, "transcription_tasks", None):
+                await asyncio.gather(
+                    *app.state.transcription_tasks.values(), return_exceptions=True
+                )
+            if whisper_engine is not None:
+                await whisper_engine.close()
             if database is not None:
                 await database.dispose()
             instance_lock.release()

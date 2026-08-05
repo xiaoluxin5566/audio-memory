@@ -335,23 +335,23 @@ Commit: `git commit -m "feat: add durable local upload jobs"`
 - `TranscriptSegment(file_id, index, start_ms, end_ms, text, words)`.
 - Default checkpoint: `mlx-community/whisper-large-v3-turbo` configured in `config.py`.
 
-- [ ] **Step 1: Write deterministic segment/checkpoint tests**
+- [x] **Step 1: Write deterministic segment/checkpoint tests**
 
 Test stable segment indexes, UTC checkpoint writes, skipping committed segments on retry, ordered concatenation across files, and progress computed from processed duration rather than wall-clock estimates.
 
-- [ ] **Step 2: Implement ffmpeg normalization and MLX worker isolation**
+- [x] **Step 2: Implement ffmpeg normalization and MLX worker isolation**
 
 Normalize each source to temporary 16 kHz mono PCM under the job staging directory. Run MLX Whisper in a dedicated worker process so cancellation or native failure cannot corrupt the FastAPI event loop. Never send audio bytes to any provider adapter.
 
-- [ ] **Step 3: Persist each segment before progress emission**
+- [x] **Step 3: Persist each segment before progress emission**
 
 For every completed segment: validate timestamps, insert transcript segment and checkpoint transactionally, then emit SSE progress. On restart, set active transcription/analysis jobs to `interrupted`; do not resume paid model work automatically.
 
-- [ ] **Step 4: Implement retry/cancel/resume rules**
+- [x] **Step 4: Implement retry/cancel/resume rules**
 
 Retry only the failed file/segment. Cancel terminates the worker, removes temporary normalized audio and uncommitted transcripts, and returns the upload panel to empty. Resume requires explicit user action and reuses all valid checkpoints.
 
-- [ ] **Step 5: Run real local transcription smoke tests and commit**
+- [x] **Step 5: Run real local transcription smoke tests and commit**
 
 Run: `cd backend && uv run pytest tests/unit/transcription tests/integration/test_transcription_recovery.py -v -m 'not slow' && uv run pytest tests/integration/test_transcription_recovery.py -v -m slow`
 
