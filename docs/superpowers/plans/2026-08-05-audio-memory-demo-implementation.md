@@ -603,25 +603,25 @@ Commit: `git commit -m "feat: add macOS install and launch workflow"`
 - Playwright runs against one real local backend with fake provider adapters by default.
 - Real provider smoke tests are opt-in and read test Keys from temporary Keychain accounts, never environment logs.
 
-- [ ] **Step 1: Implement first-run and provider E2E**
+- [x] **Step 1: Implement first-run and provider E2E**
 
-Verify empty feed, three-provider modal, failed candidate preservation while open, close cancellation, successful save, explicit activation, restart validation and Keychain-unavailable copy.
+Verify empty feed, three-provider modal, failed candidate preservation while open, close cancellation, successful save with automatic activation and modal close, restart validation and Keychain-unavailable copy.
 
 Add `@playwright/test` as a pinned dev dependency and a `test:e2e` package script. Browser binaries are installed by `scripts/install.sh` only for development/test mode, not for ordinary end-user installation.
 
-- [ ] **Step 2: Implement complete batch E2E**
+- [x] **Step 2: Implement complete batch E2E**
 
 Upload MP3/AAC, observe individual progress, pause on unsupported file, remove and continue, transcribe, analyze six scenes, publish once, clear upload panel and verify history. Assert no current-batch card appears before completion.
 
-- [ ] **Step 3: Implement recovery and alternate-provider E2E**
+- [x] **Step 3: Implement recovery and alternate-provider E2E**
 
 Kill the backend during transcription and analysis. Verify explicit recovery, checkpoint reuse, analysis failure retaining transcript, provider switch without Whisper rerun, cancellation cleanup and no failed batch in history.
 
-- [ ] **Step 4: Implement content/feedback/clear E2E**
+- [x] **Step 4: Implement content/feedback/clear E2E**
 
 Test todo edit/complete/delete, all card details, right-aligned user bubble and AI bubble, scoped follow-up, feedback accurate/inaccurate branches, complete feedback JSON, Prompt save affecting only new analysis, and clear-history preservation boundaries.
 
-- [ ] **Step 5: Run full quality gate and commit**
+- [x] **Step 5: Run full quality gate and commit**
 
 Run:
 
