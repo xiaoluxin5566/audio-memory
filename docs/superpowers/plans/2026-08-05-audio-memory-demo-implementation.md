@@ -216,7 +216,7 @@ Commit: `git commit -m "feat: add persistent Audio Memory data model"`
 - `validate_candidate(provider_id, session_id, candidate, deadline) -> ValidationResult`.
 - Routes exactly follow the frozen API Key specification.
 
-- [ ] **Step 1: Write Keychain state-code and replacement tests**
+- [x] **Step 1: Write Keychain state-code and replacement tests**
 
 ```python
 def test_auth_failure_is_not_unconfigured(fake_security):
@@ -232,15 +232,15 @@ def test_duplicate_add_retries_update_once(fake_security):
     assert fake_security.update_calls == 2
 ```
 
-- [ ] **Step 2: Write coordinator race tests**
+- [x] **Step 2: Write coordinator race tests**
 
 Cover shared in-flight validation, stale `credential_generation`, separate `candidate_validation_id + session_id`, modal-close cancellation, cooldown monotonic timing, idempotent activate, active/start-analysis serialization, and 15-second provider/20-second total deadlines.
 
-- [ ] **Step 3: Implement Security Framework adapter**
+- [x] **Step 3: Implement Security Framework adapter**
 
 Use PyObjC Security functions with Service `Audio Memory`, accounts `provider:kimi|deepseek|openai`, Data Protection Keychain, `WhenUnlockedThisDeviceOnly`, and no synchronization. Redact candidate bytes from exceptions, repr, structured logs and HTTP traces.
 
-- [ ] **Step 4: Implement provider adapters and validation protocol**
+- [x] **Step 4: Implement provider adapters and validation protocol**
 
 Defaults in `config.py`:
 
@@ -254,7 +254,7 @@ PROVIDERS = {
 
 Validation uses `Reply exactly: OK`, temperature 0 where supported, output cap 4 tokens, no tools/streaming, and succeeds only when the parsed output trimmed and case-folded equals `ok`.
 
-- [ ] **Step 5: Run the frozen-spec test matrix and commit**
+- [x] **Step 5: Run the frozen-spec test matrix and commit**
 
 Run: `cd backend && uv run pytest tests/unit/providers tests/integration/test_provider_api.py -v`
 

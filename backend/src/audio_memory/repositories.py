@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, Batch, Card
+from audio_memory.models import AnalysisJob, Batch, Card, ProviderMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,3 +99,59 @@ class BatchRepository:
             )
             return [BatchView(id=batch_id, card_count=count) for batch_id, count in rows]
 
+
+class ProviderMetadataRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def ensure_defaults(self, model_ids: dict[str, str]) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                for provider_id, model_id in model_ids.items():
+                    row = await session.get(ProviderMetadata, provider_id)
+                    if row is None:
+                        session.add(
+                            ProviderMetadata(
+                                provider_id=provider_id,
+                                default_model_id=model_id,
+                            )
+                        )
+                    else:
+                        row.default_model_id = model_id
+
+    async def list_all(self) -> list[ProviderMetadata]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(ProviderMetadata).order_by(ProviderMetadata.provider_id)
+            )
+            return list(rows)
+
+    async def activate(self, provider_id: str) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                target = await session.get(ProviderMetadata, provider_id)
+                if target is None:
+                    raise LookupError(f"Unknown provider: {provider_id}")
+                if target.active:
+                    return
+                await session.execute(update(ProviderMetadata).values(active=False))
+                target.active = True
+
+    async def update_validation(
+        self,
+        provider_id: str,
+        *,
+        status: str,
+        validated_at: str | None,
+        error_code: str | None,
+        error_message: str | None,
+    ) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                row = await session.get(ProviderMetadata, provider_id)
+                if row is None:
+                    raise LookupError(f"Unknown provider: {provider_id}")
+                row.validation_status = status
+                row.last_validated_at = validated_at
+                row.last_validation_error_code = error_code
+                row.last_validation_error_message = error_message
