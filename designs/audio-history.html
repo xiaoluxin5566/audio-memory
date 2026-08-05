@@ -1,0 +1,33 @@
+<style>
+  *{box-sizing:border-box}.history-app{max-width:1120px;margin:20px auto 28px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#232a35;background:#f5f6f8;border:1px solid #dce1e7;border-radius:18px;overflow:hidden;box-shadow:0 20px 54px rgba(27,35,50,.09)}.appbar{height:56px;background:#fff;border-bottom:1px solid #e4e7ec;display:flex;align-items:center;justify-content:space-between;padding:0 19px}.brand{display:flex;align-items:center;gap:9px}.mark{width:29px;height:29px;border-radius:8px;background:#202632;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800}.brand strong{font-size:13px}.brand span{font-size:9px;color:#8a929f;margin-left:5px;font-weight:400}.nav{display:flex;gap:7px}.nav button{border:1px solid #dfe3e9;background:#fff;border-radius:8px;padding:6px 9px;font-size:9px}.nav button.active{background:#202632;color:#fff}.history-main{padding:24px 30px 42px;min-height:700px}.page-head{margin-bottom:24px}.page-head h3{font-size:17px;margin:0 0 5px}.page-head p{font-size:9px;color:#89919d;margin:0}.date{display:flex;align-items:center;gap:10px;margin:23px 0 11px}.date strong{font-size:11px;white-space:nowrap}.date span{font-size:8px;color:#9198a3;white-space:nowrap}.date:after{content:"";height:1px;background:#dfe3e8;flex:1}.batch{position:relative;border-left:2px solid #dfe3e9;margin-left:5px;padding:0 0 22px 17px}.batch:before{content:"";position:absolute;left:-5px;top:2px;width:8px;height:8px;border-radius:50%;background:#aeb7c3;border:2px solid #f5f6f8}.batch:last-child{padding-bottom:0}.batch-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.batch-head strong{font-size:10px}.batch-head span{font-size:8px;color:#89919d}.file-list{background:#fff;border:1px solid #e1e5ea;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(25,34,50,.035)}.audio-row{display:grid;grid-template-columns:38px minmax(0,1fr) auto;gap:10px;align-items:center;padding:11px 13px;border-top:1px solid #e9ecf0}.audio-row:first-child{border-top:0}.file-type{width:36px;height:36px;border-radius:8px;background:#eef1f5;color:#66717f;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:800}.audio-info strong{font-size:10px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.audio-info span{font-size:8px;color:#8a929e;display:block;margin-top:3px}.audio-time{text-align:right}.audio-time strong{font-size:9px;display:block}.audio-time span{font-size:7px;color:#9aa1ab;display:block;margin-top:3px}.rule{max-width:1120px;margin:12px auto;border:1px solid #dce1eb;background:#f7f9fc;border-radius:11px;padding:11px 14px;font-size:9px;line-height:1.65;color:#505968}.choice{max-width:1120px;margin:12px auto;border:1px solid #cfd6ff;background:#f3f5ff;border-radius:11px;padding:11px 14px;cursor:pointer}.choice.selected{outline:3px solid #536dfe;outline-offset:2px}.choice strong{font-size:11px}.choice span{display:block;font-size:9px;color:#697181;margin-top:3px}@media(max-width:720px){.history-main{padding:18px}.audio-row{grid-template-columns:36px minmax(0,1fr)}.audio-time{grid-column:2;text-align:left;display:flex;gap:8px}.brand span{display:none}}
+</style>
+
+<h2>音频历史页 · V31</h2>
+<p class="subtitle">仅罗列已经完成整批分析的音频；按自然日和上传批次排列，最近内容在最上方。</p>
+
+<div class="history-app">
+  <header class="appbar"><div class="brand"><div class="mark">AM</div><strong>Audio Memory <span>本地音频智能分析</span></strong></div><nav class="nav"><button>信息流</button><button class="active">音频历史</button></nav></header>
+  <main class="history-main">
+    <header class="page-head"><h3>音频历史</h3><p>已完成分析的音频会自动保存在本机。</p></header>
+
+    <div class="date"><strong>今天 · 8月4日</strong><span>5 个音频</span></div>
+    <section class="batch"><div class="batch-head"><strong>18:42 上传 · 晚间录音</strong><span>3 个文件</span></div><div class="file-list">
+      <div class="audio-row"><div class="file-type">WAV</div><div class="audio-info"><strong>晚间家庭录音.wav</strong><span>WAV · 486 MB</span></div><div class="audio-time"><strong>1小时12分钟</strong><span>18:42 上传</span></div></div>
+      <div class="audio-row"><div class="file-type">MP3</div><div class="audio-info"><strong>通勤播客.mp3</strong><span>MP3 · 82 MB</span></div><div class="audio-time"><strong>38分钟</strong><span>18:42 上传</span></div></div>
+      <div class="audio-row"><div class="file-type">M4A</div><div class="audio-info"><strong>晚间随手录音.m4a</strong><span>M4A · 96 MB</span></div><div class="audio-time"><strong>26分钟</strong><span>18:42 上传</span></div></div>
+    </div></section>
+    <section class="batch"><div class="batch-head"><strong>12:18 上传 · 上午工作录音</strong><span>2 个文件</span></div><div class="file-list">
+      <div class="audio-row"><div class="file-type">M4A</div><div class="audio-info"><strong>产品方案评审.m4a</strong><span>M4A · 156 MB</span></div><div class="audio-time"><strong>51分钟</strong><span>12:18 上传</span></div></div>
+      <div class="audio-row"><div class="file-type">WAV</div><div class="audio-info"><strong>上午环境录音.wav</strong><span>WAV · 338 MB</span></div><div class="audio-time"><strong>52分钟</strong><span>12:18 上传</span></div></div>
+    </div></section>
+
+    <div class="date"><strong>昨天 · 8月3日</strong><span>2 个音频</span></div>
+    <section class="batch"><div class="batch-head"><strong>21:06 上传 · 全天录音</strong><span>2 个文件</span></div><div class="file-list">
+      <div class="audio-row"><div class="file-type">M4A</div><div class="audio-info"><strong>全天录音-01.m4a</strong><span>M4A · 1.2 GB</span></div><div class="audio-time"><strong>4小时06分钟</strong><span>21:06 上传</span></div></div>
+      <div class="audio-row"><div class="file-type">M4A</div><div class="audio-info"><strong>全天录音-02.m4a</strong><span>M4A · 612 MB</span></div><div class="audio-time"><strong>2小时02分钟</strong><span>21:06 上传</span></div></div>
+    </div></section>
+  </main>
+</div>
+
+<div class="rule"><strong>历史收录规则：</strong>只有本次上传的整批音频完成转写与模型分析后，才一次性写入音频历史。失败、中断或未完成的批次不进入历史，并清理临时音频与中间转写；历史页不显示状态，也不提供编辑、删除、搜索、回听或重新分析。</div>
+<div class="choice" data-choice="audio-history-v31-approved" onclick="toggleSelect(this)"><strong>音频历史页符合预期</strong><span>点击确认；模型对比版将使用独立页面结构，后续单独设计。</span></div>

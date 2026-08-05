@@ -1,1 +1,7 @@
 .worktrees/
+.DS_Store
+prototype/node_modules/
+prototype/dist/
+backend/.venv/
+backend/.pytest_cache/
+**/__pycache__/

@@ -1,0 +1,99 @@
+export const SCENES = [
+  { id: 'todo', name: '待办事项' },
+  { id: 'meeting', name: '会议纪要' },
+  { id: 'parenting', name: '家庭教育' },
+  { id: 'content', name: '内容推荐' },
+  { id: 'growth', name: '成长建议' },
+  { id: 'inspiration', name: '闲聊灵感' },
+];
+
+export const DEFAULT_PROMPTS = {
+  todo: `# 场景目标
+从本次上传的所有转写内容中，识别用户明确表达需要执行、跟进、提醒或完成的事项。
+
+# 生成条件
+- 必须存在清晰的行动意图。
+- 仅表达兴趣、看法、假设或一般讨论时，不生成待办。
+- 同一事项被多次提及时需要合并。
+
+# 分析要求
+- 提取待办内容、负责人、截止时间和来源场景。
+- 只有音频中明确提到负责人或时间时才填写，不得推测。
+
+# 排除规则
+- “这个不错”“以后可以看看”等模糊表达不默认生成待办。`,
+  meeting: `# 场景目标
+识别完整的会议片段，生成会议主题、核心结论、明确决策和会议待办。
+
+# 生成条件
+- 存在明确的多人讨论、议题推进和会议边界。
+- 普通闲聊或单人思考不生成会议卡片。
+
+# 分析要求
+- 概括会议主题和核心结论。
+- 区分已明确决策与尚未确定事项。
+- 会议待办必须有明确行动意图。`,
+  parenting: `# 场景目标
+识别用户与儿童的互动，还原背景，发现可能的问题并给出切实建议。
+
+# 生成条件
+只有存在具体的亲子互动事件时生成。一次上传中出现多个独立家庭时间时，汇总为一张卡片。
+
+# 详情模块
+- 背景信息
+- 找出问题所在
+- 给出切实建议
+
+# 约束
+对人物关系、情绪原因和问题原因的推测必须明确标注。`,
+  content: `# 场景目标
+整理用户本次听到的内容，识别兴趣方向并推荐更贴合的真实内容。
+
+# 详情模块
+- 这次你都听了
+- 个人兴趣更新
+- 更贴合你的内容
+
+# 约束
+真实内容优先，不得编造书籍、博客、歌曲或视频。`,
+  growth: `# 场景目标
+从本次完整音频中发现用户值得改进的行为或表达模式，按方向汇总成一张成长建议卡片。
+
+# 详情模块
+每个方向必须包含：场景、问题、建议。
+
+# 约束
+建议必须对应具体证据，不进行空泛说教。`,
+  inspiration: `# 场景目标
+从本次音频中识别用户真正感兴趣、值得保留和继续探索的对话内容。
+
+# 判断原则
+不依赖单一关键词。模型综合完整上下文后判断内容有明确价值时才生成卡片。
+
+# 详情模块
+- 发生时背景
+- 对话梗概
+- 对话价值
+- 建议推荐`,
+};
+
+export const INITIAL_TODOS = [
+  { id: 'todo-1', text: '联系供应商确认镜腿样品交期', due: '已逾期 · 昨天 18:00', overdue: true, completed: false },
+  { id: 'todo-2', text: '明早带妈妈去医院', due: '明天 08:00', overdue: false, completed: false },
+  { id: 'todo-3', text: '完成 Always-on Demo 方案第二版', due: '8 月 6 日 18:00', overdue: false, completed: false },
+  { id: 'todo-4', text: '整理用户调研问题清单', due: '已完成', overdue: false, completed: true },
+];
+
+export const INITIAL_HISTORY = [
+  { id: 'history-1', date: '今天 · 8 月 4 日', uploadedAt: '18:47', files: [
+    { name: '晚间家庭录音.aac', type: 'AAC', size: '486 MB', duration: '1 小时 12 分钟', time: '17:28–18:40' },
+    { name: '通勤播客.mp3', type: 'MP3', size: '82 MB', duration: '38 分钟', time: '08:22–09:00' },
+    { name: '上午工作录音.aac', type: 'AAC', size: '156 MB', duration: '51 分钟', time: '10:12–11:03' },
+  ] },
+  { id: 'history-2', date: '昨天 · 8 月 3 日', uploadedAt: '21:06', files: [
+    { name: '晚间闲聊.mp3', type: 'MP3', size: '62 MB', duration: '27 分钟', time: '20:31–20:58' },
+    { name: '产品讨论.aac', type: 'AAC', size: '103 MB', duration: '43 分钟', time: '14:02–14:45' },
+  ] },
+];
+
+export const INITIAL_FEED = [];
