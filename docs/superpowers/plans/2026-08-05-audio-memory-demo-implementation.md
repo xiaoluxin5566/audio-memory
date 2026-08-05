@@ -383,23 +383,23 @@ Commit: `git commit -m "feat: add recoverable local Whisper transcription"`
 - `PromptComposer.compose(scene_id, transcript, profile, prompt_version) -> ModelRequest`.
 - `SceneResult` uses stable `scene_id`, `should_generate`, `card`, `detail_sections`, `todos`, `evidence_refs`, `confidence`.
 
-- [ ] **Step 1: Write six-scene initialization and atomic-save tests**
+- [x] **Step 1: Write six-scene initialization and atomic-save tests**
 
 Assert exactly six current prompts, non-empty defaults, version 1 initialization, optimistic version conflict HTTP 409, old-version snapshot creation, temp-file fsync, and atomic `os.replace`.
 
-- [ ] **Step 2: Implement Prompt store under Application Support**
+- [x] **Step 2: Implement Prompt store under Application Support**
 
 Use `prompts/{scene_id}/current.md`, `metadata.json`, and `versions/{version}-{timestamp}.md`. Reject unknown scene IDs and blank content. A failed write leaves the previous current file readable.
 
-- [ ] **Step 3: Implement stable schemas**
+- [x] **Step 3: Implement stable schemas**
 
 Define strict Pydantic models for card shell, dynamic detail sections, todos, evidence and confidence. Unknown detail section keys remain renderable through `text | list | grouped_items`; model output cannot inject Markdown/HTML as UI structure.
 
-- [ ] **Step 4: Implement the three-layer composer**
+- [x] **Step 4: Implement the three-layer composer**
 
 Concatenate immutable system rules, the selected natural-language scene Prompt, and immutable JSON Schema instructions. Treat transcript as delimited data, include only profile facts permitted for the scene, and persist `prompt_version + schema_version` in every analysis attempt.
 
-- [ ] **Step 5: Run prompt tests and commit**
+- [x] **Step 5: Run prompt tests and commit**
 
 Run: `cd backend && uv run pytest tests/unit/prompts -v`
 

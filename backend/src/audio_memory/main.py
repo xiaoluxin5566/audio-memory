@@ -16,6 +16,7 @@ from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
 from audio_memory.api.jobs import router as jobs_router
 from audio_memory.api.events import JobEventBroker, router as events_router
+from audio_memory.api.prompts import router as prompts_router
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
@@ -26,6 +27,7 @@ from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine
+from audio_memory.prompts.store import PromptStore
 
 
 def create_app(*, paths: AppPaths | None = None) -> FastAPI:
@@ -59,6 +61,9 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
             await transcription_service.mark_abandoned_work_interrupted()
             app.state.transcription_service = transcription_service
             app.state.transcription_tasks = {}
+            prompt_store = PromptStore(resolved_paths.prompts)
+            await asyncio.to_thread(prompt_store.initialize)
+            app.state.prompt_store = prompt_store
             adapters = {
                 "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
                 "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
@@ -101,6 +106,7 @@ def create_app(*, paths: AppPaths | None = None) -> FastAPI:
     app.include_router(providers_router)
     app.include_router(jobs_router)
     app.include_router(events_router)
+    app.include_router(prompts_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
