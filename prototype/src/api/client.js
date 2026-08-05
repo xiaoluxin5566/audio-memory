@@ -52,6 +52,7 @@ export const api = {
   cancelCandidate: (id, sessionId) => apiRequest(`/providers/${id}/candidate/${sessionId}`, { method: 'DELETE' }),
   activateProvider: (id) => apiRequest(`/providers/${id}/activate`, { method: 'POST' }),
   createJob: () => apiRequest('/jobs', { method: 'POST' }),
+  activeJob: () => apiRequest('/jobs/active'),
   job: (id) => apiRequest(`/jobs/${id}`),
   startJob: (id) => apiRequest(`/jobs/${id}/start`, { method: 'POST' }),
   resumeJob: (id) => apiRequest(`/jobs/${id}/resume`, { method: 'POST' }),

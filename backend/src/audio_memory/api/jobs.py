@@ -72,6 +72,12 @@ async def create_job(request: Request) -> JobView:
     return JobView(id=job.id, stage=job.stage, error_code=job.error_code)
 
 
+@router.get("/active", response_model=JobView | None)
+async def get_active_job(request: Request) -> JobView | None:
+    job = await service_from(request).get_active_job()
+    return JobView.model_validate(job, from_attributes=True) if job else None
+
+
 @router.get("/{job_id}")
 async def get_job(job_id: str, request: Request) -> JobView:
     try:

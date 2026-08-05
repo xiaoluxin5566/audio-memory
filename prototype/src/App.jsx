@@ -75,6 +75,27 @@ export function App() {
     refreshPrompts().catch(() => setToast('Prompt 加载失败'));
   }, [refreshContent, refreshPrompts]);
   useEffect(() => {
+    api.activeJob().then((job) => {
+      if (!job) return;
+      setState((current) => ({
+        ...current,
+        job: { ...job, progress: job.stage === 'analyzing' ? 80 : 5 },
+        upload: {
+          files: (job.files ?? []).map((file) => ({
+            id: file.id,
+            name: file.original_name,
+            size: file.size_bytes,
+            type: file.extension?.slice(1).toUpperCase() || 'AUDIO',
+            progress: file.upload_progress ?? 100,
+            invalid: false,
+          })),
+          error: '',
+          paused: false,
+        },
+      }));
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
     const onPop = () => setRoute(ROUTES[window.location.pathname] ?? 'feed');
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);

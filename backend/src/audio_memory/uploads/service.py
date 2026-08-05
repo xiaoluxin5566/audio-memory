@@ -89,6 +89,22 @@ class UploadService:
                 files=[self._view(item) for item in files],
             )
 
+    async def get_active_job(self) -> UploadJobView | None:
+        recoverable_stages = {
+            JobStage.TRANSCRIBING.value,
+            JobStage.ANALYZING.value,
+            JobStage.INTERRUPTED.value,
+            JobStage.FAILED.value,
+        }
+        async with self.database.session() as session:
+            job_id = await session.scalar(
+                select(AnalysisJob.id)
+                .where(AnalysisJob.stage.in_(recoverable_stages))
+                .order_by(AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc())
+                .limit(1)
+            )
+        return await self.get_job(job_id) if job_id else None
+
     async def upload(self, job_id: str, upload: UploadFile) -> UploadedFileView:
         job = await self._get_job(job_id)
         if job.stage != JobStage.UPLOADING.value:

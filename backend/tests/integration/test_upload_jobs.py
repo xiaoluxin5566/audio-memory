@@ -197,3 +197,24 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
         "provider_id": "deepseek",
         "model_id": "deepseek-v4-flash",
     }
+
+
+@pytest.mark.asyncio
+async def test_active_job_endpoint_returns_latest_recoverable_job(job_client):
+    client, _, database = job_client
+    older_id = (await client.post("/api/jobs")).json()["id"]
+    latest_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        older = await session.get(AnalysisJob, older_id)
+        older.stage = JobStage.COMPLETED.value
+        latest = await session.get(AnalysisJob, latest_id)
+        latest.stage = JobStage.INTERRUPTED.value
+        latest.provider_id = "deepseek"
+        latest.model_id = "deepseek-chat"
+        await session.commit()
+
+    response = await client.get("/api/jobs/active")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == latest_id
+    assert response.json()["stage"] == JobStage.INTERRUPTED.value
