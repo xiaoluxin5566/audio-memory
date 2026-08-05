@@ -10,6 +10,7 @@ from audio_memory.providers.keychain import (
     KeychainAccessError,
     KeychainRepository,
     KeychainStatus,
+    MacSecurityClient,
 )
 
 
@@ -72,3 +73,24 @@ def test_replace_reports_second_missing_update_as_keychain_unavailable() -> None
     with pytest.raises(KeychainAccessError):
         repository.replace("deepseek", b"candidate")
 
+
+def test_mac_security_add_extracts_status_from_pyobjc_tuple(monkeypatch) -> None:
+    class Security:
+        kSecClass = "class"
+        kSecClassGenericPassword = "generic"
+        kSecAttrService = "service"
+        kSecAttrAccount = "account"
+        kSecValueData = "value"
+        kSecAttrAccessible = "accessible"
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly = "when-unlocked"
+        kSecAttrSynchronizable = "sync"
+        kSecUseDataProtectionKeychain = "data-protection"
+
+        @staticmethod
+        def SecItemAdd(attributes, result):
+            return ERR_SEC_SUCCESS, None
+
+    client = MacSecurityClient()
+    monkeypatch.setattr(client, "_security", lambda: Security)
+
+    assert client.add("Audio Memory", "provider:deepseek", b"candidate") == 0

@@ -126,5 +126,6 @@ class MacSecurityClient:
             security.kSecAttrSynchronizable: False,
             security.kSecUseDataProtectionKeychain: True,
         }
-        return int(security.SecItemAdd(attributes, None))
-
+        result = security.SecItemAdd(attributes, None)
+        status = result[0] if isinstance(result, tuple) else result
+        return int(status)

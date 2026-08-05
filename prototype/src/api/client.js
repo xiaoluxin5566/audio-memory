@@ -10,10 +10,29 @@ export async function apiRequest(path, options = {}) {
       ...options.headers,
     },
   })
-  const payload = response.status === 204 ? null : await response.json()
+  let payload = null
+  let responseText = ''
+  if (response.status !== 204) {
+    responseText = await response.text()
+    if (responseText) {
+      try {
+        payload = JSON.parse(responseText)
+      } catch {
+        if (response.ok) {
+          const error = new Error('本地服务返回了无法识别的内容')
+          error.code = 'invalid_response'
+          error.status = response.status
+          throw error
+        }
+      }
+    }
+  }
   if (!response.ok) {
     const detail = payload?.detail ?? {}
-    const error = new Error(detail.message ?? detail ?? '请求失败')
+    const fallback = response.status >= 500
+      ? '本地服务内部错误，请重试或运行诊断'
+      : responseText || '请求失败'
+    const error = new Error(detail.message ?? (typeof detail === 'string' ? detail : fallback))
     error.code = detail.code ?? 'request_failed'
     error.fileId = detail.file_id ?? null
     error.status = response.status
