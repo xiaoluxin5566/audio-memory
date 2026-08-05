@@ -1,7 +1,7 @@
 # Audio Memory API Key 配置模块设计
 
 日期：2026-08-05
-状态：外部评审修订版，待用户最终审阅
+状态：第二轮外部评审修订版，待用户最终审阅
 适用范围：macOS 第一阶段体验版
 
 ## 1. 目标与边界
@@ -49,6 +49,14 @@ Keychain 只保存 API Key 原文。应用不得把 Key 复制到其他持久化
 
 Keychain 是“厂商是否已配置”以及“当前 Key 内容”的唯一事实来源。应用每次读取厂商状态时都以 `SecItemCopyMatching` 的实际结果为准，不在 SQLite 中保存第二份 `configured` 标志。
 
+`SecItemCopyMatching` 的结果必须按状态码区分：
+
+- `errSecSuccess`：条目存在，配置状态为“已配置”。
+- `errSecItemNotFound`：条目确实不存在，配置状态为“未配置”。
+- `errSecAuthFailed`、`errSecInteractionNotAllowed`、`errSecNotAvailable`、`errSecIO` 等其他错误：配置状态为“未知”，访问状态为“钥匙串不可访问”；不得解释为“未配置”，不得允许覆盖或使用缓存 Key 继续分析。
+
+SQLite 中最近一次状态只可用于辅助提示，不能在 Keychain 不可访问时证明 Key 当前存在。页面应提示用户解锁 Mac 或系统钥匙串后重新校验。
+
 Keychain 条目使用：
 
 - `kSecUseDataProtectionKeychain = true`
@@ -69,11 +77,22 @@ SQLite 只保存非敏感状态：
 - `last_validation_error_message`
 - `default_model_id`
 
-SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Keychain 读取不到条目，状态必须强制归为“未配置”，忽略 SQLite 中的旧校验结果。
+SQLite 中的 `validation_status` 是展示缓存，不是配置事实。只有 Keychain 明确返回 `errSecItemNotFound` 时，状态才强制归为“未配置”并忽略 SQLite 旧结果；若 Keychain 返回访问、授权或 I/O 错误，必须进入“钥匙串不可访问”状态。`last_validation_error_message` 只保存归一化后的用户文案，不得保存厂商原始响应片段。
 
 `validation_status`、`last_validated_at`、错误代码和错误文案必须在同一个 SQLite 事务中写入；事务失败则整体回滚。Keychain 和 SQLite 不组成跨存储事务，应用通过固定写入顺序与启动校正实现最终一致。
 
 每次分析结果和意见反馈记录实际使用的 `provider_id`、`model_id`、`model_display_name` 和 Prompt 版本，但不记录 API Key。
+
+### 3.3 临时文件清单
+
+只有在平台实现必须复制或生成临时文件时，SQLite 才写入 `temp_file_manifest`：
+
+- `task_uuid`
+- `file_path`
+- `created_at`
+- `cleanup_status`
+
+`file_path` 必须位于应用专属临时目录，禁止记录或清理用户原始音频路径。创建临时文件前先登记清单，删除物理文件成功后再删除记录；启动时扫描未完成记录，完成清理后移除对应清单。清理前必须解析规范路径并再次确认其位于应用临时目录内。
 
 ## 4. 默认模型
 
@@ -90,7 +109,7 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 首页左侧“模型与 API Key”卡片展示：
 
 - 当前厂商名称。
-- 当前状态：未配置、校验中、可用、不可用。
+- 当前状态：初始化中、未配置、校验中、可用、不可用、钥匙串不可访问。
 - 最近一次成功或失败校验时间。
 - “修改配置”按钮。
 - “重新校验”按钮。
@@ -98,13 +117,15 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 “修改配置”打开弹窗：
 
 - Kimi、DeepSeek、OpenAI 三个厂商以标签页展示。
-- 每个标签页展示未配置、可用或不可用状态。
+- 每个标签页展示与首页一致的全部状态。
 - 页面不显示完整或脱敏 Key。
 - 已配置厂商明确显示“Key 已安全保存”，输入框保持为空并提示“填写新 Key 可覆盖当前配置”。
 - 已配置且可用的厂商可直接选择“设为当前厂商”。
 - 未配置厂商填写 Key并校验成功后只保存配置，不自动切换；用户明确点击“设为当前厂商”后才切换。
 - 不可用厂商需重新校验或填写新 Key，恢复可用后才能设为当前厂商。
 - 即使当前厂商不可用，“修改配置”和“重新校验”仍保持可用，用户可以配置其他厂商。
+- 钥匙串不可访问时，禁用该厂商的保存、覆盖、切换和分析操作，提示“无法访问系统钥匙串，请解锁 Mac 或钥匙串后重新校验”。
+- 限流冷却期间显示“请等待 X 秒后重试”，而不是只将按钮置灰。
 
 切换厂商只影响之后新分析的音频，不修改历史结果。上传队列在开始分析前与厂商无关，切换厂商不会清空或复制队列；点击“开始分析”后才为该批次锁定 `provider_id` 和 `model_id`。
 
@@ -112,7 +133,15 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 
 ### 6.1 校验方式
 
-校验必须调用该厂商当前默认分析模型，发送极小真实请求并要求只返回 `OK`。不得仅依赖模型列表接口。
+校验必须调用该厂商当前默认分析模型，不得仅依赖模型列表接口。三个适配器使用同一逻辑约束：
+
+- 固定提示为 `Reply exactly: OK`，不包含用户数据。
+- `temperature = 0`，禁用流式输出和工具调用。
+- 最大输出限制为 4 tokens；若厂商不支持对应参数，由适配器使用最接近的等价配置。
+- 单次请求超时为 15 秒。
+- HTTP 请求成功、响应结构可解析且模型输出正文非空，即视为校验成功；不对 `OK` 的大小写、引号或换行做严格匹配。
+
+任意非空 HTTP 响应不等于成功：错误响应、无法解析的响应以及缺少模型输出字段的响应仍需按错误分类处理。
 
 一次成功校验同时证明：
 
@@ -133,11 +162,14 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 
 本地后端启动后立即读取 Keychain，并行校验全部已配置厂商；页面只订阅校验状态，不负责触发启动校验。页面路由切换和刷新不重复创建启动校验任务。
 
+所有使用已保存 Key 的校验路径都先读取 Keychain：只有 `errSecSuccess` 才进入网络校验；`errSecItemNotFound` 直接返回“未配置”且不发起网络请求；其他状态码直接返回“钥匙串不可访问”。
+
 第一阶段不增加每 30 分钟等周期性后台校验。开始分析前的真实校验负责发现程序运行期间发生的 Key 失效。
 
 ### 6.3 新旧 Key 覆盖规则
 
-- 新 Key校验成功：已有条目使用 `SecItemUpdate` 更新 `kSecValueData`；只有收到 `errSecItemNotFound` 时才使用 `SecItemAdd`。禁止使用 Delete+Add 覆盖。
+- 新 Key校验成功：先使用 `SecItemUpdate` 更新 `kSecValueData`；收到 `errSecItemNotFound` 时执行 `SecItemAdd`；若 Add 因并发返回 `errSecDuplicateItem`，再执行一次 `SecItemUpdate`。禁止使用 Delete+Add 覆盖。
+- 上述写入链路中任何其他非 `errSecSuccess` 状态都归一化为 `keychain_unavailable`：不更新 SQLite，不把“候选 Key 校验成功”展示为“配置成功”，旧条目保持原样并向前端返回明确错误。
 - 新 Key校验失败：不写入 Keychain，旧 Key继续有效。
 - 校验失败后仅在当前弹窗保持打开期间保留候选 Key，按钮文案变为“重新校验”；关闭弹窗立即从前端状态和后端请求上下文中清除候选 Key，再次打开需要重新填写。
 - 用户再次修改输入内容后，按钮文案恢复为“保存并校验”。
@@ -146,12 +178,14 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 
 ## 7. 状态与交互
 
-每个厂商独立维护四种状态：
+每个厂商独立维护以下状态：
 
+- 初始化中：协调器尚未完成首次 Keychain 读取。
 - 未配置：Keychain 中没有对应条目。
 - 校验中：正在执行最小真实请求，相关操作不可重复触发。
 - 可用：最近一次真实请求成功。
 - 不可用：最近一次真实请求失败。
+- 钥匙串不可访问：无法确定 Key 是否存在，所有依赖 Key 的操作暂停。
 
 启动校验不阻塞用户查看历史、详情或 Prompt 设置。某一厂商校验失败不影响其他厂商。
 
@@ -165,17 +199,18 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 上传队列生命周期：
 
 - 选择文件时优先保存本地文件引用，不复制音频到临时目录。
-- 若平台实现必须生成临时副本，在移除文件、取消任务和正常退出时清理；异常退出遗留内容在下次启动时按任务清单清理。
+- 若平台实现必须生成临时副本，按 SQLite `temp_file_manifest` 管理，在移除文件、取消任务和正常退出时清理；异常退出遗留内容在下次启动时按清单清理。
 - 队列在开始分析前不绑定厂商，切换厂商后可继续使用同一批文件。
 
 开始分析时：
 
-1. 锁定当前厂商和当前文件列表。
-2. 对当前厂商执行最小真实请求。
-3. 校验成功后开始本地 Whisper 转写。
-4. 校验失败时停留在上传态，保留全部文件，提示修改配置或重新校验。
-5. Whisper每完成一个可恢复分段就保存转写进度；完整转写完成后保存可复用的转写产物。
-6. 模型分析失败时保留音频、转写和任务上下文，允许使用原厂商重试，或明确切换厂商后复用转写文本重新分析，不重复执行Whisper。
+1. 等待正在进行的厂商切换完成，原子读取并锁定当前厂商和当前文件列表。
+2. 读取当前厂商 Keychain 条目；未配置或钥匙串不可访问时立即返回，不发起网络请求。
+3. 对已配置的当前厂商执行最小真实请求。
+4. 校验成功后开始本地 Whisper 转写。
+5. 校验失败时停留在上传态，保留全部文件，提示修改配置或重新校验。
+6. Whisper每完成一个可恢复分段就保存转写进度；完整转写完成后保存可复用的转写产物。
+7. 模型分析失败时保留音频、转写和任务上下文，允许使用原厂商重试，或明确切换厂商后复用转写文本重新分析，不重复执行Whisper。
 
 ## 8. 错误分类
 
@@ -195,13 +230,15 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 
 `rate_limited` 必须优先遵守厂商返回的 `Retry-After`；冷却期内禁用该厂商的“重新校验”和“开始分析”。没有 `Retry-After` 时采用有限指数退避，不写死固定30秒，不无限自动重试。
 
-厂商原始错误只允许进入最多50条的纯内存环形诊断缓冲区，进程退出即销毁。写入前必须删除请求头、Key、令牌和其他认证信息；禁止把未过滤原始错误写入文件、标准输出或标准错误。正式日志只记录归一化错误代码。
+冷却状态绑定 `provider_id + credential_generation`，而不是永久绑定厂商。提交候选新 Key时先递增generation，新凭证可以立即校验；旧凭证的冷却记录保留至过期。接口返回 `cooldown_until`，前端按本机当前时间计算并展示剩余秒数，到期后主动刷新状态。
+
+厂商原始错误只允许进入最多50条、支持并发安全写入的纯内存环形诊断缓冲区，进程退出即销毁。写入前必须删除请求头、Key、令牌和其他认证信息；禁止把未过滤原始错误写入文件、标准输出或标准错误。正式日志只记录归一化错误代码。
 
 ## 9. 本地接口边界
 
 建议由本地后端提供统一接口，前端不得直接持有或请求 Keychain：
 
-- `GET /api/providers`：读取三个厂商的非敏感状态。
+- `GET /api/providers`：读取三个厂商的非敏感状态，包括 `provider_id`、`active`、`state`、`last_validated_at`、归一化错误代码和文案、`cooldown_until`。
 - `POST /api/providers/:id/validate`：使用 Keychain 中已有 Key重新校验。
 - `PUT /api/providers/:id/key`：校验新 Key，成功后写入 Keychain。
 - `POST /api/providers/:id/activate`：将已配置且可用的厂商设为当前厂商。
@@ -212,6 +249,10 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 
 重复提交相同 Key的最终状态必须幂等，但仍需执行真实校验，因为用户可能正在主动验证同一 Key是否恢复可用。
 
+`GET /api/providers` 优先返回 `ProviderStateCoordinator` 的内存共识；协调器尚未完成初始化时返回 `initializing` 并在后台继续加载，不直接用 SQLite 陈旧缓存生成当前状态。Keychain 读取失败时返回 `keychain_unavailable`。
+
+`POST /api/providers/:id/activate` 只有在目标厂商已配置且可用时成功。接口响应前必须在单个 SQLite 事务内将其他厂商设为非 active、目标厂商设为 active，并同步更新协调器内存状态，确保任意时刻最多一个厂商为 active。
+
 ## 10. 状态协调器与并发一致性
 
 本地后端提供单例 `ProviderStateCoordinator`，统一协调：
@@ -220,6 +261,8 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 - `ProviderValidationService`：执行真实校验、任务去重、冷却和结果归一化。
 - `ProviderMetadataRepository`：在 SQLite 中保存非敏感展示缓存。
 - `AnalysisJobCoordinator`：锁定批次、保存转写恢复点和恢复模型分析。
+
+本地后端启动时获取应用实例锁；已有实例持锁时，新进程直接提示“服务已运行”并退出，避免两个后端同时维护独立内存状态。Keychain 的重复条目重试和 SQLite 事务仍作为跨进程防御措施。
 
 ### 10.1 credential generation
 
@@ -235,17 +278,21 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 - 启动校验进行中时用户点击“开始分析”，分析流程等待并复用现有任务结果，不创建第二个请求。
 - UI进入“正在校验模型”状态并禁用重复操作。
 - 候选新 Key属于新的generation，不复用旧 Key校验任务。
+- 用户在候选 Key 尚未持久化时关闭弹窗，后端尽力取消对应 HTTP 请求并使该任务generation失效；无法取消的响应不得再写入状态或Keychain。
 
 ### 10.3 Keychain与SQLite协调
 
+- 同一厂商的 Keychain 写入在协调器内串行执行，避免本进程内多个候选 Key 交错覆盖。
 - Keychain条目存在性决定“未配置/已配置”；SQLite不得反向创建或删除Keychain条目。
 - SQLite校验元数据在单个数据库事务中更新，但不与Keychain组成跨存储事务。
-- 启动时执行状态校正：Keychain无条目则强制未配置；Keychain有条目则重新校验并覆盖SQLite缓存。
-- `SecItemUpdate`失败时旧Key保持原样，不更新SQLite。
+- 启动时执行状态校正：Keychain明确返回无条目才强制未配置；Keychain有条目则重新校验并覆盖SQLite缓存；Keychain不可访问则暂停校正并保留“未知”配置状态。
+- `SecItemUpdate`或回退写入失败时旧Key保持原样，不更新SQLite。
 - Keychain更新成功但SQLite失败时不回滚Keychain；当前状态标记为需要校正，并在本次运行重试元数据写入或下次启动重新生成。
 
 ### 10.4 分析批次锁定
 
+- 厂商激活和分析批次锁定通过协调器中的全局串行临界区执行；分析请求必须等待正在进行的activate完成。
+- activate接口在SQLite事务提交成功后、仍持有协调器锁时同步更新内存状态并返回；数据库事务失败则保持原active厂商并返回失败。
 - 开始分析前的上传队列是厂商无关数据。
 - 开始分析校验成功后锁定该批次的`provider_id`、`model_id`和Prompt版本。
 - 中途切换全局当前厂商不影响已锁定批次。
@@ -258,10 +305,12 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 - 三个厂商可以分别配置、长期保存和校验。
 - 关闭并重新启动程序后，Key仍可用且页面不显示 Key内容。
 - 启动后只校验已配置厂商，并独立展示结果。
+- Keychain 不可访问时不误显示“未配置”，也不允许保存、切换或分析。
 - 可用厂商之间无需重新填写 Key即可切换。
 - 配置新厂商成功后不自动切换，只有用户明确操作才变更当前厂商。
 - 新 Key失败不会覆盖旧 Key。
 - 开始分析前校验失败时，文件列表完整保留且 Whisper 不启动。
+- 未配置厂商点击开始分析时不发起厂商网络请求。
 - 当前厂商不可用时，历史和 Prompt 设置仍可操作。
 - 当前厂商不可用时，修改配置和重新校验仍可操作。
 - 模型分析失败后可复用完整转写重试或更换厂商，不重复执行 Whisper。
@@ -280,13 +329,19 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 - Keychain 读写和覆盖的集成测试。
 - 三个厂商适配器的成功、认证失败、权限失败、余额不足、限流、网络失败和超时测试。
 - 新 Key失败保留旧 Key的原子性测试。
+- `SecItemAdd`遭遇`errSecDuplicateItem`后回退`SecItemUpdate`的并发测试。
+- Keychain读取或写入返回授权、交互、I/O错误时的状态和旧Key保留测试。
 - `credential_generation`旧任务结果丢弃测试。
 - 启动并行校验、同厂商任务去重与开始分析等待复用测试。
 - Keychain更新成功、SQLite失败后的启动校正测试。
 - 开始分析前校验失败不启动 Whisper 的流程测试。
 - 模型调用失败保留转写、原厂商重试和更换厂商复用转写测试。
 - 临时文件正常退出清理和异常退出后启动清理测试。
-- 前端四种状态、厂商切换、按钮禁用和错误文案测试。
+- `temp_file_manifest`仅清理应用临时目录、不删除用户原文件的安全测试。
+- activate与开始分析并发时使用新active厂商的互斥测试，以及active唯一性事务测试。
+- 冷却期状态透传、前端倒计时和新credential generation独立校验测试。
+- 校验响应包含大小写、引号或换行时不误判，以及错误或不可解析响应不误判为成功的测试。
+- 前端全部状态、厂商切换、按钮禁用和错误文案测试。
 
 ## 12. 已确认决策
 
@@ -303,9 +358,21 @@ SQLite 中的 `validation_status` 是展示缓存，不是配置事实。若 Key
 - 模型分析失败时保留Whisper转写，允许重试或更换厂商复用。
 - Keychain是配置事实来源，SQLite只保存非敏感校验缓存。
 
-## 13. 技术依据
+## 13. 已解决的边界风险
+
+- Keychain 状态码只有 `errSecItemNotFound` 代表未配置；访问失败使用独立状态。
+- Keychain 并发新增通过 Add 返回重复后再次 Update 收敛。
+- 限流状态按凭证generation隔离，新 Key可以立即进行一次真实校验。
+- 临时文件通过 SQLite 清单恢复清理，且只处理应用专属临时目录。
+- provider接口只返回协调器内存共识，不把SQLite缓存当作当前事实。
+- 厂商激活与分析批次锁定串行执行，active更新满足唯一性。
+- 极小请求验证的是身份、权限、网络和模型生成能力，不验证模型是否严格输出字面值`OK`。
+
+## 14. 技术依据
 
 - Apple建议更新已有Keychain条目时使用`SecItemUpdate`，避免重复添加或遗留旧条目：<https://developer.apple.com/documentation/security/updating-and-deleting-keychain-items>
 - Apple建议在macOS上通过`kSecUseDataProtectionKeychain`使用数据保护钥匙串：<https://developer.apple.com/documentation/security/ksecusedataprotectionkeychain>
 - Apple要求选择满足使用场景的最严格Keychain可访问级别：<https://developer.apple.com/documentation/security/restricting-keychain-item-accessibility>
+- Apple将`errSecDuplicateItem`定义为相同主键的条目已存在：<https://developer.apple.com/documentation/security/errsecduplicateitem>
+- Apple Security Framework状态码用于区分条目不存在、认证失败、交互受限和I/O错误：<https://developer.apple.com/documentation/security/security-framework-result-codes>
 - SQLite事务只能保证SQLite数据库内部修改的原子性；Keychain不属于SQLite事务边界：<https://www.sqlite.org/lang_transaction.html>
