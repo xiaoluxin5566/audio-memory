@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLATFORM="${AUDIO_MEMORY_PLATFORM_OVERRIDE:-$(uname -s)}"
 ARCHITECTURE="${AUDIO_MEMORY_ARCH_OVERRIDE:-$(uname -m)}"
 DRY_RUN="${AUDIO_MEMORY_DRY_RUN:-0}"
+MODEL_SMOKE_TEST="${AUDIO_MEMORY_MODEL_SMOKE_TEST:-0}"
 
 fail() { printf '安装失败：%s\n' "$1" >&2; exit 1; }
 need() {
@@ -18,59 +19,86 @@ run() {
 
 [ "$PLATFORM" = "Darwin" ] || fail "第一期仅支持 macOS。"
 [ "$ARCHITECTURE" = "arm64" ] || fail "第一期仅支持 Apple Silicon（M 系列芯片）。"
-need uv
-need npm
-need ffmpeg
+if [ "$MODEL_SMOKE_TEST" = "1" ]; then
+  need python3
+else
+  need uv
+  need npm
+  need ffmpeg
 
-printf '正在准备 Audio Memory…\n'
-(
-  cd "$PROJECT_ROOT/backend"
-  run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
-)
-(
-  cd "$PROJECT_ROOT/prototype"
-  run npm ci
-  run npm run build
-)
+  printf '正在准备 Audio Memory…\n'
+  (
+    cd "$PROJECT_ROOT/backend"
+    run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
+  )
+  (
+    cd "$PROJECT_ROOT/prototype"
+    run npm ci
+    run npm run build
+  )
+fi
 
 if [ "${AUDIO_MEMORY_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     printf '将下载并登记本地 Whisper 模型：mlx-community/whisper-large-v3-turbo\n'
-    printf '将下载本地语音检测模型：silero_vad.onnx\n'
-    printf '将下载本地说话人分段模型：sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx\n'
-    printf '将下载本地说话人嵌入模型：3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx\n'
+    printf '将下载并校验本地语音检测模型：silero_vad.onnx sha256=9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6\n'
+    printf '将下载并校验本地说话人分段模型：sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx sha256=10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e\n'
+    printf '将下载并校验本地说话人嵌入模型：3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx sha256=1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b\n'
   else
     (
       cd "$PROJECT_ROOT/backend"
-      env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync python - <<'PY'
+      python_command=(env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync python)
+      if [ "$MODEL_SMOKE_TEST" = "1" ]; then
+        python_command=(python3)
+      fi
+      "${python_command[@]}" - <<'PY'
 import hashlib
-import io
 import json
-import tarfile
-from datetime import UTC, datetime
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
-from huggingface_hub import snapshot_download
-
-model_id = "mlx-community/whisper-large-v3-turbo"
-snapshot = Path(snapshot_download(repo_id=model_id))
-files = []
-for path in sorted(snapshot.rglob("*")):
-    if path.is_file():
-        hasher = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        digest = hasher.hexdigest()
-        files.append({"path": str(path.relative_to(snapshot)), "sha256": digest, "size": path.stat().st_size})
-manifest_root = Path.home() / "Library" / "Application Support" / "AudioMemory"
+smoke_test = os.environ.get("AUDIO_MEMORY_MODEL_SMOKE_TEST") == "1"
+root_override = os.environ.get("AUDIO_MEMORY_MODEL_ROOT_OVERRIDE")
+manifest_root = (
+    Path(root_override)
+    if root_override
+    else Path.home() / "Library" / "Application Support" / "AudioMemory"
+)
 manifest_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-manifest = {"model_id": model_id, "snapshot": str(snapshot), "created_at": datetime.now(UTC).isoformat(), "files": files}
-target = manifest_root / "whisper-model-manifest.json"
-temporary = target.with_suffix(".tmp")
-temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-temporary.replace(target)
+
+if not smoke_test:
+    from huggingface_hub import snapshot_download
+
+    model_id = "mlx-community/whisper-large-v3-turbo"
+    snapshot = Path(snapshot_download(repo_id=model_id))
+    files = []
+    for path in sorted(snapshot.rglob("*")):
+        if path.is_file():
+            hasher = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            files.append(
+                {
+                    "path": str(path.relative_to(snapshot)),
+                    "sha256": hasher.hexdigest(),
+                    "size": path.stat().st_size,
+                }
+            )
+    manifest = {
+        "model_id": model_id,
+        "snapshot": str(snapshot),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+    }
+    target = manifest_root / "whisper-model-manifest.json"
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(target)
 
 diarization_root = manifest_root / "models" / "diarization"
 vad_target = diarization_root / "silero_vad.onnx"
@@ -83,20 +111,34 @@ embedding_target = (
     diarization_root
     / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 )
-vad_url = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "asr-models/silero_vad.onnx"
-)
-segmentation_url = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "speaker-segmentation-models/"
-    "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-)
-embedding_url = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "speaker-recongition-models/"
-    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
-)
+if smoke_test:
+    fixture_root = Path(os.environ["AUDIO_MEMORY_MODEL_FIXTURE_DIR"])
+    model_specs = (
+        (vad_target, (fixture_root / "silero_vad.onnx").as_uri(), "4eb700fab059058cd267f0b640d4f5aff07f5158b97553ea7dbeaec7e263d122", 12),
+        (segmentation_target, (fixture_root / "model.int8.onnx").as_uri(), "a95925d7809c1af5b13c188c3642c62fa1553645b6fd068504c54fc2e7531870", 21),
+        (embedding_target, (fixture_root / "embedding.onnx").as_uri(), "abda33e7bd954bcc6381affcb1525774aaf7ad77aa931b0f8f8e54325aa61de2", 18),
+    )
+else:
+    model_specs = (
+        (
+            vad_target,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+            "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+            None,
+        ),
+        (
+            segmentation_target,
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/340b52f1f5cd12d45a30fa284691417eaad2ff92/model.int8.onnx",
+            "10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e",
+            1540514,
+        ),
+        (
+            embedding_target,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+            "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+            None,
+        ),
+    )
 
 
 def atomic_write(destination: Path, content: bytes) -> None:
@@ -106,44 +148,66 @@ def atomic_write(destination: Path, content: bytes) -> None:
     temporary.replace(destination)
 
 
-if not vad_target.is_file():
-    with urlopen(vad_url, timeout=120) as response:
-        atomic_write(vad_target, response.read())
-
-if not segmentation_target.is_file():
-    with urlopen(segmentation_url, timeout=120) as response:
-        archive_bytes = response.read()
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:bz2") as archive:
-        member = next(
-            item
-            for item in archive.getmembers()
-            if item.isfile() and item.name.endswith("/model.int8.onnx")
-        )
-        extracted = archive.extractfile(member)
-        if extracted is None:
-            raise RuntimeError("Pyannote INT8 model is missing from official archive")
-        atomic_write(segmentation_target, extracted.read())
-
-if not embedding_target.is_file():
-    with urlopen(embedding_url, timeout=120) as response:
-        atomic_write(embedding_target, response.read())
-
-diarization_files = []
-for model_path in (vad_target, segmentation_target, embedding_target):
+def file_sha256(path: Path) -> str:
     hasher = hashlib.sha256()
-    with model_path.open("rb") as handle:
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def model_is_valid(path: Path, expected_sha256: str, expected_size) -> bool:
+    return (
+        path.is_file()
+        and (expected_size is None or path.stat().st_size == expected_size)
+        and file_sha256(path) == expected_sha256
+    )
+
+
+def install_verified_model(
+    destination: Path,
+    url: str,
+    expected_sha256: str,
+    expected_size,
+) -> None:
+    if model_is_valid(destination, expected_sha256, expected_size):
+        return
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".download")
+    temporary.unlink(missing_ok=True)
+    try:
+        with urlopen(url, timeout=120) as response, temporary.open("xb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if not model_is_valid(temporary, expected_sha256, expected_size):
+            raise RuntimeError(f"Model integrity verification failed: {destination.name}")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+for model_path, model_url, expected_sha256, expected_size in model_specs:
+    install_verified_model(
+        model_path, model_url, expected_sha256, expected_size
+    )
+
+diarization_files = []
+for model_path, model_url, expected_sha256, expected_size in model_specs:
     diarization_files.append(
         {
             "path": str(model_path.relative_to(manifest_root)),
-            "sha256": hasher.hexdigest(),
+            "sha256": file_sha256(model_path),
+            "expected_sha256": expected_sha256,
             "size": model_path.stat().st_size,
+            "expected_size": expected_size,
+            "source": model_url,
         }
     )
 diarization_manifest = {
-    "created_at": datetime.now(UTC).isoformat(),
-    "source": "k2-fsa/sherpa-onnx official releases",
+    "created_at": datetime.now(timezone.utc).isoformat(),
+    "source": "pinned official model sources",
     "files": diarization_files,
 }
 diarization_manifest_target = manifest_root / "diarization-model-manifest.json"

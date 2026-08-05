@@ -32,6 +32,7 @@ WHISPER_CHUNK_SECONDS = 300
 CHUNK_SEGMENT_STRIDE = 10_000
 DEFAULT_SPEECH_PADDING_MS = 500
 MAX_SPEECH_WINDOW_MS = 30 * 60 * 1000
+SPEECH_WINDOW_OVERLAP_MS = 30 * 1000
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +57,70 @@ class SpeechMappingEntry:
     compact_end_ms: int
     source_start_ms: int
     source_end_ms: int
+
+
+class FileSpeakerCoordinator:
+    """Reconcile window-local speaker labels using source-time overlap only."""
+
+    MIN_REUSE_OVERLAP_MS = 2_000
+
+    def __init__(self) -> None:
+        self._next_speaker_index = 0
+        self._previous_turns: list[SpeakerTurn] = []
+
+    def coordinate(
+        self,
+        window: SpeechInterval,
+        local_turns: list[SpeakerTurn],
+    ) -> list[SpeakerTurn]:
+        absolute_turns = [
+            SpeakerTurn(
+                window.start_ms + turn.start_ms,
+                window.start_ms + turn.end_ms,
+                turn.speaker_id,
+            )
+            for turn in local_turns
+        ]
+        overlap_totals: dict[tuple[str, str], int] = {}
+        for previous in self._previous_turns:
+            for current in absolute_turns:
+                overlap = max(
+                    0,
+                    min(previous.end_ms, current.end_ms)
+                    - max(previous.start_ms, current.start_ms),
+                )
+                key = (previous.speaker_id, current.speaker_id)
+                overlap_totals[key] = overlap_totals.get(key, 0) + overlap
+
+        label_map: dict[str, str] = {}
+        used_global: set[str] = set()
+        candidates = [
+            (overlap, global_id, local_id)
+            for (global_id, local_id), overlap in overlap_totals.items()
+            if overlap > self.MIN_REUSE_OVERLAP_MS
+        ]
+        for _, global_id, local_id in sorted(candidates, reverse=True):
+            if local_id in label_map or global_id in used_global:
+                continue
+            label_map[local_id] = global_id
+            used_global.add(global_id)
+
+        coordinated: list[SpeakerTurn] = []
+        for turn in absolute_turns:
+            if turn.speaker_id not in label_map:
+                label_map[turn.speaker_id] = (
+                    f"speaker_{self._next_speaker_index:02d}"
+                )
+                self._next_speaker_index += 1
+            coordinated.append(
+                SpeakerTurn(
+                    turn.start_ms,
+                    turn.end_ms,
+                    label_map[turn.speaker_id],
+                )
+            )
+        self._previous_turns = coordinated
+        return coordinated
 
 
 class VoiceActivityDetector:
@@ -110,6 +175,23 @@ class VoiceActivityDetector:
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("Unable to open the VAD audio stream")
 
+        intervals: list[SpeechInterval] = []
+
+        def drain_completed_segments() -> None:
+            while not vad.empty():
+                segment = vad.front
+                intervals.append(
+                    SpeechInterval(
+                        round(segment.start / self.SAMPLE_RATE * 1000),
+                        round(
+                            (segment.start + len(segment.samples))
+                            / self.SAMPLE_RATE
+                            * 1000
+                        ),
+                    )
+                )
+                vad.pop()
+
         window_bytes = window_samples * 2
         while raw := process.stdout.read(window_bytes):
             sample_count = len(raw) // 2
@@ -122,6 +204,7 @@ class VoiceActivityDetector:
             if sample_count < window_samples:
                 samples = np.pad(samples, (0, window_samples - sample_count))
             vad.accept_waveform(samples)
+            drain_completed_segments()
         process.stdout.close()
         return_code = process.wait()
         stderr = process.stderr.read()
@@ -132,20 +215,7 @@ class VoiceActivityDetector:
             )
 
         vad.flush()
-        intervals: list[SpeechInterval] = []
-        while not vad.empty():
-            segment = vad.front
-            intervals.append(
-                SpeechInterval(
-                    round(segment.start / self.SAMPLE_RATE * 1000),
-                    round(
-                        (segment.start + len(segment.samples))
-                        / self.SAMPLE_RATE
-                        * 1000
-                    ),
-                )
-            )
-            vad.pop()
+        drain_completed_segments()
         return intervals
 
 
@@ -211,6 +281,21 @@ def map_compact_range(
             )
         )
     return source_ranges
+
+
+def build_processing_windows(
+    canonical_windows: list[SpeechInterval],
+) -> list[SpeechInterval]:
+    processing: list[SpeechInterval] = []
+    for index, window in enumerate(canonical_windows):
+        start_ms = window.start_ms
+        if index and canonical_windows[index - 1].end_ms == window.start_ms:
+            start_ms = max(
+                canonical_windows[index - 1].start_ms,
+                window.start_ms - SPEECH_WINDOW_OVERLAP_MS,
+            )
+        processing.append(SpeechInterval(start_ms, window.end_ms))
+    return processing
 
 
 def diarize_fail_open(diarization_engine, path: Path) -> list[SpeakerTurn]:
@@ -572,18 +657,19 @@ class MLXWhisperEngine:
                     int(file.duration_ms or 0),
                     max((item.end_ms for item in detected), default=0),
                 )
-                speech_intervals, mapping = build_speech_mapping(
+                canonical_intervals, mapping = build_speech_mapping(
                     detected,
                     duration_ms=duration_ms,
                     padding_ms=self.speech_padding_ms,
                 )
                 await self._persist_speech_mapping(file, mapping)
+                speech_intervals = build_processing_windows(canonical_intervals)
                 chunks = await self._extract_speech_intervals(
                     source, chunk_dir, speech_intervals
                 )
                 source_offsets = [item.start_ms for item in speech_intervals]
                 audio_durations = [
-                    item.end_ms - item.start_ms for item in speech_intervals
+                    item.end_ms - item.start_ms for item in canonical_intervals
                 ]
             else:
                 await self._persist_speech_mapping(file, [])
@@ -609,22 +695,22 @@ class MLXWhisperEngine:
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
+            speaker_coordinator = FileSpeakerCoordinator()
+            known_segments = await self._existing_transcript_signatures(file.id)
             for chunk_index, chunk in enumerate(chunks):
-                if (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from:
-                    continue
+                skip_transcription = (
+                    (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from
+                )
                 turns: list[SpeakerTurn] = []
                 if vad_succeeded and self.diarization_engine is not None:
                     local_turns = await asyncio.to_thread(
                         diarize_fail_open, self.diarization_engine, chunk
                     )
-                    turns = [
-                        SpeakerTurn(
-                            source_offsets[chunk_index] + turn.start_ms,
-                            source_offsets[chunk_index] + turn.end_ms,
-                            turn.speaker_id,
-                        )
-                        for turn in local_turns
-                    ]
+                    turns = speaker_coordinator.coordinate(
+                        speech_intervals[chunk_index], local_turns
+                    )
+                if skip_transcription:
+                    continue
                 started = time.monotonic()
                 raw_segments = await loop.run_in_executor(
                     self._executor, _transcribe_worker, str(chunk), self.model_id,
@@ -637,8 +723,22 @@ class MLXWhisperEngine:
                     turns=turns,
                     source_offset_ms=source_offsets[chunk_index],
                 ):
+                    if vad_succeeded:
+                        canonical = canonical_intervals[chunk_index]
+                        midpoint_ms = (segment.start_ms + segment.end_ms) // 2
+                        if not (
+                            canonical.start_ms
+                            <= midpoint_ms
+                            < canonical.end_ms
+                        ):
+                            continue
+                    if self._duplicates_known_segment(segment, known_segments):
+                        continue
                     if segment.index >= resume_from:
                         valid_count += 1
+                        known_segments.append(
+                            (segment.start_ms, segment.end_ms, segment.text.strip())
+                        )
                         yield segment
                 if valid_count:
                     self.eta_tracker.record(
@@ -761,6 +861,33 @@ class MLXWhisperEngine:
             if stored is not None:
                 stored.speech_mapping_json = serialized
                 await session.commit()
+
+    async def _existing_transcript_signatures(
+        self, file_id: str
+    ) -> list[tuple[int, int, str]]:
+        async with self.database.session() as session:
+            rows = await session.execute(
+                select(Transcript.start_ms, Transcript.end_ms, Transcript.text).where(
+                    Transcript.job_file_id == file_id
+                )
+            )
+            return [
+                (int(start_ms), int(end_ms), str(text).strip())
+                for start_ms, end_ms, text in rows.all()
+            ]
+
+    @staticmethod
+    def _duplicates_known_segment(
+        segment: TranscriptSegment,
+        known_segments: list[tuple[int, int, str]],
+    ) -> bool:
+        text = segment.text.strip()
+        return any(
+            text == known_text
+            and min(segment.end_ms, known_end_ms)
+            > max(segment.start_ms, known_start_ms)
+            for known_start_ms, known_end_ms, known_text in known_segments
+        )
 
     async def _register(self, job_id: str, manifest_id: str, path: Path) -> None:
         async with self.database.session() as session:

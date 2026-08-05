@@ -10,12 +10,58 @@ from audio_memory.diarization.engine import (
     SpeakerTurn,
 )
 from audio_memory.transcription.engine import (
+    FileSpeakerCoordinator,
     SpeechInterval,
     VoiceActivityDetector,
     build_speech_mapping,
     map_compact_range,
     valid_chunk_segments,
 )
+
+
+def test_file_speaker_labels_do_not_reuse_local_ids_without_overlap() -> None:
+    coordinator = FileSpeakerCoordinator()
+
+    first = coordinator.coordinate(
+        SpeechInterval(0, 10_000),
+        [SpeakerTurn(0, 5_000, "local_00")],
+    )
+    second = coordinator.coordinate(
+        SpeechInterval(20_000, 30_000),
+        [SpeakerTurn(0, 5_000, "local_00")],
+    )
+
+    assert [item.speaker_id for item in first] == ["speaker_00"]
+    assert [item.speaker_id for item in second] == ["speaker_01"]
+
+
+def test_file_speaker_label_reuses_only_with_more_than_two_seconds_overlap() -> None:
+    coordinator = FileSpeakerCoordinator()
+    first = coordinator.coordinate(
+        SpeechInterval(0, 10_000),
+        [SpeakerTurn(7_000, 10_000, "local_a")],
+    )
+    second = coordinator.coordinate(
+        SpeechInterval(7_000, 17_000),
+        [SpeakerTurn(0, 4_000, "renamed_local_b")],
+    )
+
+    assert first[0].speaker_id == second[0].speaker_id == "speaker_00"
+
+
+def test_file_speaker_label_does_not_reuse_at_exactly_two_seconds_overlap() -> None:
+    coordinator = FileSpeakerCoordinator()
+    first = coordinator.coordinate(
+        SpeechInterval(0, 10_000),
+        [SpeakerTurn(8_000, 10_000, "local_a")],
+    )
+    second = coordinator.coordinate(
+        SpeechInterval(8_000, 18_000),
+        [SpeakerTurn(0, 4_000, "renamed_local_b")],
+    )
+
+    assert first[0].speaker_id == "speaker_00"
+    assert second[0].speaker_id == "speaker_01"
 
 
 def test_vad_streams_pcm_in_bounded_windows(tmp_path, monkeypatch) -> None:
@@ -88,6 +134,91 @@ def test_vad_streams_pcm_in_bounded_windows(tmp_path, monkeypatch) -> None:
 
     assert intervals == [SpeechInterval(1_000, 1_500)]
     assert reads and max(reads) == 1024
+
+
+def test_vad_drains_completed_segments_while_streaming(tmp_path, monkeypatch) -> None:
+    class FakeStdout:
+        remaining = 200
+
+        def read(self, size: int) -> bytes:
+            if self.remaining == 0:
+                return b""
+            self.remaining -= 1
+            return b"\0" * size
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        stdout = FakeStdout()
+        stderr = SimpleNamespace(read=lambda: b"")
+        returncode = 0
+
+        def wait(self) -> int:
+            return 0
+
+    class FakeVadConfig:
+        def __init__(self) -> None:
+            self.silero_vad = SimpleNamespace(window_size=512)
+            self.sample_rate = None
+
+        def validate(self) -> bool:
+            return True
+
+    instances = []
+
+    class ProducingVad:
+        def __init__(self, _config, buffer_size_in_seconds: int) -> None:
+            self._segments = []
+            self.peak_pending_samples = 0
+            self.accepted = 0
+            self.popped = 0
+            instances.append(self)
+
+        def accept_waveform(self, _samples) -> None:
+            self._segments.append(
+                SimpleNamespace(start=self.accepted * 512, samples=[0] * 512)
+            )
+            self.accepted += 1
+            self.peak_pending_samples = max(
+                self.peak_pending_samples,
+                sum(len(item.samples) for item in self._segments),
+            )
+
+        def flush(self) -> None:
+            pass
+
+        def empty(self) -> bool:
+            return not self._segments
+
+        @property
+        def front(self):
+            return self._segments[0]
+
+        def pop(self) -> None:
+            self._segments.pop(0)
+            self.popped += 1
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sherpa_onnx",
+        SimpleNamespace(
+            VadModelConfig=FakeVadConfig,
+            VoiceActivityDetector=ProducingVad,
+        ),
+    )
+    monkeypatch.setattr(
+        "audio_memory.transcription.engine.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    model = tmp_path / "silero_vad.onnx"
+    model.write_bytes(b"model")
+
+    intervals = VoiceActivityDetector(model).detect(tmp_path / "five-hours.mp3")
+
+    assert len(intervals) == 200
+    assert instances[0].popped == 200
+    assert instances[0].peak_pending_samples == 512
 
 
 def test_word_uses_turn_with_largest_overlap() -> None:

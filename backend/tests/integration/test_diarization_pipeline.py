@@ -10,10 +10,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 
 from audio_memory.api.jobs import router
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
+from audio_memory.diarization.engine import SpeakerTurn
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.engine import (
@@ -24,6 +26,7 @@ from audio_memory.transcription.engine import (
     diarize_fail_open,
     valid_chunk_segments,
 )
+from audio_memory.transcription.checkpoints import TranscriptionService
 
 
 def test_installed_sherpa_runtime_imports() -> None:
@@ -400,7 +403,7 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
     class RecordingDiarizer:
         def diarize(self, path):
             diarized_paths.append(Path(path))
-            return []
+            return [SpeakerTurn(0, 500, "local_00")]
 
     monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe))
     paths = AppPaths.from_home(tmp_path)
@@ -451,6 +454,7 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
     segments = [item async for item in engine.transcribe_file(file, 0)]
 
     assert [item.text for item in segments] == ["语音", "语音"]
+    assert [item.speaker_id for item in segments] == ["speaker_00", "speaker_01"]
     assert extracted == [
         SpeechInterval(59_750, 62_250),
         SpeechInterval(17_998_750, 18_000_000),
@@ -463,6 +467,222 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
         stored = await session.get(JobFile, "file-1")
     assert stored is not None
     assert stored.speech_mapping_json == file.speech_mapping_json
+    await engine.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+        index = int(Path(path).stem.split("-")[-1])
+        if index == 0:
+            return {
+                    "segments": [
+                        {"start": 10.0, "end": 11.0, "text": "首段"},
+                        {"start": 1798.0, "end": 1800.5, "text": "重叠"},
+                ]
+            }
+        return {
+            "segments": [
+                {"start": 29.5, "end": 31.5, "text": "重叠"},
+                {"start": 35.0, "end": 36.0, "text": "尾段"},
+            ]
+        }
+
+    class LongSpeechVad:
+        def detect(self, _path):
+            return [SpeechInterval(0, 1_810_000)]
+
+    class WindowDiarizer:
+        calls = 0
+
+        def diarize(self, _path):
+            self.calls += 1
+            if self.calls == 1:
+                return [SpeakerTurn(1_797_000, 1_800_000, "local_00")]
+            return [SpeakerTurn(27_000, 31_000, "local_00")]
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe))
+    paths = AppPaths.from_home(tmp_path)
+    paths.ensure_directories()
+    database = Database(paths.database)
+    await database.create_schema()
+    source_dir = paths.staging / "job-1"
+    source_dir.mkdir()
+    source = source_dir / "source.mp3"
+    source.write_bytes(b"long local audio")
+    file = JobFile(
+        id="file-1",
+        job_id="job-1",
+        original_name="source.mp3",
+        extension=".mp3",
+        size_bytes=16,
+        sha256="c" * 64,
+        duration_ms=1_810_000,
+        position=0,
+        temporary_path=str(source),
+    )
+    engine = MLXWhisperEngine(
+        database,
+        paths,
+        voice_activity_detector=LongSpeechVad(),
+        diarization_engine=WindowDiarizer(),
+        speech_padding_ms=0,
+    )
+    engine._executor = ThreadPoolExecutor(max_workers=1)
+    extracted: list[SpeechInterval] = []
+
+    async def extract_speech(_source, target_dir, intervals):
+        target_dir.mkdir()
+        extracted.extend(intervals)
+        clips = []
+        for index, _interval in enumerate(intervals):
+            clip = target_dir / f"speech-{index:05d}.wav"
+            clip.write_bytes(b"pcm")
+            clips.append(clip)
+        return clips
+
+    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+
+    segments = [item async for item in engine.transcribe_file(file, 0)]
+
+    assert extracted == [
+        SpeechInterval(0, 1_800_000),
+        SpeechInterval(1_770_000, 1_810_000),
+    ]
+    assert [item.text for item in segments] == ["首段", "重叠", "尾段"]
+    overlap = next(item for item in segments if item.text == "重叠")
+    assert overlap.speaker_id == "speaker_00"
+    assert json.loads(file.speech_mapping_json)[-1]["compact_end_ms"] == 1_810_000
+    await engine.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_resume_after_partial_second_speech_interval(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+        index = int(Path(path).stem.split("-")[-1])
+        return {
+            "segments": [
+                {"start": start, "end": end, "text": text}
+                for start, end, text in (
+                    [(0.1, 0.2, "A")]
+                    if index == 0
+                    else [(0.1, 0.2, "B1"), (0.3, 0.4, "B2")]
+                    if index == 1
+                    else [(0.1, 0.2, "C")]
+                )
+            ]
+        }
+
+    class ThreeIntervalVad:
+        def detect(self, _path):
+            return [
+                SpeechInterval(10_000, 11_000),
+                SpeechInterval(20_000, 22_000),
+                SpeechInterval(30_000, 31_000),
+            ]
+
+    class LocalDiarizer:
+        def diarize(self, _path):
+            return [SpeakerTurn(0, 500, "local_00")]
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe))
+    paths = AppPaths.from_home(tmp_path)
+    paths.ensure_directories()
+    database = Database(paths.database)
+    await database.create_schema()
+    source_dir = paths.staging / "job-1"
+    source_dir.mkdir()
+    source = source_dir / "source.mp3"
+    source.write_bytes(b"checkpoint audio")
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=16,
+                sha256="d" * 64,
+                duration_ms=40_000,
+                position=0,
+                temporary_path=str(source),
+            )
+        )
+        await session.commit()
+
+    engine = MLXWhisperEngine(
+        database,
+        paths,
+        voice_activity_detector=ThreeIntervalVad(),
+        diarization_engine=LocalDiarizer(),
+        speech_padding_ms=0,
+    )
+    engine._executor = ThreadPoolExecutor(max_workers=1)
+
+    async def extract_speech(_source, target_dir, intervals):
+        target_dir.mkdir()
+        clips = []
+        for index, _interval in enumerate(intervals):
+            clip = target_dir / f"speech-{index:05d}.wav"
+            clip.write_bytes(b"pcm")
+            clips.append(clip)
+        return clips
+
+    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+
+    class InterruptDuringSecondInterval:
+        async def transcribe_file(self, file, resume_from):
+            stream = engine.transcribe_file(file, resume_from)
+            emitted = 0
+            try:
+                async for segment in stream:
+                    yield segment
+                    emitted += 1
+                    if emitted == 2:
+                        raise RuntimeError("simulated interruption")
+            finally:
+                await stream.aclose()
+
+    service = TranscriptionService(database)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        await service.run_job("job-1", InterruptDuringSecondInterval())
+
+    await service.resume_job("job-1", engine)
+
+    async with database.session() as session:
+        rows = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert [item.segment_uid for item in rows] == [
+        "file-1:0",
+        "file-1:10000",
+        "file-1:10001",
+        "file-1:20000",
+    ]
+    assert len({item.segment_uid for item in rows}) == 4
+    assert [
+        (item.start_ms, item.end_ms, item.text) for item in rows
+    ] == [
+        (10_100, 10_200, "A"),
+        (20_100, 20_200, "B1"),
+        (20_300, 20_400, "B2"),
+        (30_100, 30_200, "C"),
+    ]
+    assert [item.speaker_id for item in rows] == [
+        "speaker_00",
+        "speaker_01",
+        "speaker_01",
+        "speaker_02",
+    ]
     await engine.close()
     await database.dispose()
 
