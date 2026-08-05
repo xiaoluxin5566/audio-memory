@@ -53,11 +53,13 @@ async def test_feed_history_todo_and_scoped_question(content_client):
     feed = (await client.get("/api/feed")).json()
     history = (await client.get("/api/history")).json()
     answer = await client.post(f"/api/cards/{ids['card_id']}/questions", json={"question": "决定是什么？"})
+    refreshed_feed = (await client.get("/api/feed")).json()
 
     assert feed["todos"][0]["completed"] is True
     assert feed["days"][0]["cards"][0]["scene_id"] == "meeting"
     assert history["days"][0]["audio"][0]["original_name"] == "会议.mp3"
     assert answer.json()["messages"][-1]["role"] == "assistant"
+    assert refreshed_feed["days"][0]["cards"][0]["qa"] == answer.json()["messages"]
 
 
 @pytest.mark.asyncio

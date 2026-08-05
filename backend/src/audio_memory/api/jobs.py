@@ -173,6 +173,51 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
     return {"id": job_id, "stage": JobStage.TRANSCRIBING.value}
 
 
+@router.post("/{job_id}/retry-analysis", status_code=202)
+async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
+    tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
+    if job_id in tasks:
+        raise HTTPException(status_code=409, detail="Analysis is already running")
+    try:
+        job = await service_from(request).get_job(job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.stage != JobStage.FAILED.value or job.error_code != "model_analysis_failed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a failed model analysis can be retried",
+        )
+
+    coordinator = request.app.state.provider_coordinator
+    try:
+        provider = await coordinator.snapshot_active()
+        validation = await coordinator.validate_saved(provider.provider_id)
+        if not validation.ok:
+            raise UploadError(
+                "当前模型不可用，请修改配置或重新校验",
+                code="provider_unavailable",
+            )
+    except (LookupError, UploadError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": getattr(exc, "code", "provider_unavailable"),
+                "message": str(exc),
+            },
+        ) from exc
+
+    snapshot = {
+        "provider_id": provider.provider_id,
+        "model_id": provider.model_id,
+    }
+    track_transcription(
+        request,
+        job_id,
+        request.app.state.analysis_orchestrator.run(job_id, snapshot),
+    )
+    return {"id": job_id, "stage": JobStage.ANALYZING.value}
+
+
 @router.delete("/{job_id}", status_code=204)
 async def cancel_job(job_id: str, request: Request) -> Response:
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks

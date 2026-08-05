@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -13,6 +15,26 @@ from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.uploads.service import UploadService
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
+from audio_memory.domain import JobStage
+from audio_memory.models import AnalysisJob
+
+
+class RetryCoordinator:
+    async def snapshot_active(self):
+        return SimpleNamespace(provider_id="deepseek", model_id="deepseek-v4-flash")
+
+    async def validate_saved(self, provider_id):
+        return SimpleNamespace(ok=True)
+
+
+class RetryOrchestrator:
+    def __init__(self):
+        self.called = asyncio.Event()
+        self.provider_snapshot = None
+
+    async def run(self, job_id, provider_snapshot):
+        self.provider_snapshot = provider_snapshot
+        self.called.set()
 
 
 def make_audio(path: Path, codec: str) -> bytes:
@@ -151,3 +173,27 @@ async def test_abandoned_upload_is_cleaned_on_next_start(job_client, tmp_path):
     assert cleaned == 1
     assert staged_path.exists() is False
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_failed_model_analysis_retries_with_active_provider_without_whisper(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "model_analysis_failed"
+        await session.commit()
+    orchestrator = RetryOrchestrator()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_orchestrator = orchestrator
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+    await asyncio.wait_for(orchestrator.called.wait(), timeout=1)
+
+    assert response.status_code == 202
+    assert orchestrator.provider_snapshot == {
+        "provider_id": "deepseek",
+        "model_id": "deepseek-v4-flash",
+    }

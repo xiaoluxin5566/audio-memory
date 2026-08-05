@@ -42,10 +42,31 @@ class ContentService:
                     select(Todo).order_by(Todo.completed.asc(), Todo.created_at.desc())
                 )
             )
-            rows = await session.execute(
-                select(Batch, Card)
-                .join(Card, Card.batch_id == Batch.id)
-                .order_by(Batch.uploaded_at.desc(), Card.position)
+            rows = list(
+                (
+                    await session.execute(
+                        select(Batch, Card)
+                        .join(Card, Card.batch_id == Batch.id)
+                        .order_by(Batch.uploaded_at.desc(), Card.position)
+                    )
+                ).all()
+            )
+            card_ids = [card.id for _, card in rows]
+            qa_rows = (
+                list(
+                    await session.scalars(
+                        select(QAMessage)
+                        .where(QAMessage.card_id.in_(card_ids))
+                        .order_by(QAMessage.card_id, QAMessage.position)
+                    )
+                )
+                if card_ids
+                else []
+            )
+        qa_by_card: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for message in qa_rows:
+            qa_by_card[message.card_id].append(
+                {"role": message.role, "content": message.content}
             )
         days: dict[str, list[dict[str, object]]] = defaultdict(list)
         for batch, card in rows:
@@ -56,6 +77,7 @@ class ContentService:
                     "scene_id": card.scene_id,
                     "uploaded_at": batch.uploaded_at,
                     "payload": json.loads(card.payload_json),
+                    "qa": qa_by_card[card.id],
                 }
             )
         return {
