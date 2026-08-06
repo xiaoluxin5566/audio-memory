@@ -278,6 +278,14 @@ edge cases. They were closed with a second RED/GREEN cycle:
      before its terminal transaction, so a stale owner cannot publish after a
      new owner reclaims the version. Worker cleanup also retains a live owner on
      cancellation until orderly `close()` returns its claim to pending.
+4. Credential/rule terminal-transition fencing:
+   - RED: `test_stale_worker_cannot_mark_credential_changed` raised
+     `CredentialChangedError` and overwrote the new owner; the fixed-rules
+     regression failed because `_require_fixed_rules` accepted no owner token.
+   - GREEN: both terminal transitions now acquire an owner-qualified
+     `running`-state write fence before clearing checkpoints or changing
+     job/history state. A stale owner receives `LeaseLostError` and leaves the
+     replacement worker's version untouched.
 
 Targeted follow-up GREEN:
 
@@ -290,11 +298,11 @@ Final verification after the follow-up (superseding earlier intermediate suite
 counts):
 
 - migration suite:
-  - `6 passed in 0.56s`
+  - `6 passed in 0.62s`
 - full Task 5 focused regression set:
-  - `56 passed in 2.84s`
+  - `58 passed in 2.93s`
 - complete backend suite:
-  - `319 passed in 5.23s`
+  - `321 passed in 5.15s`
 - `python -m compileall -q src tests`:
   - exit 0, no output
 - `git diff --check`:

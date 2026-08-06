@@ -112,7 +112,7 @@ class AnalysisRunner:
         self, version_id: str, worker_owner_id: str | None = None
     ) -> AnalysisOutcome:
         version = await self._version(version_id, worker_owner_id)
-        await self._require_fixed_rules(version)
+        await self._require_fixed_rules(version, worker_owner_id)
         provider_snapshot = {
             "provider_id": version.provider_id,
             "model_id": version.model_id,
@@ -124,7 +124,7 @@ class AnalysisRunner:
         prompts = self._json_object(version.prompt_snapshot_json)
         staged = self._json_object(version.staged_results_json)
         try:
-            await self._require_generation(version)
+            await self._require_generation(version, worker_owner_id)
             event_map = await self._event_map(
                 version,
                 transcript,
@@ -148,12 +148,12 @@ class AnalysisRunner:
                         schema=_SCENE_MODELS[scene_id].model_json_schema(),
                     )
                     await self._require_ownership(version.id, worker_owner_id)
-                    await self._require_generation(version)
+                    await self._require_generation(version, worker_owner_id)
                     generated = await self.provider.analyze_scene(
                         scene_id, request, provider_snapshot
                     )
                     await self._require_ownership(version.id, worker_owner_id)
-                    await self._require_generation(version)
+                    await self._require_generation(version, worker_owner_id)
                     result = adapter.validate_python(
                         generated.model_dump(mode="python")
                         if hasattr(generated, "model_dump")
@@ -166,12 +166,12 @@ class AnalysisRunner:
                 results.append(result)
 
             await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version)
+            await self._require_generation(version, worker_owner_id)
             raw_delta = await self.profile_extractor.extract(
                 transcript, profile, provider_snapshot
             )
             await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version)
+            await self._require_generation(version, worker_owner_id)
             verified_delta = await self._save_profile_candidates(
                 version.id, raw_delta, segment_ids, worker_owner_id
             )
@@ -181,7 +181,7 @@ class AnalysisRunner:
                 version.provider_id
             ) as final_generation:
                 if final_generation != version.credential_generation:
-                    await self._mark_credential_changed(version)
+                    await self._mark_credential_changed(version, worker_owner_id)
                 outcome = await self.publisher.publish(
                     version.id,
                     results,
@@ -199,7 +199,7 @@ class AnalysisRunner:
             raise
         except ProviderAnalysisError:
             await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version)
+            await self._require_generation(version, worker_owner_id)
             await self._mark_failed(version.id, worker_owner_id)
             raise
         except BaseException:
@@ -224,7 +224,7 @@ class AnalysisRunner:
         await self._require_ownership(version.id, worker_owner_id)
         generated = await self.provider.analyze_event_map(request, provider_snapshot)
         await self._require_ownership(version.id, worker_owner_id)
-        await self._require_generation(version)
+        await self._require_generation(version, worker_owner_id)
         event_map = EventMap.model_validate(
             generated.model_dump(mode="python")
             if hasattr(generated, "model_dump")
@@ -314,21 +314,42 @@ class AnalysisRunner:
             )
         return structured
 
-    async def _require_generation(self, version: AnalysisVersion) -> None:
+    async def _require_generation(
+        self, version: AnalysisVersion, worker_owner_id: str | None
+    ) -> None:
         current = await self.generation_source.credential_generation(
             version.provider_id
         )
         if current == version.credential_generation:
             return
-        await self._mark_credential_changed(version)
+        await self._mark_credential_changed(version, worker_owner_id)
 
-    async def _mark_credential_changed(self, version: AnalysisVersion) -> None:
+    async def _mark_credential_changed(
+        self, version: AnalysisVersion, worker_owner_id: str | None
+    ) -> None:
         async with self.database.session() as session:
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version.id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(
+                    status="credential_changed",
+                    error_code="credential_changed",
+                    staged_results_json="{}",
+                )
+            )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            transitioned = await session.execute(statement)
+            if int(transitioned.rowcount) != 1:
+                await session.rollback()
+                raise LeaseLostError("Analysis worker lease was lost")
             stored = await session.get(AnalysisVersion, version.id)
             if stored is not None:
-                stored.status = "credential_changed"
-                stored.error_code = "credential_changed"
-                stored.staged_results_json = "{}"
                 if stored.reanalysis_batch_id is not None:
                     history = await session.get(
                         ReanalysisBatch, stored.reanalysis_batch_id
@@ -353,18 +374,37 @@ class AnalysisRunner:
             f"Credential generation changed for {version.provider_id}"
         )
 
-    async def _require_fixed_rules(self, version: AnalysisVersion) -> None:
+    async def _require_fixed_rules(
+        self, version: AnalysisVersion, worker_owner_id: str | None
+    ) -> None:
         current_hash = PromptComposer.fixed_rules_hash()
         if version.fixed_rules_hash == current_hash:
             return
         async with self.database.session() as session:
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version.id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(
+                    status="fixed_rules_changed",
+                    error_code="fixed_rules_changed",
+                    event_map_json=None,
+                    event_map_hash=None,
+                    staged_results_json="{}",
+                )
+            )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            transitioned = await session.execute(statement)
+            if int(transitioned.rowcount) != 1:
+                await session.rollback()
+                raise LeaseLostError("Analysis worker lease was lost")
             stored = await session.get(AnalysisVersion, version.id)
             if stored is not None:
-                stored.status = "fixed_rules_changed"
-                stored.error_code = "fixed_rules_changed"
-                stored.event_map_json = None
-                stored.event_map_hash = None
-                stored.staged_results_json = "{}"
                 if stored.reanalysis_batch_id is not None:
                     history = await session.get(
                         ReanalysisBatch, stored.reanalysis_batch_id

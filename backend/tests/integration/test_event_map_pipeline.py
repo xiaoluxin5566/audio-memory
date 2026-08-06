@@ -163,6 +163,19 @@ class ChangesOnlyAtPublication(StableGeneration):
         yield 5
 
 
+class ReassignsOwnerDuringGenerationCheck(StableGeneration):
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def credential_generation(self, provider_id: str) -> int:
+        async with self.database.session() as session:
+            version = await session.get(AnalysisVersion, "version-1")
+            assert version is not None
+            version.worker_owner_id = "worker-b"
+            await session.commit()
+        return 5
+
+
 class BlockingProvider(RecordingProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -668,4 +681,74 @@ async def test_publisher_rejects_a_stale_worker_owner(tmp_path) -> None:
     assert version is not None and version.status == "running"
     assert version.worker_owner_id == "worker-b"
     assert batches == []
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_mark_credential_changed(tmp_path) -> None:
+    database = Database(tmp_path / "lease-fence-credential.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.worker_owner_id = "worker-a"
+        await session.commit()
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=ReassignsOwnerDuringGenerationCheck(database),
+    )
+
+    with pytest.raises(LeaseLostError):
+        await runner.run("version-1", worker_owner_id="worker-a")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert version is not None and version.status == "running"
+    assert version.worker_owner_id == "worker-b"
+    assert job is not None and job.stage == "analyzing"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_mark_fixed_rules_changed(tmp_path) -> None:
+    database = Database(tmp_path / "lease-fence-rules.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.fixed_rules_hash = "0" * 64
+        version.worker_owner_id = "worker-a"
+        await session.commit()
+    async with database.session() as session:
+        stale_version = await session.get(AnalysisVersion, "version-1")
+        assert stale_version is not None
+    async with database.session() as session:
+        current = await session.get(AnalysisVersion, "version-1")
+        assert current is not None
+        current.worker_owner_id = "worker-b"
+        await session.commit()
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(LeaseLostError):
+        await runner._require_fixed_rules(stale_version, "worker-a")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert version is not None and version.status == "running"
+    assert version.worker_owner_id == "worker-b"
+    assert version.fixed_rules_hash == "0" * 64
+    assert job is not None and job.stage == "analyzing"
     await database.dispose()
