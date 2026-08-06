@@ -88,7 +88,6 @@ def classify_segments(
         invalid_reason = _hard_rejection_reason(segment, speech_intervals)
         if invalid_reason is not None:
             decisions[original_position] = _rejected(segment.index, invalid_reason)
-            prior.append(segment)
             continue
 
         normalized_text = normalize_transcript_text(segment.text)
@@ -217,14 +216,16 @@ def _is_post_silence_repeat(
         or normalized_similarity(segment.text, previous.text) < SIMILARITY_THRESHOLD
     ):
         return False
-    relevant = [
+    silent_intervals = [
         interval
         for interval in energy_intervals
-        if _overlap_ms(gap_start, gap_end, interval.start_ms, interval.end_ms) > 0
+        if not interval.has_signal
+        and _overlap_ms(gap_start, gap_end, interval.start_ms, interval.end_ms) > 0
     ]
-    return bool(relevant) and all(
-        not interval.has_signal for interval in relevant
-    ) and _union_overlap_ms(gap_start, gap_end, relevant) / (gap_end - gap_start) >= SILENCE_ENERGY_COVERAGE
+    return bool(silent_intervals) and (
+        _union_overlap_ms(gap_start, gap_end, silent_intervals) / (gap_end - gap_start)
+        >= SILENCE_ENERGY_COVERAGE
+    )
 
 
 def _has_implausible_speech_rate(

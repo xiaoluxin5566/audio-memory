@@ -156,15 +156,52 @@ def test_marks_repeat_after_confirmed_noninitial_silence_high_risk() -> None:
     assert decisions[1].reason == "post_silence_repeat"
 
 
+def test_silence_repeat_allows_up_to_nineteen_percent_signal_energy() -> None:
+    decisions = classify_segments(
+        [segment(0, 0, 1_000, "请继续"), segment(1, 12_000, 13_000, "请继续")],
+        [TimeInterval(0, 1_000), TimeInterval(12_000, 13_000)],
+        [
+            EnergyInterval(1_000, 6_000, has_signal=False),
+            EnergyInterval(5_000, 9_910, has_signal=False),
+            EnergyInterval(9_910, 12_000, has_signal=True),
+        ],
+    )
+
+    assert decisions[1].state == "HIGH_RISK_PENDING"
+    assert decisions[1].reason == "post_silence_repeat"
+
+
 def test_silence_repeat_requires_eighty_percent_energy_coverage() -> None:
     decisions = classify_segments(
         [segment(0, 0, 1_000, "请继续"), segment(1, 12_000, 13_000, "请继续")],
         [TimeInterval(0, 1_000), TimeInterval(12_000, 13_000)],
-        [EnergyInterval(1_000, 9_799, has_signal=False)],
+        [
+            EnergyInterval(1_000, 6_000, has_signal=False),
+            EnergyInterval(5_000, 9_690, has_signal=False),
+            EnergyInterval(9_690, 12_000, has_signal=True),
+        ],
     )
 
     assert decisions[1].state is None
     assert decisions[1].reason == "light_repetition"
+
+
+def test_rejected_segment_does_not_contribute_to_repeat_history() -> None:
+    decisions = classify_segments(
+        [
+            segment(0, 0, 1_000, "重复文本"),
+            segment(1, 5_000, 6_000, "重复文本"),
+            segment(2, 40_000, 41_000, "重复文本"),
+        ],
+        [TimeInterval(5_000, 6_000), TimeInterval(40_000, 41_000)],
+        [],
+    )
+
+    assert decisions[0].state == "REJECTED"
+    assert [(decision.state, decision.reason) for decision in decisions[1:]] == [
+        (None, None),
+        (None, None),
+    ]
 
 
 def test_does_not_treat_first_segment_as_post_silence_repeat() -> None:
