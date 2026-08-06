@@ -635,13 +635,14 @@ Commit: `git commit -m "feat: add history reanalysis experience"`
 - Create: `scripts/evaluate-prompts.py`
 - Create: `backend/tests/e2e/test_prompt_eval_contract.py`
 - Modify: `docs/qa/phase-1-acceptance.md`
+- Modify: `docs/superpowers/specs/2026-08-05-history-reanalysis-design.md`
 - Modify: `docs/superpowers/plans/2026-08-05-six-scene-prompt-system-implementation.md`
 - Modify: `scripts/doctor.sh`
 - Create: `README.md`
 
 **Interfaces:**
 - Offline evaluator verifies Schema, evidence, event separation, user attribution, todo rules and zero secret leakage.
-- Optional real-provider mode reads saved Key only through `KeychainRepository` and writes a redacted local report.
+- Task 10 is offline-only: the evaluator does not read Keychain, accept a provider execution mode, or call Kimi, DeepSeek or OpenAI.
 
 - [ ] **Step 1: Add contract fixtures and failing assertions**
 
@@ -653,6 +654,8 @@ assert report.unknown_evidence_ids == 0
 assert report.cross_event_contamination == 0
 assert report.false_user_todos == 0
 assert report.whisper_calls_during_reanalysis == 0
+assert report.overdue_auto_completions == 0
+assert report.secret_leaks == 0
 ```
 
 - [ ] **Step 2: Verify the evaluator contract fails before implementation**
@@ -661,13 +664,13 @@ Run: `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/e2e/test_promp
 
 Expected: FAIL because fixtures/evaluator are absent.
 
-- [ ] **Step 3: Implement offline and authorized real-provider modes**
+- [ ] **Step 3: Implement the strict offline evaluator**
 
-Offline mode validates saved examples and cross-references. Real mode accepts `--provider kimi|deepseek|openai`, records model/Prompt versions, latency and token usage when available, and never prints Key, full private transcript or private file path.
+Validate the complete fixture contract, production scene Schemas, evidence cross-references, event separation, speaker attribution, user todo rules, overdue state, reanalysis trace and secret patterns. Derive scenario coverage from fixture behavior rather than trusting declared labels. Reject `--provider` with an explicit offline-only error; do not import provider adapters or `KeychainRepository`.
 
 - [ ] **Step 4: Reconcile all downstream documentation**
 
-Replace every “逾期自动完成” statement with “逾期标红、未完成区优先、不自动完成”. Mark the older demo plan as historical/completed foundation and this plan as the remaining source. Update doctor checks for diarization models, analysis migrations, reanalysis recovery and local session security.
+Correct every stale statement that says an overdue todo completes by itself: overdue items stay incomplete, are highlighted red and appear first in the incomplete section. Mark the older demo plan as historical/completed foundation and this plan as the remaining source. Update doctor checks for diarization models, analysis migrations, reanalysis recovery and local session security.
 
 - [ ] **Step 5: Run the complete release gate**
 
@@ -687,15 +690,15 @@ cd ..
 
 Expected: all commands exit 0; no console errors; no API Key in database/log/feedback fixtures; current history contains only atomically completed versions.
 
-- [ ] **Step 6: Run one user-authorized DeepSeek prompt evaluation and commit**
+- [ ] **Step 6: Run the offline Prompt gate and commit**
 
-Run only while the user's saved DeepSeek configuration is available:
+Run without any saved provider configuration:
 
-`cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --provider deepseek --fixture tests/fixtures/prompt-eval/multi-scene.json`
+`cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --fixture tests/fixtures/prompt-eval/multi-scene.json --fixture tests/fixtures/prompt-eval/negative-cases.json --fixture tests/fixtures/prompt-eval/injection.json`
 
-Expected: report stored under local Application Support evaluation directory; Kimi/OpenAI remain marked not real-tested until their own Keys are configured.
+Expected: the stdout JSON report is redacted, reports all required coverage derived from case behavior, and exits 0 with every release metric at zero. Real-provider evaluation remains explicitly not run and requires a separately authorized future task.
 
-Commit: `git commit -m "test: complete PRD v1.1 release gate"`
+Commit: `git commit -m "feat: add offline prompt evaluation gate"`
 
 ---
 

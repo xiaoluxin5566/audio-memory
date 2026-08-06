@@ -8,6 +8,7 @@
 - `/`、`/history`、`/settings/prompts` 和 `/api/health` 均可访问；未知 `/api/*` 返回 404。
 - 端口被占用时给出可复制的换端口命令；已有健康实例时不重复启动。
 - `./scripts/doctor.sh` 不修改数据、不输出 Key 或厂商原始响应。
+- `./scripts/doctor.sh` 同时检查 Whisper/说话人分段模型、分析迁移链、历史重分析恢复组件和本地会话安全组件。
 
 ## 2. 首次使用与模型配置
 
@@ -30,11 +31,12 @@
 - 批次开始后锁定厂商、模型和 Prompt 版本快照。
 - 转写中断后需用户明确继续，并复用已保存的片段。
 - 模型分析失败后保留完整转写；可切换厂商重新分析，不重复 Whisper。
+- 历史重分析仅复用已保存的结构化转写和说话人结果，Whisper 调用数始终为 0；中断后可从检查点恢复。
 - 失败、取消和未提交批次不进入音频历史与信息流。
 
 ## 4. 信息流与内容操作
 
-- 待办全局置顶；可编辑、完成、删除；过期待办自动完成。
+- 待办全局置顶；可编辑、完成、删除；过期标红、未完成区优先、不自动完成。
 - 日期按自然日分割；批次越新越靠上；同批卡片按会议、家庭教育、内容推荐、成长建议、闲聊灵感排列。
 - 没有命中的场景不生成空卡；右侧只在整批原子发布完成后刷新。
 - 所有卡片可打开覆盖式详情页，关闭后回到原信息流位置。
@@ -55,6 +57,7 @@
 
 - API Key 只存在于 macOS Keychain，SQLite、Prompt、反馈、诊断输出和日志中均不存在明文 Key。
 - 本地服务仅绑定 `127.0.0.1`；前端和 API 同源。
+- 页面会话令牌只以哈希形式持久化；所有写 API 要求同源会话和幂等键，重启后重放不会重复写入。
 - 音频、转写、卡片、画像与反馈均存放在本机应用数据目录。
 - 诊断缓冲区只保留归一化信息，不落盘厂商原始响应。
 - 清理临时文件前进行应用目录边界校验，不能删除目录外文件。
@@ -63,9 +66,17 @@
 
 ```bash
 bash tests/install-smoke.sh
-cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -v
-cd ../prototype && node --test tests/*.test.mjs && npm run build && npm run test:sites
+cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q
+cd ../prototype && node --test tests/*.test.mjs && npm run build && npm run test:e2e -- --reporter=line
+cd ..
+cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py \
+  --fixture tests/fixtures/prompt-eval/multi-scene.json \
+  --fixture tests/fixtures/prompt-eval/negative-cases.json \
+  --fixture tests/fixtures/prompt-eval/injection.json
+cd ..
 ./scripts/doctor.sh
 ```
 
-通过标准：所有命令退出码为 0；页面无控制台错误；测试数据中不存在 API Key 明文；正式历史只包含完整成功批次。
+通过标准：所有命令退出码为 0；页面无控制台错误；离线评测 Schema 通过率为 100%，未知证据、跨事件污染、错误归属用户待办、历史重分析 Whisper 调用、过期自动完成和密钥泄漏均为 0；正式历史只包含完整成功批次。
+
+Prompt 评测默认且当前仅支持离线已保存样例，不读取 Keychain，不调用 Kimi、DeepSeek 或 OpenAI。真实厂商对比须另行获得用户明确授权，不属于本次离线发布门禁。

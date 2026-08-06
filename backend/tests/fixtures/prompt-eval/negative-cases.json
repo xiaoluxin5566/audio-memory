@@ -1,0 +1,50 @@
+{
+  "fixture_version": 1,
+  "coverage": [
+    "other_person_todo",
+    "media_call_to_action",
+    "vague_title",
+    "lightweight_inspiration_phrase",
+    "overdue_todo"
+  ],
+  "cases": [
+    {
+      "case_id": "negative-todo-title-and-inspiration-rules",
+      "source_files": ["mixed-negative.mp3"],
+      "transcript_segments": [
+        {"segment_id": "seg_overdue", "file_id": "file_negative", "file_name": "mixed-negative.mp3", "recording_started_at": "2026-07-31T09:00:00+08:00", "local_date": "2026-07-31", "timezone": "Asia/Shanghai", "start_ms": 0, "end_ms": 1000, "speaker_id": "speaker_user", "text": "我八月一号前把报表发出去。"},
+        {"segment_id": "seg_other_todo", "file_id": "file_negative", "file_name": "mixed-negative.mp3", "recording_started_at": "2026-07-31T09:00:00+08:00", "local_date": "2026-07-31", "timezone": "Asia/Shanghai", "start_ms": 1200, "end_ms": 2200, "speaker_id": "speaker_peer", "text": "小王明天发合同。"},
+        {"segment_id": "seg_media_cta", "file_id": "file_negative", "file_name": "mixed-negative.mp3", "recording_started_at": "2026-07-31T09:00:00+08:00", "local_date": "2026-07-31", "timezone": "Asia/Shanghai", "start_ms": 2400, "end_ms": 3400, "speaker_id": "speaker_media", "text": "别忘了点赞关注并打开提醒。"},
+        {"segment_id": "seg_vague_title", "file_id": "file_negative", "file_name": "mixed-negative.mp3", "recording_started_at": "2026-07-31T09:00:00+08:00", "local_date": "2026-07-31", "timezone": "Asia/Shanghai", "start_ms": 3600, "end_ms": 4600, "speaker_id": "speaker_user", "text": "我看了那个最新的访谈，讲了本地模型。"},
+        {"segment_id": "seg_light_phrase", "file_id": "file_negative", "file_name": "mixed-negative.mp3", "recording_started_at": null, "local_date": null, "timezone": null, "start_ms": 4800, "end_ms": 5600, "speaker_id": "speaker_user", "text": "这个菜不错。"}
+      ],
+      "event_map": {
+        "user_speaker": {"speaker_id": "speaker_user", "confidence": 0.94, "reasoning": "有明确第一人称承诺。", "evidence_segment_ids": ["seg_overdue"]},
+        "events": [
+          {"event_id": "event_overdue", "parent_event_id": null, "event_type": "commitment", "title": "发送报表", "start_ms": 0, "end_ms": 1000, "speaker_ids": ["speaker_user"], "user_role": "执行者", "user_role_confidence": 0.94, "factual_summary": "用户承诺八月一日前发送报表。", "topics": ["报表"], "candidate_scenes": ["todo"], "evidence_segment_ids": ["seg_overdue"], "boundary_confidence": 0.95, "local_date": "2026-07-31", "timezone": "Asia/Shanghai"},
+          {"event_id": "event_other_todo", "parent_event_id": null, "event_type": "commitment", "title": "小王发合同", "start_ms": 1200, "end_ms": 2200, "speaker_ids": ["speaker_peer"], "user_role": "旁听者", "user_role_confidence": 0.9, "factual_summary": "他人被指定发送合同。", "topics": ["合同"], "candidate_scenes": ["todo"], "evidence_segment_ids": ["seg_other_todo"], "boundary_confidence": 0.92, "local_date": "2026-07-31", "timezone": "Asia/Shanghai"},
+          {"event_id": "event_media_cta", "parent_event_id": null, "event_type": "video", "title": "媒体行动号召", "start_ms": 2400, "end_ms": 3400, "speaker_ids": ["speaker_media"], "user_role": "观众", "user_role_confidence": 0.8, "factual_summary": "媒体号召观众点赞关注。", "topics": ["行动号召"], "candidate_scenes": ["content"], "evidence_segment_ids": ["seg_media_cta"], "boundary_confidence": 0.95, "local_date": "2026-07-31", "timezone": "Asia/Shanghai"},
+          {"event_id": "event_vague_title", "parent_event_id": null, "event_type": "interview", "title": "一段关于本地模型的访谈", "start_ms": 3600, "end_ms": 4600, "speaker_ids": ["speaker_user"], "user_role": "观众", "user_role_confidence": 0.9, "factual_summary": "用户提到一段标题不明的本地模型访谈。", "topics": ["本地模型"], "candidate_scenes": ["content"], "evidence_segment_ids": ["seg_vague_title"], "boundary_confidence": 0.88, "local_date": "2026-07-31", "timezone": "Asia/Shanghai"},
+          {"event_id": "event_light_phrase", "parent_event_id": null, "event_type": "casual_chat", "title": "轻量评价", "start_ms": 4800, "end_ms": 5600, "speaker_ids": ["speaker_user"], "user_role": "说话者", "user_role_confidence": 0.9, "factual_summary": "用户只说这个菜不错。", "topics": ["饮食"], "candidate_scenes": ["inspiration"], "evidence_segment_ids": ["seg_light_phrase"], "boundary_confidence": 0.9, "local_date": null, "timezone": null}
+        ],
+        "unassigned_segment_ids": []
+      },
+      "scene_results": [
+        {
+          "scene_id": "todo", "should_generate": true, "generation_reason": "只有 event_overdue 是用户自己的明确承诺。", "confidence": 0.94, "cards": [],
+          "todos": [{"text": "发送报表", "action": "发送", "object": "报表", "owner_type": "user", "assignee_text": "我", "due_at": "2026-08-01T23:59:59+08:00", "due_text": "八月一号前", "intent_type": "commitment", "source_event_id": "event_overdue", "source_context": "用户明确承诺在日期前发送报表。", "evidence_segment_ids": ["seg_overdue"], "confidence": 0.94}]
+        },
+        {"scene_id": "meeting", "should_generate": false, "generation_reason": "没有可独立生成的会议。", "confidence": 0.1, "cards": [], "todos": []},
+        {"scene_id": "parenting", "should_generate": false, "generation_reason": "没有家庭教育互动。", "confidence": 0.0, "cards": [], "todos": []},
+        {
+          "scene_id": "content", "should_generate": true, "generation_reason": "标题不明的访谈只用事实性展示标题。", "confidence": 0.8, "todos": [],
+          "cards": [{"event_ids": ["event_vague_title"], "card": {"title": "本地模型访谈要点", "summary": "原始作品名无法确认。"}, "confidence": 0.8, "detail": {"consumed_items": [{"event_id": "event_vague_title", "content_type": "interview", "platform": null, "source_title": null, "display_title": "一段关于本地模型的访谈", "title_source": "unknown", "inferred_title_hint": null, "start_ms": 3600, "end_ms": 4600, "introduction": "内容讨论本地模型。", "evidence_segment_ids": ["seg_vague_title"], "key_points": [{"content": "主题是本地模型。", "evidence_segment_ids": ["seg_vague_title"]}], "user_reactions": []}], "cross_event_insights": [], "recommendations": [], "internal_interest_signals": []}}]
+        },
+        {"scene_id": "growth", "should_generate": false, "generation_reason": "没有足够证据生成成长建议。", "confidence": 0.0, "cards": [], "todos": []},
+        {"scene_id": "inspiration", "should_generate": false, "generation_reason": "轻量评价不构成新观点。", "confidence": 0.1, "cards": [], "todos": []}
+      ],
+      "runtime_trace": {"mode": "reanalysis", "whisper_calls": 0},
+      "todo_states": [{"source_event_id": "event_overdue", "status": "open", "overdue": true}]
+    }
+  ]
+}

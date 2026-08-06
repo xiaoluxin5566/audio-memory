@@ -1,6 +1,6 @@
-# Audio Memory 六场景 Prompt 系统 Implementation Plan
+# Audio Memory 六场景 Prompt 系统 Implementation Plan（历史归档）
 
-> **执行状态：已并入主计划。** 本文件保留早期六场景技术细节；实际开发顺序、分析版本、历史重分析和 PRD V1.1 决策以 `docs/superpowers/plans/2026-08-05-prd-v1-1-implementation.md` 为准。
+> **执行状态：历史计划，不再单独执行。** `2026-08-05-audio-memory-demo-implementation.md` 已作为完成的基础 Demo 留档；本文件的六场景内容已并入 PRD V1.1。实际开发顺序、分析版本、历史重分析与剩余交付项的唯一执行来源是 `docs/superpowers/plans/2026-08-05-prd-v1-1-implementation.md`。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -444,7 +444,9 @@ Commit: `git commit -m "feat: render structured scene results"`
 
 ---
 
-### Task 8: 评测集、真实厂商对比与安装验收
+### Task 8: 评测集与安装验收（历史草案）
+
+> **历史说明：** 其中离线评测和安装门禁由 PRD V1.1 Task 10 收口。任何真实厂商调用均需当次用户明确授权；未授权时仅运行离线样例，不读取保存的 Key。
 
 **Files:**
 - Create: `backend/tests/fixtures/prompt-eval/multi-scene.json`
@@ -457,8 +459,8 @@ Commit: `git commit -m "feat: render structured scene results"`
 - Modify: `prototype/README.md`
 
 **Interfaces:**
-- Produces: local evaluation report under `~/Library/Application Support/AudioMemory/evaluations/<timestamp>/`.
-- Consumes: saved provider keys only through `KeychainRepository`; report contains no keys and no unredacted private fixture paths.
+- Produces: redacted offline evaluation report on stdout.
+- Consumes: repository fixtures only; does not read `KeychainRepository` or call a provider.
 
 - [ ] **Step 1: Add deterministic contract fixtures and failing assertions**
 
@@ -477,9 +479,9 @@ Run: `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/e2e/test_promp
 
 Expected: FAIL because the evaluator and fixtures do not exist.
 
-- [ ] **Step 3: Implement offline and real-provider evaluation modes**
+- [ ] **Step 3: Implement the offline evaluation mode**
 
-Offline mode validates stored example outputs and all cross-reference rules. Real mode accepts `--provider kimi|deepseek|openai`, reads the saved Keychain key, runs event map plus six scenes, and writes prompt/model versions, latency, token usage when returned, validation errors and redacted result summaries. Never print keys or full private transcripts to stdout.
+Offline mode validates the complete stored-example contract, production Schemas and all cross-reference rules. It rejects provider execution flags and never reads Keychain, prints keys or sends fixture transcripts outside the process.
 
 - [ ] **Step 4: Extend doctor and documentation**
 
@@ -503,10 +505,10 @@ bash tests/install-smoke.sh
 
 Expected: all backend, frontend, browser and installer tests PASS; doctor reports Whisper and diarization models available.
 
-- [ ] **Step 6: Run one authorized real-provider evaluation and commit**
+- [ ] **Step 6: Run the offline evaluation and commit**
 
-Run only with the user's already configured provider: `cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --provider deepseek --fixture tests/fixtures/prompt-eval/multi-scene.json`
+Run: `cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --fixture tests/fixtures/prompt-eval/multi-scene.json --fixture tests/fixtures/prompt-eval/negative-cases.json --fixture tests/fixtures/prompt-eval/injection.json`
 
-Expected: report is written locally, Schema valid rate is 100%, no unknown evidence IDs, and no cross-event contamination. Kimi/OpenAI remain explicitly “not real-tested” until their keys are configured.
+Expected: stdout reports Schema valid rate 100%, required coverage derived from case behavior, and zero unknown evidence IDs, cross-event contamination, false user todos, reanalysis Whisper calls, overdue auto-completion and secret leakage. Real-provider comparison is not run and requires a separately authorized future task.
 
-Commit: `git commit -m "test: add six-scene prompt evaluation suite"`
+Commit: superseded by PRD V1.1 Task 10.
