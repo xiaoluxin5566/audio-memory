@@ -31,3 +31,13 @@ test('feed and detail copy use readable full-screen type sizes', () => {
   assert.match(styles, /\.detail-section p\{font-size:14px/);
   assert.match(styles, /\.detail-section li\{[^}]*font-size:13px/);
 });
+
+test('detail renders common blocks rather than strict scene payload keys', () => {
+  const detail = appSource.slice(
+    appSource.indexOf('function CardDetail'),
+    appSource.indexOf('function History'),
+  );
+
+  assert.match(detail, /card\.detailSections\.map/)
+  assert.doesNotMatch(detail, /inferred_title_hint|evidence_segment_ids|generation_reason|finding_id|case_id/)
+});

@@ -14,6 +14,7 @@ test('editing a fixed scene saves a new prompt version for future analysis', asy
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })

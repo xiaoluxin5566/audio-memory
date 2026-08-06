@@ -65,3 +65,42 @@ test('history and prompts preserve backend versions', () => {
   assert.equal(prompts.todo.version, 4)
   assert.equal(prompts.todo.current, '识别待办')
 })
+
+
+test('strict scene payloads become safe, event-grouped presentation cards', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-06', cards: [
+    {
+      id: 'analysis-meeting', batch_id: 'batch-1', scene_id: 'meeting', uploaded_at: '2026-08-06T10:00:00Z', qa: [],
+      payload: { scene_id: 'meeting', cards: [
+        { card: { title: '产品评审', summary: '确定范围' }, detail: { topic: '一期范围', background: '团队评审', participants: [], core_conclusions: [{ content: '先做桌面端' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
+        { card: { title: '预算复盘', summary: '控制成本' }, detail: { topic: 'Q3 预算', background: '财务会议', participants: [], core_conclusions: [{ content: '压缩外包' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
+      ] },
+    },
+    {
+      id: 'analysis-content', batch_id: 'batch-1', scene_id: 'content', uploaded_at: '2026-08-06T10:00:00Z', qa: [],
+      payload: { scene_id: 'content', cards: [{
+        card: { title: '端侧 AI 内容回顾', summary: '两个独立内容事件' },
+        confidence: 0.92, generation_reason: 'internal',
+        detail: {
+          consumed_items: [
+            { display_title: '端侧 AI 访谈', introduction: '讨论本地推理。', inferred_title_hint: 'secret', evidence_segment_ids: ['seg-1'], key_points: [{ content: '低延迟' }], user_reactions: [{ content: '值得试试' }] },
+            { display_title: '产品设计播客', introduction: '讨论用户研究。', inferred_title_hint: 'hidden', evidence_segment_ids: ['seg-2'], key_points: [{ content: '先访谈' }], user_reactions: [] },
+          ], cross_event_insights: [{ content: '都关注真实体验', confidence: 0.8, supporting_event_ids: ['event-1', 'event-2'] }],
+          recommendations: [{ title: '相关播客', creator: '某作者', introduction: '继续了解', recommendation_reason: '契合兴趣', search_query: '端侧 AI 播客', existence_confidence: 0.9 }],
+          internal_interest_signals: [{ value: 'hidden profile signal' }],
+        },
+      }] },
+    },
+  ] }] })
+
+  const cards = normalized.feed[0].cards
+  assert.equal(cards.filter((card) => card.sceneId === 'meeting').length, 2)
+  const contentCard = cards.find((card) => card.sceneId === 'content')
+  assert.equal(contentCard.details.consumedItems.length, 2)
+  assert.equal(contentCard.detailSections.filter((section) => section.eventTitle).length, 2)
+  assert.equal(JSON.stringify(contentCard).includes('inferred_title_hint'), false)
+  assert.equal(JSON.stringify(contentCard).includes('hidden profile signal'), false)
+  assert.equal(JSON.stringify(contentCard).includes('confidence'), false)
+  assert.equal(JSON.stringify(contentCard).includes('evidence_segment_ids'), false)
+  assert.equal(JSON.stringify(contentCard).includes('generation_reason'), false)
+})

@@ -11,6 +11,9 @@ import { uploadFile } from './api/upload.js';
 import { normalizeFeed, normalizeHistory, normalizePrompts } from './api/state.js';
 import { useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
+import { useReanalysis } from './hooks/useReanalysis.js';
+import { ReanalysisModal } from './components/ReanalysisModal.jsx';
+import { getReanalysisView } from './api/state.js';
 import './styles.css';
 
 const ROUTES = { '/': 'feed', '/history': 'history', '/settings/prompts': 'prompts' };
@@ -37,6 +40,7 @@ export function App() {
   const [route, setRoute] = useState(ROUTES[window.location.pathname] ?? 'feed');
   const [providerOpen, setProviderOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
+  const [reanalysisOpen, setReanalysisOpen] = useState(false);
   const [selectedCard, setSelectedCard] = useState(null);
   const [toast, setToast] = useState('');
   const [editingTodo, setEditingTodo] = useState(null);
@@ -45,6 +49,8 @@ export function App() {
   const [promptDraft, setPromptDraft] = useState('');
   const fileInput = useRef(null);
   const pendingUploadFiles = useRef([]);
+  const lastFinishedReanalysis = useRef(null);
+  const reanalysis = useReanalysis();
 
   const refreshContent = useCallback(async () => {
     const [feedPayload, historyPayload] = await Promise.all([api.feed(), api.history()]);
@@ -106,6 +112,30 @@ export function App() {
     const timer = setTimeout(() => setToast(''), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
+  const reanalysisView = getReanalysisView(reanalysis.current, reanalysis.preview ?? { source_batch_count: state.history.length });
+  useEffect(() => {
+    const batch = reanalysis.current;
+    if (!batch || !['completed', 'completed_with_failures', 'content_completed_profile_failed', 'stopped'].includes(batch.status) || lastFinishedReanalysis.current === `${batch.id}:${batch.status}`) return;
+    lastFinishedReanalysis.current = `${batch.id}:${batch.status}`;
+    refreshContent().catch(() => {});
+  }, [reanalysis.current?.id, reanalysis.current?.status, refreshContent]);
+
+  async function openReanalysis() {
+    setReanalysisOpen(true);
+    if (!reanalysis.current) await reanalysis.loadPreview().catch(() => {});
+  }
+  async function confirmReanalysis() {
+    if (!reanalysis.preview?.previewToken) return;
+    try { await reanalysis.start(reanalysis.preview.previewToken); setToast('已开始使用最新 Prompt 重新分析历史'); }
+    catch (error) { setToast(error.message); }
+  }
+  async function controlReanalysis() {
+    try {
+      if (reanalysisView.state === 'running') await reanalysis.stop();
+      else if (reanalysisView.state === 'paused') await reanalysis.resume();
+      else if (reanalysisView.actionLabel === '重试画像更新') await reanalysis.retryProfile();
+    } catch (error) { setToast(error.message); }
+  }
 
   function navigate(nextRoute) {
     setSelectedCard(null);
@@ -195,7 +225,7 @@ export function App() {
   const currentProvider = state.providers[state.activeProvider];
   return (
     <div className="app-shell">
-      <Topbar route={route} onNavigate={navigate} onClear={() => setClearOpen(true)} />
+      <Topbar route={route} onNavigate={navigate} reanalysis={reanalysisView} onReanalyze={openReanalysis} onClear={() => setClearOpen(true)} />
       {route === 'feed' && (
         <div className="home-layout">
           <aside className="control-rail">
@@ -228,14 +258,15 @@ export function App() {
       {route === 'history' && <History state={state} />}
       {route === 'prompts' && <PromptSettings state={state} refresh={refreshPrompts} scene={promptScene} setScene={(id) => { setPromptScene(id); setPromptDraft(state.prompts[id]?.current || ''); setPromptEditing(false); }} draft={promptDraft} setDraft={setPromptDraft} editing={promptEditing} setEditing={setPromptEditing} onToast={setToast} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
+      {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={() => setReanalysisOpen(false)} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
 }
 
-function Topbar({ route, onNavigate, onClear }) {
-  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div></div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史'], ['prompts', 'Prompt 设置']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="danger-ghost" onClick={onClear}>清除所有历史</button></div></header>;
+function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear }) {
+  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div></div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史'], ['prompts', 'Prompt 设置']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
 }
 
 function UploadFile({ file, onRemove }) {
@@ -283,7 +314,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
   const [qa, setQa] = useState(batch.qa?.[card.id] ?? []);
   async function ask() {
     if (!question.trim()) return;
-    const response = await api.askCard(card.id, question.trim());
+    const response = await api.askCard(card.apiId ?? card.id, question.trim());
     const pairs = [];
     for (let index = 0; index < response.messages.length; index += 2) {
       const user = response.messages[index];
@@ -297,7 +328,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
     const submission = getFeedbackFormState(selectedRating, comment);
     if (!submission.canSubmit) return;
     const submittedComment = selectedRating === 'inaccurate' ? comment.trim() : '';
-    await api.feedback(card.id, selectedRating, submittedComment || null);
+    await api.feedback(card.apiId ?? card.id, selectedRating, submittedComment || null);
     setFeedbackOpen(false); setRating(''); setComment(''); onToast('意见反馈已保存到本地');
   }
   function closeFeedback() {

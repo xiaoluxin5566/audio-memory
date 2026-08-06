@@ -141,6 +141,20 @@ export const api = {
   removeFile: (jobId, fileId) => apiRequest(`/jobs/${jobId}/files/${fileId}`, { method: 'DELETE' }),
   feed: () => apiRequest('/feed'),
   history: () => apiRequest('/history'),
+  reanalysisPreview: () => apiRequest('/history/reanalysis-batches/preview'),
+  currentReanalysis: () => apiRequest('/history/reanalysis-batches/current'),
+  createReanalysis: (previewToken, idempotencyKey) => apiRequest('/history/reanalysis-batches', {
+    method: 'POST', idempotencyKey, body: JSON.stringify({ preview_token: previewToken }),
+  }),
+  stopReanalysis: (id, idempotencyKey) => apiRequest(`/history/reanalysis-batches/${id}/stop`, {
+    method: 'POST', idempotencyKey,
+  }),
+  resumeReanalysis: (id, idempotencyKey) => apiRequest(`/history/reanalysis-batches/${id}/resume`, {
+    method: 'POST', idempotencyKey,
+  }),
+  retryReanalysisProfile: (id, idempotencyKey) => apiRequest(`/history/reanalysis-batches/${id}/retry-profile`, {
+    method: 'POST', idempotencyKey,
+  }),
   prompts: () => apiRequest('/prompts'),
   savePrompt: (sceneId, version, content) => apiRequest(`/prompts/${sceneId}`, {
     method: 'PUT', body: JSON.stringify({ expected_version: version, content }),

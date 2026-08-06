@@ -27,6 +27,7 @@ async function installApi(page, { rejectDeepSeek = false } = {}) {
     const request = route.request()
     const url = new URL(request.url())
     calls.push(`${request.method()} ${url.pathname}`)
+    if (url.pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (url.pathname === '/api/providers' && request.method() === 'GET') {
       return route.fulfill({ json: providers })
     }
@@ -95,6 +96,7 @@ test('startup validation refreshes automatically without manual revalidation', a
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') {
       providerReads += 1
       return route.fulfill({ json: { providers: [{
@@ -131,6 +133,7 @@ test('initial page load validates configured providers once across route changes
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     calls.push(`${request.method()} ${pathname}`)
     if (pathname === '/api/providers' && request.method() === 'GET') {
       return route.fulfill({ json: providers })
@@ -164,6 +167,7 @@ test('overdue todo remains unchecked and saves a local deadline as ISO', async (
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: emptyProviders() })
     if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: emptyProviders() })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [todo] } })

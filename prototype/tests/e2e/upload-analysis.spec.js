@@ -48,6 +48,7 @@ async function installJobApi(page) {
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/feed') return route.fulfill({ json: completed ? completedFeed : { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: completed ? completedHistory : { days: [] } })
@@ -95,6 +96,7 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
