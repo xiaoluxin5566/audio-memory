@@ -148,6 +148,26 @@ def test_0003_backfills_one_current_version_without_copying_source_data(
         assert after_audio_paths == before_audio_paths
 
 
+def test_head_normalizes_all_checkpoint_payloads_and_adds_queue_priority(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "checkpoint-shape.sqlite3"
+    config = seed_version_0002_database(database_path)
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        analysis_job_payload = connection.execute(
+            "SELECT staged_results_json FROM analysis_jobs WHERE id = 'job-legacy'"
+        ).fetchone()
+        version_payload = connection.execute(
+            "SELECT staged_results_json, priority FROM analysis_versions "
+            "WHERE source_job_id = 'job-legacy'"
+        ).fetchone()
+        assert analysis_job_payload == ("{}",)
+        assert version_payload == ("{}", 10)
+
+
 def test_0003_downgrade_restores_0002_data_and_schema(tmp_path: Path) -> None:
     database_path = tmp_path / "rollback.sqlite3"
     config = seed_version_0002_database(database_path)

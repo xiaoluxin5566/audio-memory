@@ -7,7 +7,7 @@ from audio_memory.prompts.composer import ModelRequest
 
 def test_parser_accepts_valid_scene_json() -> None:
     result = parse_scene_output(
-        """{"scene_id":"growth","should_generate":false,"card":null,"detail_sections":[],"todos":[],"evidence_refs":[],"confidence":0.8}""",
+        """{"scene_id":"growth","should_generate":false,"generation_reason":"没有足够证据","cards":[],"todos":[],"confidence":0.0}""",
         expected_scene="growth",
     )
 
@@ -17,7 +17,7 @@ def test_parser_accepts_valid_scene_json() -> None:
 def test_parser_rejects_wrong_scene_and_markdown_wrapper() -> None:
     with pytest.raises(SceneOutputError):
         parse_scene_output(
-            '{"scene_id":"meeting","should_generate":false,"card":null,"detail_sections":[],"todos":[],"evidence_refs":[],"confidence":0.8}',
+            '{"scene_id":"meeting","should_generate":false,"generation_reason":"没有足够证据","cards":[],"todos":[],"confidence":0.0}',
             expected_scene="todo",
         )
     with pytest.raises(SceneOutputError):
@@ -30,7 +30,7 @@ async def test_schema_failure_gets_exactly_one_repair_attempt() -> None:
         def __init__(self):
             self.responses = [
                 "not-json",
-                '{"scene_id":"meeting","should_generate":false,"card":null,"detail_sections":[],"todos":[],"evidence_refs":[],"confidence":0.8}',
+                '{"scene_id":"meeting","should_generate":false,"generation_reason":"没有足够证据","cards":[],"todos":[],"confidence":0.0}',
             ]
             self.calls = 0
 
@@ -42,7 +42,7 @@ async def test_schema_failure_gets_exactly_one_repair_attempt() -> None:
     analyzer = RemoteSceneAnalyzer(client)
     request = ModelRequest("meeting", 1, 1, "rules", "prompt", "data", "{}")
 
-    result = await analyzer.analyze(
+    result = await analyzer.analyze_scene(
         "meeting",
         request,
         {"provider_id": "kimi", "model_id": "kimi-k2.5"},

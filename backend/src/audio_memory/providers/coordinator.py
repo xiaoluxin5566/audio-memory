@@ -102,11 +102,22 @@ class ProviderStateCoordinator:
             return self._states[provider_id]
 
     async def snapshot_active(self) -> ProviderState:
+        active, _generation = await self.snapshot_active_with_generation()
+        return active
+
+    async def snapshot_active_with_generation(self) -> tuple[ProviderState, int]:
         async with self._activation_lock:
-            active = next((item for item in self._states.values() if item.active), None)
-            if active is None:
-                raise LookupError("No active provider")
-            return active
+            async with self._state_lock:
+                active = next(
+                    (item for item in self._states.values() if item.active), None
+                )
+                if active is None:
+                    raise LookupError("No active provider")
+                return active, self._generations[active.provider_id]
+
+    async def credential_generation(self, provider_id: str) -> int:
+        async with self._state_lock:
+            return self._generations[provider_id]
 
     def _set_active(self, provider_id: str) -> None:
         for item_id, item in tuple(self._states.items()):
@@ -209,8 +220,9 @@ class ProviderStateCoordinator:
                     return ValidationResult(
                         False, ValidationErrorCode.KEYCHAIN_UNAVAILABLE
                     )
-                self._generations[provider_id] += 1
-                self._set_state(provider_id, ProviderStateName.AVAILABLE)
+                async with self._state_lock:
+                    self._generations[provider_id] += 1
+                    self._set_state(provider_id, ProviderStateName.AVAILABLE)
                 await self._persist_state(provider_id)
             return result
         finally:

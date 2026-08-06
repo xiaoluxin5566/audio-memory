@@ -19,23 +19,27 @@ from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.eta import TranscriptionEtaTracker
+from audio_memory.prompts.store import PromptStore
 
 
 class RetryCoordinator:
-    async def snapshot_active(self):
-        return SimpleNamespace(provider_id="deepseek", model_id="deepseek-v4-flash")
+    async def snapshot_active_with_generation(self):
+        return (
+            SimpleNamespace(provider_id="deepseek", model_id="deepseek-v4-flash"),
+            8,
+        )
 
     async def validate_saved(self, provider_id):
         return SimpleNamespace(ok=True)
 
 
-class RetryOrchestrator:
+class RetryTaskCoordinator:
     def __init__(self):
         self.called = asyncio.Event()
-        self.provider_snapshot = None
+        self.analysis_request = None
 
-    async def run(self, job_id, provider_snapshot):
-        self.provider_snapshot = provider_snapshot
+    async def submit_new_upload(self, analysis_request):
+        self.analysis_request = analysis_request
         self.called.set()
 
 
@@ -189,19 +193,23 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
         job.stage = JobStage.FAILED.value
         job.error_code = "model_analysis_failed"
         await session.commit()
-    orchestrator = RetryOrchestrator()
+    task_coordinator = RetryTaskCoordinator()
+    prompt_store = PromptStore(client._transport.app.state.upload_service.paths.prompts)
+    prompt_store.initialize()
     client._transport.app.state.provider_coordinator = RetryCoordinator()
-    client._transport.app.state.analysis_orchestrator = orchestrator
+    client._transport.app.state.analysis_task_coordinator = task_coordinator
+    client._transport.app.state.prompt_store = prompt_store
+    client._transport.app.state.database = database
     client._transport.app.state.transcription_tasks = {}
 
     response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
-    await asyncio.wait_for(orchestrator.called.wait(), timeout=1)
+    await asyncio.wait_for(task_coordinator.called.wait(), timeout=1)
 
     assert response.status_code == 202
-    assert orchestrator.provider_snapshot == {
-        "provider_id": "deepseek",
-        "model_id": "deepseek-v4-flash",
-    }
+    assert task_coordinator.analysis_request.provider_id == "deepseek"
+    assert task_coordinator.analysis_request.model_id == "deepseek-v4-flash"
+    assert task_coordinator.analysis_request.credential_generation == 8
+    assert task_coordinator.analysis_request.priority == 0
 
 
 @pytest.mark.asyncio

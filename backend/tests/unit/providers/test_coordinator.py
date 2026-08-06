@@ -141,3 +141,27 @@ async def test_rate_limit_cooldown_prevents_retry_storm() -> None:
     assert second.error_code is ValidationErrorCode.RATE_LIMITED
     assert coordinator.state("kimi").cooldown_until is not None
 
+
+@pytest.mark.asyncio
+async def test_active_snapshot_includes_credential_generation_atomically() -> None:
+    class AcceptingValidator:
+        async def validate(self, secret: bytes) -> ValidationResult:
+            return ValidationResult(ok=True)
+
+    coordinator = ProviderStateCoordinator(
+        keychain=FakeKeychain(), validators={"kimi": AcceptingValidator()}
+    )
+    coordinator.set_state_for_test("kimi", ProviderStateName.AVAILABLE)
+    await coordinator.activate("kimi")
+
+    first_state, first_generation = (
+        await coordinator.snapshot_active_with_generation()
+    )
+    await coordinator.validate_candidate("kimi", "settings", b"replacement")
+    second_state, second_generation = (
+        await coordinator.snapshot_active_with_generation()
+    )
+
+    assert first_state.provider_id == second_state.provider_id == "kimi"
+    assert first_generation == 0
+    assert second_generation == 1

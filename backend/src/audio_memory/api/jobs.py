@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy import select
 
-from audio_memory.uploads.service import UploadError, UploadService
+from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
+from audio_memory.models import ProfileFact
+from audio_memory.prompts.store import PROMPT_SCENES
+from audio_memory.uploads.service import UploadError, UploadService
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -68,7 +73,7 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
 async def run_pipeline(
     request: Request,
     job_id: str,
-    provider_snapshot: dict[str, str],
+    analysis_request: AnalysisRequest,
     *,
     resume: bool = False,
 ) -> None:
@@ -78,7 +83,55 @@ async def run_pipeline(
         await transcription.resume_job(job_id, engine)
     else:
         await transcription.run_job(job_id, engine)
-    await request.app.state.analysis_orchestrator.run(job_id, provider_snapshot)
+    await request.app.state.analysis_task_coordinator.submit_new_upload(
+        analysis_request
+    )
+
+
+async def snapshot_analysis_request(
+    request: Request,
+    *,
+    job_id: str,
+    provider_id: str,
+    model_id: str,
+    credential_generation: int,
+) -> AnalysisRequest:
+    prompt_store = request.app.state.prompt_store
+    prompts = {
+        scene_id: {
+            "version": document.version,
+            "content": document.content,
+        }
+        for scene_id in PROMPT_SCENES
+        for document in [prompt_store.get(scene_id)]
+    }
+    database = request.app.state.database
+    async with database.session() as session:
+        facts = list(
+            await session.scalars(
+                select(ProfileFact).where(ProfileFact.status == "active")
+            )
+        )
+    profile = [
+        {
+            "subject_id": fact.subject_id,
+            "dimension": fact.dimension,
+            "value": json.loads(fact.value_json),
+            "confidence": fact.confidence,
+            "origin": fact.origin,
+        }
+        for fact in facts
+    ]
+    return AnalysisRequest(
+        source_job_id=job_id,
+        source_batch_id=None,
+        provider_id=provider_id,
+        model_id=model_id,
+        credential_generation=credential_generation,
+        prompt_snapshot=prompts,
+        profile_snapshot=profile,
+        priority=0,
+    )
 
 
 @router.post("", status_code=201)
@@ -147,7 +200,9 @@ async def delete_file(job_id: str, file_id: str, request: Request) -> Response:
 async def start_job(job_id: str, request: Request) -> JobView:
     coordinator = request.app.state.provider_coordinator
     try:
-        provider = await coordinator.snapshot_active()
+        provider, credential_generation = (
+            await coordinator.snapshot_active_with_generation()
+        )
         validation = await coordinator.validate_saved(provider.provider_id)
         if not validation.ok:
             raise UploadError("当前模型不可用，请修改配置或重新校验", code="provider_unavailable")
@@ -169,7 +224,13 @@ async def start_job(job_id: str, request: Request) -> JobView:
         run_pipeline(
             request,
             job_id,
-            {"provider_id": provider.provider_id, "model_id": provider.model_id},
+            await snapshot_analysis_request(
+                request,
+                job_id=job_id,
+                provider_id=provider.provider_id,
+                model_id=provider.model_id,
+                credential_generation=credential_generation,
+            ),
         ),
     )
     return JobView.model_validate(job, from_attributes=True)
@@ -196,7 +257,15 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         run_pipeline(
             request,
             job_id,
-            {"provider_id": job.provider_id, "model_id": job.model_id},
+            await snapshot_analysis_request(
+                request,
+                job_id=job_id,
+                provider_id=job.provider_id,
+                model_id=job.model_id,
+                credential_generation=await request.app.state.provider_coordinator.credential_generation(
+                    job.provider_id
+                ),
+            ),
             resume=True,
         ),
     )
@@ -220,7 +289,9 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
 
     coordinator = request.app.state.provider_coordinator
     try:
-        provider = await coordinator.snapshot_active()
+        provider, credential_generation = (
+            await coordinator.snapshot_active_with_generation()
+        )
         validation = await coordinator.validate_saved(provider.provider_id)
         if not validation.ok:
             raise UploadError(
@@ -236,14 +307,15 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
             },
         ) from exc
 
-    snapshot = {
-        "provider_id": provider.provider_id,
-        "model_id": provider.model_id,
-    }
-    track_transcription(
+    analysis_request = await snapshot_analysis_request(
         request,
-        job_id,
-        request.app.state.analysis_orchestrator.run(job_id, snapshot),
+        job_id=job_id,
+        provider_id=provider.provider_id,
+        model_id=provider.model_id,
+        credential_generation=credential_generation,
+    )
+    await request.app.state.analysis_task_coordinator.submit_new_upload(
+        analysis_request
     )
     return {"id": job_id, "stage": JobStage.ANALYZING.value}
 

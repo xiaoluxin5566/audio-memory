@@ -22,7 +22,7 @@ from audio_memory.models import (
     Todo,
 )
 from audio_memory.config import AppPaths
-from audio_memory.prompts.schemas import SceneResult
+from audio_memory.prompts.schemas import SceneResultBase
 
 
 CARD_ORDER = ("meeting", "parenting", "content", "growth", "inspiration")
@@ -43,7 +43,7 @@ class AnalysisPublisher:
     async def publish(
         self,
         job_id: str,
-        results: list[SceneResult],
+        results: list[SceneResultBase],
         profile_delta: list[ProfileDelta],
     ) -> AnalysisOutcome:
         by_scene = {result.scene_id: result for result in results}
@@ -106,7 +106,7 @@ class AnalysisPublisher:
                             scene_id=result.scene_id,
                             position=position,
                             payload_json=json.dumps(
-                                result.model_dump(mode="json"), ensure_ascii=False
+                                result.model_dump_for_frontend(), ensure_ascii=False
                             ),
                         )
                     )
@@ -116,7 +116,11 @@ class AnalysisPublisher:
                             id=str(uuid4()),
                             batch_id=batch_id,
                             text=draft.text,
-                            due_at=draft.due_at,
+                            due_at=(
+                                draft.due_at.isoformat()
+                                if getattr(draft.due_at, "isoformat", None)
+                                else draft.due_at
+                            ),
                         )
                     )
                 for fact in profile_delta:

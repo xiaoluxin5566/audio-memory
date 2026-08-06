@@ -32,7 +32,8 @@ from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
-from audio_memory.analysis.orchestrator import AnalysisOrchestrator
+from audio_memory.analysis.runner import AnalysisRunner
+from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
     RemoteProfileExtractor,
@@ -116,13 +117,17 @@ def create_app(
             analysis_client = ProviderAnalysisClient(
                 keychain_repository, analysis_http_client
             )
-            app.state.analysis_orchestrator = AnalysisOrchestrator(
+            analysis_runner = AnalysisRunner(
                 database=database,
-                prompt_store=prompt_store,
-                analyzer=RemoteSceneAnalyzer(analysis_client),
+                provider=RemoteSceneAnalyzer(analysis_client),
                 profile_extractor=RemoteProfileExtractor(analysis_client),
                 publisher=AnalysisPublisher(database, resolved_paths),
+                generation_source=coordinator,
             )
+            analysis_tasks = AnalysisTaskCoordinator(database)
+            await analysis_tasks.start(analysis_runner)
+            app.state.analysis_runner = analysis_runner
+            app.state.analysis_task_coordinator = analysis_tasks
             app.state.content_service = ContentService(
                 database,
                 resolved_paths,
@@ -137,6 +142,9 @@ def create_app(
             initialization_task = asyncio.create_task(coordinator.initialize())
             yield
         finally:
+            analysis_tasks = getattr(app.state, "analysis_task_coordinator", None)
+            if analysis_tasks is not None:
+                await analysis_tasks.close()
             if initialization_task is not None and not initialization_task.done():
                 initialization_task.cancel()
                 await asyncio.gather(initialization_task, return_exceptions=True)

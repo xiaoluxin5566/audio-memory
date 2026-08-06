@@ -55,7 +55,12 @@ class BatchRepository:
             if job is None:
                 raise LookupError(f"Unknown analysis job: {job_id}")
             staged = json.loads(job.staged_results_json)
-            staged.append(card)
+            if not isinstance(staged, dict):
+                staged = {}
+            cards = staged.setdefault("legacy_cards", [])
+            if not isinstance(cards, list):
+                raise ValueError("Invalid staged card checkpoint")
+            cards.append(card)
             job.staged_results_json = json.dumps(staged, ensure_ascii=False)
             await session.commit()
 
@@ -78,7 +83,12 @@ class BatchRepository:
                     natural_date=now.date().isoformat(),
                 )
                 session.add(batch)
-                staged_cards = json.loads(job.staged_results_json)
+                staged = json.loads(job.staged_results_json)
+                staged_cards = (
+                    staged.get("legacy_cards", [])
+                    if isinstance(staged, dict)
+                    else staged
+                )
                 for draft in staged_cards:
                     session.add(
                         Card(

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from html import escape
+from hashlib import sha256
 from importlib.resources import files
 
 from audio_memory.prompts.event_schema import EventMap
-from audio_memory.prompts.schemas import SceneResult
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
@@ -42,6 +42,14 @@ class ModelRequest:
 class PromptComposer:
     SCHEMA_VERSION = 2
 
+    @classmethod
+    def fixed_rules_hash(cls) -> str:
+        fixed = "\n\n".join(
+            cls._fixed_prompt(name)
+            for name in ("system.md", "event-map.md", "common-scene.md")
+        )
+        return sha256(fixed.encode("utf-8")).hexdigest()
+
     def compose_event_map(
         self,
         *,
@@ -63,35 +71,6 @@ class PromptComposer:
                 ]
             ),
             schema_json=self._schema_json(schema),
-        )
-
-    def compose(
-        self,
-        scene_id: str,
-        *,
-        transcript: str,
-        profile: list[dict[str, object]],
-        prompt: PromptDocument,
-    ) -> ModelRequest:
-        """Phase-zero runner adapter; Task 5 switches to compose_scene."""
-        if scene_id not in PROMPT_SCENES or prompt.scene_id != scene_id:
-            raise ValueError("Prompt scene does not match request scene")
-        fixed_rules = "\n\n".join(
-            [self._fixed_prompt("system.md"), self._fixed_prompt("common-scene.md")]
-        )
-        return ModelRequest(
-            scene_id=scene_id,
-            prompt_version=prompt.version,
-            schema_version=1,
-            system_rules=fixed_rules,
-            scene_prompt=prompt.content,
-            user_data="\n".join(
-                [
-                    self._untrusted_packet("transcript_data", transcript),
-                    self._untrusted_packet("profile_data", profile),
-                ]
-            ),
-            schema_json=self._schema_json(SceneResult.model_json_schema()),
         )
 
     def compose_scene(

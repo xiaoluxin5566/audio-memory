@@ -4,9 +4,11 @@ import asyncio
 import json
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
-from audio_memory.analysis.parser import SceneOutputError, parse_scene_output
+from audio_memory.analysis.events import request_with_one_repair
+from audio_memory.analysis.parser import parse_event_map_output, parse_scene_output
+from audio_memory.prompts.composer import ModelRequest
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
@@ -26,6 +28,7 @@ class ProviderAnalysisClient:
     ) -> None:
         self.keychain = keychain
         self.client = client
+        self._remote_lock = asyncio.Lock()
         self.adapters = {
             "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
@@ -33,6 +36,22 @@ class ProviderAnalysisClient:
         }
 
     async def generate(
+        self,
+        provider_id: str,
+        *,
+        system: str,
+        user: str,
+        model_id: str | None = None,
+    ) -> str:
+        async with self._remote_lock:
+            return await self._generate_serialized(
+                provider_id,
+                system=system,
+                user=user,
+                model_id=model_id,
+            )
+
+    async def _generate_serialized(
         self,
         provider_id: str,
         *,
@@ -117,30 +136,21 @@ class RemoteSceneAnalyzer:
     def __init__(self, client: ProviderAnalysisClient) -> None:
         self.client = client
 
-    async def analyze(self, scene_id, request, provider_snapshot):
-        system = (
-            f"{request.system_rules}\n\n场景要求：\n{request.scene_prompt}\n\n"
-            f"JSON Schema：\n{request.schema_json}"
+    async def analyze_event_map(self, request, provider_snapshot):
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_event_map_output,
         )
-        raw = await self.client.generate(
-            provider_snapshot["provider_id"],
-            system=system,
-            user=request.user_data,
-            model_id=provider_snapshot["model_id"],
+
+    async def analyze_scene(self, scene_id, request, provider_snapshot):
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=lambda raw: parse_scene_output(raw, expected_scene=scene_id),
         )
-        try:
-            return parse_scene_output(raw, expected_scene=scene_id)
-        except SceneOutputError as first_error:
-            repair = await self.client.generate(
-                provider_snapshot["provider_id"],
-                system=(
-                    "修复下面的 JSON，使其严格符合给定 Schema。只返回修复后的 JSON。\n"
-                    f"Schema：{request.schema_json}"
-                ),
-                user=f"校验错误：{first_error}\n无效 JSON：\n{raw}",
-                model_id=provider_snapshot["model_id"],
-            )
-            return parse_scene_output(repair, expected_scene=scene_id)
 
 
 class ProfileItem(BaseModel):
@@ -150,6 +160,7 @@ class ProfileItem(BaseModel):
     value: dict[str, object]
     confidence: float = Field(ge=0, le=1)
     explicit: bool
+    evidence_segment_ids: list[str] = Field(min_length=1)
 
 
 class ProfileEnvelope(BaseModel):
@@ -163,23 +174,29 @@ class RemoteProfileExtractor:
 
     async def extract(self, transcript, existing, provider_snapshot):
         schema = json.dumps(ProfileEnvelope.model_json_schema(), ensure_ascii=False)
-        raw = await self.client.generate(
-            provider_snapshot["provider_id"],
-            system=(
+        request = ModelRequest(
+            scene_id="profile",
+            prompt_version=0,
+            schema_version=1,
+            system_rules=(
                 "从音频转写中提取属于用户本人的长期画像事实。不要把其他说话人的属性归给用户。"
-                "只返回符合 Schema 的 JSON；证据不足则 facts 为空。\n"
-                f"Schema：{schema}"
+                "只返回符合 Schema 的 JSON；证据不足则 facts 为空。"
             ),
-            user=(
-                f"已有画像：{json.dumps(existing, ensure_ascii=False)}\n"
-                f"<transcript>\n{transcript}\n</transcript>"
+            common_rules="画像仅可来源于结构化转写证据，不得猜测。",
+            scene_prompt="提取长期画像候选",
+            user_data=json.dumps(
+                {"existing_profile": existing, "transcript_data": transcript},
+                ensure_ascii=False,
+                separators=(",", ":"),
             ),
-            model_id=provider_snapshot["model_id"],
+            schema_json=schema,
         )
-        try:
-            envelope = ProfileEnvelope.model_validate_json(raw)
-        except ValidationError as exc:
-            raise ProviderAnalysisError("Profile response failed schema validation") from exc
+        envelope = await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=ProfileEnvelope.model_validate_json,
+        )
         return [item.model_dump(mode="json") for item in envelope.facts]
 
 

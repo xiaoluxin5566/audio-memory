@@ -56,7 +56,7 @@ class AnalysisJob(Base):
     provider_id: Mapped[str | None] = mapped_column(String(32))
     model_id: Mapped[str | None] = mapped_column(String(120))
     prompt_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
-    staged_results_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    staged_results_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     error_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now)
     updated_at: Mapped[str] = mapped_column(String(40), default=utc_now, onupdate=utc_now)
@@ -235,6 +235,7 @@ class AnalysisVersion(Base):
     staged_results_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="{}"
     )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
     reanalysis_batch_id: Mapped[str | None] = mapped_column(
@@ -249,6 +250,13 @@ Index(
     AnalysisVersion.source_job_id,
     unique=True,
     sqlite_where=AnalysisVersion.status == "running",
+)
+
+Index(
+    "uq_analysis_versions_active_source_job",
+    AnalysisVersion.source_job_id,
+    unique=True,
+    sqlite_where=AnalysisVersion.status.in_(("pending", "running")),
 )
 
 
