@@ -4,6 +4,7 @@ const emptyProviders = () => ({
   providers: ['kimi', 'deepseek', 'openai'].map((provider_id) => ({
     provider_id,
     display_name: provider_id === 'kimi' ? 'Kimi' : provider_id === 'deepseek' ? 'DeepSeek' : 'OpenAI',
+    model_id: provider_id === 'kimi' ? 'kimi-k2.5' : provider_id === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5-mini',
     state: 'unconfigured',
     active: provider_id === 'kimi',
     last_validated_at: null,
@@ -64,7 +65,7 @@ test('successful first configuration becomes current and closes the modal', asyn
   await page.getByRole('button', { name: '保存并校验' }).click()
 
   await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeHidden()
-  await expect(page.locator('.provider-summary b')).toHaveText('DeepSeek')
+  await expect(page.locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
   await expect(page.getByText('连接可用', { exact: false })).toBeVisible()
   expect(calls).toContain('PUT /api/providers/deepseek/key')
   expect(calls).toContain('POST /api/providers/deepseek/activate')

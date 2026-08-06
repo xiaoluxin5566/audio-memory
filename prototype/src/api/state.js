@@ -19,6 +19,7 @@ function timeLabel(value) {
 export function normalizeProviders(payload) {
   const providers = Object.fromEntries(['kimi', 'deepseek', 'openai'].map((id) => [id, {
     name: PROVIDER_NAMES[id],
+    modelName: '',
     configured: false,
     state: 'initializing',
     active: false,
@@ -32,6 +33,7 @@ export function normalizeProviders(payload) {
     providers[item.provider_id] = {
       ...providers[item.provider_id],
       name: item.display_name ?? providers[item.provider_id].name,
+      modelName: item.model_id ?? '',
       configured: ['available', 'unavailable', 'validating'].includes(item.state),
       state: item.state,
       active: Boolean(item.active),

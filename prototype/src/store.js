@@ -10,9 +10,9 @@ export function createInitialState() {
   return {
     version: 1,
     providers: {
-      kimi: { name: 'Kimi', configured: false, lastChecked: '' },
-      deepseek: { name: 'DeepSeek', configured: false, lastChecked: '' },
-      openai: { name: 'OpenAI', configured: false, lastChecked: '' },
+      kimi: { name: 'Kimi', modelName: '', configured: false, lastChecked: '' },
+      deepseek: { name: 'DeepSeek', modelName: '', configured: false, lastChecked: '' },
+      openai: { name: 'OpenAI', modelName: '', configured: false, lastChecked: '' },
     },
     activeProvider: 'kimi',
     upload: { files: [], error: '', paused: false },

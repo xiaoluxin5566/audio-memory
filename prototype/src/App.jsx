@@ -202,7 +202,7 @@ export function App() {
             <h1>分析音频</h1>
             <section className="panel provider-panel">
               <div className="panel-title"><strong>模型与 API Key</strong><span className={currentProvider.configured ? 'ok-text' : ''}>{currentProvider.configured ? '已配置' : '未配置'}</span></div>
-              <div className="provider-summary"><div><b>{currentProvider.name}</b><small>{currentProvider.configured ? '用于内容分析' : '请先完成配置'}</small></div><button className="secondary compact" onClick={() => setProviderOpen(true)}>{currentProvider.configured ? '修改' : '去配置'}</button></div>
+              <div className="provider-summary"><div>{currentProvider.configured && <b>{currentProvider.modelName}</b>}<small>{currentProvider.configured ? '用于内容分析' : '请先完成配置'}</small></div><button className="secondary compact" onClick={() => setProviderOpen(true)}>{currentProvider.configured ? '修改' : '去配置'}</button></div>
               {currentProvider.state === 'available' && <div className="status-success"><i />连接可用 · {currentProvider.lastChecked || '刚刚'} 校验</div>}
               {currentProvider.error && <div className="inline-error"><b>{currentProvider.error}</b></div>}
             </section>

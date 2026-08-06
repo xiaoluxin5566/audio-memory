@@ -11,12 +11,13 @@ import {
 
 test('provider API becomes existing UI provider map without exposing keys', () => {
   const normalized = normalizeProviders({ providers: [
-    { provider_id: 'kimi', display_name: 'Kimi', state: 'available', active: true, last_validated_at: '2026-08-05T10:00:00Z' },
-    { provider_id: 'openai', display_name: 'OpenAI', state: 'unconfigured', active: false },
+    { provider_id: 'kimi', display_name: 'Kimi', model_id: 'kimi-k2.5', state: 'available', active: true, last_validated_at: '2026-08-05T10:00:00Z' },
+    { provider_id: 'openai', display_name: 'OpenAI', model_id: 'gpt-5-mini', state: 'unconfigured', active: false },
   ] })
 
   assert.equal(normalized.activeProvider, 'kimi')
   assert.equal(normalized.providers.kimi.configured, true)
+  assert.equal(normalized.providers.kimi.modelName, 'kimi-k2.5')
   assert.equal(normalized.providers.openai.configured, false)
   assert.equal(JSON.stringify(normalized).includes('api_key'), false)
 })
