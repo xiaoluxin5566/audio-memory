@@ -5,7 +5,9 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from email.message import Message
+from email import policy
+from email.message import EmailMessage, Message
+from email.utils import collapse_rfc2231_value
 from tempfile import SpooledTemporaryFile
 from urllib.parse import urlsplit
 
@@ -296,19 +298,72 @@ def _normalized_content_type(value: bytes) -> bytes:
     try:
         decoded = value.decode("ascii")
     except UnicodeDecodeError:
-        return value
+        parts = [b"raw", value]
+    else:
+        if _content_type_has_parse_defects(decoded):
+            parts = [b"raw", decoded.encode("utf-8")]
+        else:
+            parts = _normalized_parsed_content_type(decoded, value)
+
+    encoded = bytearray(len(parts).to_bytes(4, "big"))
+    for part in parts:
+        encoded.extend(len(part).to_bytes(4, "big"))
+        encoded.extend(part)
+    return bytes(encoded)
+
+
+def _normalized_parsed_content_type(decoded: str, raw_value: bytes) -> list[bytes]:
     message = Message()
     message["content-type"] = decoded
     media_type = message.get_content_type().lower()
-    parameters = sorted(
-        (name.lower(), str(parameter_value))
-        for name, parameter_value in (message.get_params(header="content-type") or [])[1:]
-        if name.lower() != "boundary"
+    raw_media_type = decoded.split(";", 1)[0].strip().lower()
+    parsed_parameters = message.get_params(header="content-type") or []
+    if not _valid_media_type(raw_media_type) or media_type != raw_media_type:
+        return [b"raw", raw_value]
+
+    parameters: list[tuple[str, str]] = []
+    for name, parameter_value in parsed_parameters[1:]:
+        normalized_name = name.lower()
+        if not _valid_mime_token(normalized_name):
+            return [b"raw", raw_value]
+        if media_type.startswith("multipart/") and normalized_name == "boundary":
+            continue
+        try:
+            normalized_value = collapse_rfc2231_value(parameter_value, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            return [b"raw", raw_value]
+        parameters.append((normalized_name, normalized_value))
+
+    parts = [b"parsed", media_type.encode("ascii")]
+    for name, parameter_value in sorted(parameters):
+        parts.extend((name.encode("ascii"), parameter_value.encode("utf-8")))
+    return parts
+
+
+def _content_type_has_parse_defects(value: str) -> bool:
+    message = EmailMessage(policy=policy.default)
+    try:
+        message["content-type"] = value
+    except (TypeError, ValueError):
+        return True
+    return bool(message["content-type"].defects)
+
+
+def _valid_media_type(value: str) -> bool:
+    major, separator, minor = value.partition("/")
+    return (
+        separator == "/"
+        and "/" not in minor
+        and _valid_mime_token(major)
+        and _valid_mime_token(minor)
     )
-    normalized = media_type + "".join(
-        f";{name}={parameter_value}" for name, parameter_value in parameters
+
+
+def _valid_mime_token(value: str) -> bool:
+    extra = "!#$%&'*+-.^_`|~"
+    return bool(value) and all(
+        character.isalnum() or character in extra for character in value
     )
-    return normalized.encode("ascii")
 
 
 async def _capture_body(receive, headers: list[tuple[bytes, bytes]]):

@@ -266,3 +266,131 @@ returned **READY**. The reviewer independently reran the security suite (31
 tests at that point) and client suite (9 tests). A follow-up delta review after
 the `Sec-Fetch-Site` defense also returned **READY** and independently passed
 the then-32-test security suite plus the real Vite/backend integration test.
+
+## Formal review fix round 2 (2026-08-06)
+
+Two remaining Important findings were addressed with strict RED / GREEN
+regressions:
+
+1. **Composed fetch retry state.** The RED sequence was: expired-session 401,
+   refresh, refreshed mutation commits but its response is lost. The client
+   propagated that transport error because the refreshed send sat outside the
+   original retry block. Mutation fetches now use one send loop with two
+   independent budgets: at most one session refresh and at most one transport
+   retry across any attempt. Every attempt retains the original action key;
+   transport retry after refresh also retains the refreshed session token. A
+   second regression makes the post-refresh response fail twice and proves the
+   third mutation attempt fails visibly rather than looping. Equivalent XHR
+   success and exhaustion sequences prove its existing shared `refreshed` and
+   `transportRetries` state already composes correctly, so no XHR production
+   change was needed.
+2. **Collision-free Content-Type structure.** The RED pair
+   `application/json; a="x;b=y"` and `application/json; a=x; b=y` flattened to
+   the same string and replayed under one key. The canonical representation now
+   serializes a parsed marker, media type, and sorted parameter name/value
+   parts with an explicit part count and length prefix for every part. Only a
+   `boundary` parameter on a `multipart/*` media type is excluded. Regressions
+   prove the collision now returns `409 idempotency_key_reused`, reordered
+   equivalent parameters still replay, non-multipart boundary values remain
+   semantic, and multipart requests with random boundary strings still replay.
+
+### Round-2 RED evidence
+
+- Fetch refresh followed by response loss raised `TypeError` on attempt two;
+  the bounded case likewise stopped on `lost response 2` instead of consuming
+  its one transport-retry budget after refresh.
+- The quoted-delimiter Content-Type pair returned 201 replay instead of 409.
+- Changing a non-multipart boundary parameter also returned 201 replay instead
+  of 409.
+
+### Round-2 final verification
+
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/integration/test_local_web_security.py tests/integration/test_provider_api.py tests/integration/test_content_api.py -q`
+  - `49 passed in 1.53s`
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  - `396 passed in 7.67s`
+- `cd backend && PYTHONPYCACHEPREFIX=/private/tmp/audio-memory-task7-fix2-pycache python3 -m compileall -q src tests`
+  - exit 0, no output
+- `cd prototype && node --test tests/api-client.test.mjs`
+  - `13 passed, 0 failed`
+- `cd prototype && node --test tests/dev-proxy-security.test.mjs`
+  - `1 passed, 0 failed`; real Vite and backend middleware over loopback
+- `cd prototype && npm run build`
+  - exit 0; Vite built 36 modules and prepared Sites artifacts
+- `cd prototype && npm run test:sites`
+  - `4 passed, 0 failed`
+- `git diff --check`
+  - exit 0, no output
+
+`docs/HANDOFF-2026-08-06.md` remains untouched, untracked, unstaged, and
+excluded from round 2.
+
+## Formal review fix round 3 (2026-08-06)
+
+The independent round-2 review returned **NOT READY** with two Important and
+one Minor finding. All three were handled with additional behavior-level
+coverage:
+
+1. **Full fetch response transport boundary.** The RED regression used a real
+   errored `ReadableStream`: 401, session refresh, committed 201 headers, then
+   response-body stream loss. Only two action attempts occurred and the stream
+   error escaped. Fetch plus complete `response.text()` consumption now happen
+   inside each bounded attempt; only fetch/body-consumption failures consume
+   the single transport-retry budget. JSON parsing and response interpretation
+   occur after successful buffering, so invalid application payloads are not
+   misclassified as network failures. The same action key and refreshed token
+   are retained for replay, and the existing exhaustion regression still
+   proves the loop is bounded.
+2. **Total and conservative Content-Type canonicalization.** RED proved a
+   legal RFC2231 value (`title*=utf-8''caf%C3%A9`) raised
+   `UnicodeEncodeError`, while `not a content type` and `also invalid` collapsed
+   to one replay fingerprint. Extended values are now collapsed with strict
+   decoding and normalized parts use UTF-8. A standards-aware parser checks
+   defects before canonicalization; invalid media types, invalid parameter
+   names, parse defects, or decoding failures fall back to tagged raw bytes.
+   The raw and parsed variants both retain count and per-part length prefixes.
+   A further observed RED shows two whitespace variants of the same unclosed
+   quoted parameter no longer normalize together after the conservative raw
+   fallback.
+3. **Both retry orderings.** Explicit fetch and XHR tests now cover transport
+   failure followed by 401 and session refresh. Together with the inverse-order
+   and exhaustion tests, they prove each state machine permits at most one of
+   each recovery action in either order while preserving the action key.
+
+### Round-3 RED evidence
+
+- The errored response stream propagated `body stream lost after commit` after
+  only two mutation attempts.
+- RFC2231 `café` normalization raised `UnicodeEncodeError` during fingerprinting.
+- Distinct invalid media types replayed 201 under one key instead of returning
+  409; two defect-bearing unclosed-quote variants did the same.
+
+### Round-3 final verification
+
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/integration/test_local_web_security.py tests/integration/test_provider_api.py tests/integration/test_content_api.py -q`
+  - `52 passed in 1.32s`
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  - `399 passed in 7.18s`
+- `cd backend && PYTHONPYCACHEPREFIX=/private/tmp/audio-memory-task7-fix3-pycache python3 -m compileall -q src tests`
+  - exit 0, no output
+- `cd prototype && node --test tests/api-client.test.mjs`
+  - `16 passed, 0 failed`
+- `cd prototype && node --test tests/dev-proxy-security.test.mjs`
+  - `1 passed, 0 failed`; real Vite and backend middleware over loopback
+- `cd prototype && npm run build`
+  - exit 0; Vite built 36 modules and prepared Sites artifacts
+- `cd prototype && npm run test:sites`
+  - `4 passed, 0 failed`
+- `git diff --check`
+  - exit 0, no output
+
+`docs/HANDOFF-2026-08-06.md` remains untouched, untracked, unstaged, and
+excluded from round 3.
+
+The independent follow-up review returned **READY** with no Critical or
+Important findings. It independently passed all 16 client tests, all 52
+focused backend tests, and `git diff --check`, then exercised 100,000 arbitrary
+Content-Type byte inputs plus an RFC2231 percent-byte matrix without an
+exception. The reviewer confirmed both retry orderings preserve one action key
+and independent budgets, and the raw/parsed length-prefixed fingerprint domains
+are structurally distinct.

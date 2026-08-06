@@ -469,6 +469,184 @@ async def test_semantic_content_type_is_part_of_request_fingerprint(
 
 
 @pytest.mark.asyncio
+async def test_content_type_parameter_structure_cannot_collide_in_fingerprint(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "structured-content-type"),
+                "Content-Type": 'application/json; a="x;b=y"',
+            },
+            content=b'{"value":"same"}',
+        )
+        structurally_different = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "structured-content-type"),
+                "Content-Type": "application/json; a=x; b=y",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert structurally_different.status_code == 409
+    assert structurally_different.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_content_type_parameter_order_normalizes_for_replay(tmp_path: Path) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "ordered-content-type"),
+                "Content-Type": "application/json; b=y; a=x",
+            },
+            content=b'{"value":"same"}',
+        )
+        reordered = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "ordered-content-type"),
+                "Content-Type": "application/json; a=x; b=y",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert reordered.status_code == 201
+    assert reordered.content == first.content
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_non_multipart_boundary_parameter_remains_semantic(tmp_path: Path) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "non-multipart-boundary"),
+                "Content-Type": "application/json; boundary=one",
+            },
+            content=b'{"value":"same"}',
+        )
+        changed_boundary = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "non-multipart-boundary"),
+                "Content-Type": "application/json; boundary=two",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert changed_boundary.status_code == 409
+    assert changed_boundary.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_extended_content_type_parameter_is_fingerprinted_without_error(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        response = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "extended-content-type"),
+                "Content-Type": "application/json; title*=utf-8''caf%C3%A9",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert response.status_code == 201
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_distinct_malformed_content_types_cannot_replay_one_fingerprint(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "malformed-content-type"),
+                "Content-Type": "not a content type",
+            },
+            content=b'{"value":"same"}',
+        )
+        different = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "malformed-content-type"),
+                "Content-Type": "also invalid",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert different.status_code == 409
+    assert different.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_malformed_content_type_parameters_use_conservative_raw_fingerprint(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "malformed-parameter"),
+                "Content-Type": 'application/json; a="x',
+            },
+            content=b'{"value":"same"}',
+        )
+        different_raw_value = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "malformed-parameter"),
+                "Content-Type": 'application/json;a="x',
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert different_raw_value.status_code == 409
+    assert different_raw_value.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
 async def test_concurrent_duplicates_wait_for_and_replay_one_execution(
     tmp_path: Path,
 ) -> None:

@@ -65,23 +65,20 @@ export async function apiRequest(path, options = {}) {
     },
   })
   let response
-  try {
-    response = await send()
-  } catch (error) {
-    if (!isMutation) throw error
-    response = await send()
-  }
-  if (isMutation && await isInvalidSession(response)) {
-    localHeaders = await refreshLocalSessionHeaders(
-      actionKey,
-      localHeaders['X-Audio-Memory-Session'],
-    )
-    response = await send()
-  }
   let payload = null
   let responseText = ''
-  if (response.status !== 204) {
-    responseText = await response.text()
+  let transportRetries = 0
+  let sessionRefreshes = 0
+  while (true) {
+    try {
+      response = await send()
+      responseText = response.status === 204 ? '' : await response.text()
+    } catch (error) {
+      if (!isMutation || transportRetries >= 1) throw error
+      transportRetries += 1
+      continue
+    }
+    payload = null
     if (responseText) {
       try {
         payload = JSON.parse(responseText)
@@ -94,6 +91,15 @@ export async function apiRequest(path, options = {}) {
         }
       }
     }
+    if (isMutation && sessionRefreshes < 1 && isInvalidSession(response, payload)) {
+      sessionRefreshes += 1
+      localHeaders = await refreshLocalSessionHeaders(
+        actionKey,
+        localHeaders['X-Audio-Memory-Session'],
+      )
+      continue
+    }
+    break
   }
   if (!response.ok) {
     const detail = payload?.detail ?? {}
@@ -110,14 +116,8 @@ export async function apiRequest(path, options = {}) {
 }
 
 
-async function isInvalidSession(response) {
-  if (response.status !== 401) return false
-  try {
-    const payload = await response.clone().json()
-    return payload?.detail?.code === 'invalid_session'
-  } catch {
-    return false
-  }
+function isInvalidSession(response, payload) {
+  return response.status === 401 && payload?.detail?.code === 'invalid_session'
 }
 
 export const api = {
