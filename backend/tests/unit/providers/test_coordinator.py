@@ -42,6 +42,27 @@ class BlockingValidator:
         return ValidationResult(ok=True)
 
 
+class AcceptingValidator:
+    async def validate(self, secret: bytes) -> ValidationResult:
+        return ValidationResult(ok=True)
+
+
+class RecordingMetadata:
+    def __init__(self, events: list[str], *, fail_generation: bool = False) -> None:
+        self.events = events
+        self.fail_generation = fail_generation
+        self.generation = 0
+
+    async def update_generation(self, provider_id: str, generation: int) -> None:
+        self.events.append(f"durable:{generation}")
+        if self.fail_generation:
+            raise RuntimeError("generation persistence failed")
+        self.generation = generation
+
+    async def update_validation(self, provider_id: str, **kwargs) -> None:
+        self.events.append("validation")
+
+
 @pytest.mark.asyncio
 async def test_same_provider_validation_is_deduplicated() -> None:
     keychain = FakeKeychain()
@@ -231,4 +252,106 @@ async def test_publication_guard_blocks_physical_credential_replacement() -> Non
         assert keychain.values["kimi"] == b"saved"
 
     assert (await replacement).ok
+    assert keychain.values["kimi"] == b"replacement"
+
+
+@pytest.mark.asyncio
+async def test_generation_is_durable_before_physical_credential_replacement() -> None:
+    events: list[str] = []
+    metadata = RecordingMetadata(events)
+
+    class OrderedKeychain(FakeKeychain):
+        def replace(self, provider_id: str, candidate: bytes) -> None:
+            events.append("physical")
+            super().replace(provider_id, candidate)
+
+    coordinator = ProviderStateCoordinator(
+        keychain=OrderedKeychain(),
+        validators={"kimi": AcceptingValidator()},
+        metadata=metadata,
+    )
+
+    await coordinator.validate_candidate("kimi", "settings", b"replacement")
+
+    assert events[:2] == ["durable:1", "physical"]
+    assert metadata.generation == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_persistence_failure_keeps_the_old_physical_key() -> None:
+    events: list[str] = []
+    keychain = FakeKeychain()
+    coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators={"kimi": AcceptingValidator()},
+        metadata=RecordingMetadata(events, fail_generation=True),
+    )
+
+    with pytest.raises(RuntimeError, match="persistence"):
+        await coordinator.validate_candidate("kimi", "settings", b"replacement")
+
+    assert keychain.values["kimi"] == b"saved"
+    assert await coordinator.credential_generation("kimi") == 0
+    assert events == ["durable:1"]
+
+
+@pytest.mark.asyncio
+async def test_physical_replacement_failure_keeps_the_incremented_generation() -> None:
+    events: list[str] = []
+    metadata = RecordingMetadata(events)
+
+    class FailingKeychain(FakeKeychain):
+        def replace(self, provider_id: str, candidate: bytes) -> None:
+            events.append("physical")
+            raise RuntimeError("keychain replacement failed")
+
+    keychain = FailingKeychain()
+    coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators={"kimi": AcceptingValidator()},
+        metadata=metadata,
+    )
+
+    with pytest.raises(RuntimeError, match="replacement"):
+        await coordinator.validate_candidate("kimi", "settings", b"replacement")
+
+    assert events == ["durable:1", "physical"]
+    assert metadata.generation == 1
+    assert await coordinator.credential_generation("kimi") == 1
+    assert keychain.values["kimi"] == b"saved"
+
+
+@pytest.mark.asyncio
+async def test_failed_confirmation_cannot_leave_new_key_on_old_generation() -> None:
+    events: list[str] = []
+    metadata = RecordingMetadata(events)
+
+    class UnconfirmedKeychain(FakeKeychain):
+        replaced = False
+
+        def replace(self, provider_id: str, candidate: bytes) -> None:
+            events.append("physical")
+            super().replace(provider_id, candidate)
+            self.replaced = True
+
+        def read(self, provider_id: str) -> KeychainReadResult:
+            if self.replaced:
+                return KeychainReadResult(KeychainStatus.UNAVAILABLE)
+            return super().read(provider_id)
+
+    keychain = UnconfirmedKeychain()
+    coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators={"kimi": AcceptingValidator()},
+        metadata=metadata,
+    )
+
+    result = await coordinator.validate_candidate(
+        "kimi", "settings", b"replacement"
+    )
+
+    assert result.error_code is ValidationErrorCode.KEYCHAIN_UNAVAILABLE
+    assert events[:2] == ["durable:1", "physical"]
+    assert metadata.generation == 1
+    assert await coordinator.credential_generation("kimi") == 1
     assert keychain.values["kimi"] == b"replacement"

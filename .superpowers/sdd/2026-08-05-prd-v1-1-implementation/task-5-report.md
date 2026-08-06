@@ -307,3 +307,55 @@ counts):
   - exit 0, no output
 - `git diff --check`:
   - exit 0, no output
+
+## Formal review fix round 2
+
+The scoped re-review left two Important blockers. Both were closed with focused
+failure-first coverage:
+
+1. Durable generation before physical credential replacement:
+   - RED: the order test observed `physical` before `durable:1`; a metadata
+     persistence exception left the replacement key installed; and a keychain
+     replacement exception left generation 0.
+   - GREEN: while holding the provider state/publication guard, the coordinator
+     first commits the next generation, then advances the in-memory generation,
+     and only then calls physical key replacement. Persistence failure therefore
+     preserves the old key and old generation. Replacement or confirmation
+     failure retains the already-durable higher generation, conservatively
+     invalidating in-flight work and ensuring a changed key can never remain on
+     the old generation.
+2. Generic remote-output failure after credential replacement:
+   - RED: a second invalid strict output raised `SceneOutputError` and the
+     generic path marked the history version failed instead of recognizing the
+     new credential generation.
+   - GREEN: before generic failure handling, the runner now rechecks worker
+     ownership and credential generation. Credential change wins over
+     `SceneOutputError`/Pydantic validation failures, clears unpublished scene
+     checkpoints, returns the history item to pending, and pauses its batch as
+     `paused_credential_changed`.
+
+Targeted RED was `4 failed`; the same four tests passed in `0.33s` after the
+fix. A dedicated failed-confirmation regression also passed (`1 passed in
+0.19s`).
+
+### Final-triage ledger (non-blocking observations)
+
+- Lease recovery/release can leave a `ReanalysisItem` marked `running` until a
+  later claim reconciles it. This was outside the two scoped blockers and needs
+  an explicit lifecycle decision in final triage.
+- Retry-analysis accepted-state validation currently excludes
+  `credential_changed` and `fixed_rules_changed`. This was outside the scoped
+  blockers and should be reconciled with the intended retry UX in final triage.
+
+The final verification results below supersede intermediate counts above.
+
+- migration suite:
+  - `6 passed in 0.60s`
+- full Task 5 focused regression set:
+  - `63 passed in 2.98s`
+- complete backend suite:
+  - `326 passed in 5.25s`
+- `python -m compileall -q src tests`:
+  - exit 0, no output
+- `git diff --check`:
+  - exit 0, no output

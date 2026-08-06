@@ -230,21 +230,29 @@ class ProviderStateCoordinator:
                     current = self._candidates.get(key)
                     if current is None or current[0] != candidate_id:
                         raise asyncio.CancelledError
-                    self._keychain.replace(provider_id, candidate)
-                    confirmed = self._keychain.read(provider_id)
-                    if confirmed.status is not KeychainStatus.CONFIGURED:
-                        return ValidationResult(
-                            False, ValidationErrorCode.KEYCHAIN_UNAVAILABLE
-                        )
-                    self._generations[provider_id] += 1
-                    self._set_state(provider_id, ProviderStateName.AVAILABLE)
-                    generation = self._generations[provider_id]
+                    generation = self._generations[provider_id] + 1
                     if self._metadata is not None:
                         await self._metadata.update_generation(
                             provider_id, generation
                         )
+                    self._generations[provider_id] = generation
+                    self._keychain.replace(provider_id, candidate)
+                    confirmed = self._keychain.read(provider_id)
+                    if confirmed.status is not KeychainStatus.CONFIGURED:
+                        replacement_result = ValidationResult(
+                            False,
+                            ValidationErrorCode.KEYCHAIN_UNAVAILABLE,
+                        )
+                        self._set_state(
+                            provider_id,
+                            ProviderStateName.KEYCHAIN_UNAVAILABLE,
+                            error_code=ValidationErrorCode.KEYCHAIN_UNAVAILABLE,
+                        )
+                    else:
+                        replacement_result = result
+                        self._set_state(provider_id, ProviderStateName.AVAILABLE)
                 await self._persist_state(provider_id)
-            return result
+            return replacement_result
         finally:
             current = self._candidates.get(key)
             if current is not None and current[0] == candidate_id:

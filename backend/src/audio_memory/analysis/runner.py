@@ -203,6 +203,8 @@ class AnalysisRunner:
             await self._mark_failed(version.id, worker_owner_id)
             raise
         except BaseException:
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
             await self._mark_failed(version.id, worker_owner_id)
             raise
 

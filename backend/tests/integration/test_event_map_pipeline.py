@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from audio_memory.analysis.provider import ProviderAnalysisError
+from audio_memory.analysis.parser import SceneOutputError
 from audio_memory.analysis.publisher import AnalysisOutcome, AnalysisPublisher
 from audio_memory.analysis.runner import (
     AnalysisRunner,
@@ -146,6 +147,11 @@ class ChangingGeneration:
 class FailingProvider(RecordingProvider):
     async def analyze_event_map(self, request, provider_snapshot):
         raise ProviderAnalysisError("request failed")
+
+
+class InvalidOutputProvider(RecordingProvider):
+    async def analyze_event_map(self, request, provider_snapshot):
+        raise SceneOutputError("second response still violates schema")
 
 
 class ChangesAfterProviderFailure(StableGeneration):
@@ -529,6 +535,43 @@ async def test_provider_failure_after_key_replacement_is_credential_changed(tmp_
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
     assert version is not None and version.status == "credential_changed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generic_remote_output_failure_after_key_replacement_pauses_history(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "generic-output-generation.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path, history_batch_id="history-1")
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.staged_results_json = json.dumps(
+            {"todo": empty_scene("todo").model_dump(mode="json")}
+        )
+        await session.commit()
+    runner = AnalysisRunner(
+        database=database,
+        provider=InvalidOutputProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=ChangesAfterProviderFailure(),
+    )
+
+    with pytest.raises(CredentialChangedError):
+        await runner.run("version-1")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        item = await session.get(ReanalysisItem, "history-item")
+        history = await session.get(ReanalysisBatch, "history-1")
+    assert version is not None and version.status == "credential_changed"
+    assert json.loads(version.staged_results_json) == {}
+    assert item is not None and item.status == "pending"
+    assert item.error_code == "credential_changed"
+    assert history is not None and history.status == "paused_credential_changed"
     await database.dispose()
 
 
