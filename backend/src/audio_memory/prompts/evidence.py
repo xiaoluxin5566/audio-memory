@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from pydantic import TypeAdapter, ValidationError
+
 from audio_memory.prompts.event_schema import Event, EventMap
 from audio_memory.prompts.schemas import (
     ContentSceneResult,
@@ -10,6 +12,7 @@ from audio_memory.prompts.schemas import (
     MeetingSceneResult,
     ParentingSceneResult,
     SceneResultBase,
+    StrictSceneResult,
     StrictTodoDraft,
 )
 
@@ -21,9 +24,15 @@ class EvidenceIntegrityError(ValueError):
 _MEDIA_EVENT_TYPES = {
     "media",
     "video",
+    "youtube_video",
+    "tiktok",
+    "douyin",
     "live_stream",
+    "livestream",
     "launch_event",
     "podcast",
+    "music",
+    "audiobook",
     "interview",
     "book",
     "course",
@@ -33,12 +42,38 @@ _MEDIA_EVENT_TYPES = {
     "song",
 }
 
+_TODO_CAPABLE_EVENT_TYPES = {
+    "conversation",
+    "casual_chat",
+    "meeting",
+    "work_meeting",
+    "parenting",
+    "family_interaction",
+    "commitment",
+    "monologue",
+    "phone_call",
+    "discussion",
+    "work_session",
+}
+
+_STRICT_SCENE_RESULT_ADAPTER = TypeAdapter(StrictSceneResult)
+
 
 def validate_evidence_integrity(
     result: SceneResultBase,
     event_map: EventMap,
     segment_ids: set[str],
 ) -> None:
+    try:
+        event_map = EventMap.model_validate(event_map.model_dump(mode="python"))
+        result = _STRICT_SCENE_RESULT_ADAPTER.validate_python(
+            result.model_dump(mode="python")
+        )
+    except ValidationError as exc:
+        raise EvidenceIntegrityError(
+            f"strict schema revalidation failed: {exc}"
+        ) from exc
+
     events = {event.event_id: event for event in event_map.events}
     event_map_segments = {
         segment_id
@@ -49,6 +84,11 @@ def validate_evidence_integrity(
     referenced_map_segments = event_map_segments | set(
         event_map.user_speaker.evidence_segment_ids
     )
+    if event_map.user_speaker.confidence >= 0.70:
+        _require_nonempty_unique_ids(
+            event_map.user_speaker.evidence_segment_ids,
+            "reliable user speaker evidence_segment_ids",
+        )
     unknown_map_segments = referenced_map_segments - segment_ids
     if unknown_map_segments:
         raise EvidenceIntegrityError(
@@ -62,7 +102,15 @@ def validate_evidence_integrity(
         )
 
     todos: list[StrictTodoDraft] = list(getattr(result, "todos", []))
-    requires_user_identity = bool(todos)
+    requires_user_identity = any(
+        todo.owner_type in {"user", "shared"} for todo in todos
+    )
+    if isinstance(result, MeetingSceneResult):
+        requires_user_identity = requires_user_identity or any(
+            todo.owner_type in {"user", "shared"}
+            for card in result.cards
+            for todo in card.detail.meeting_todos
+        )
     if isinstance(result, ParentingSceneResult):
         requires_user_identity = requires_user_identity or any(
             interaction.observed_parent_actions
@@ -122,7 +170,11 @@ def validate_evidence_integrity(
                 finding_ids = {finding.finding_id for finding in findings}
                 card_finding_ids.extend(finding.finding_id for finding in findings)
                 for recommendation in interaction.recommendations:
-                    if not set(recommendation.basis_finding_ids).issubset(finding_ids):
+                    basis_finding_ids = _require_nonempty_unique_ids(
+                        recommendation.basis_finding_ids,
+                        "basis_finding_ids",
+                    )
+                    if not set(basis_finding_ids).issubset(finding_ids):
                         raise EvidenceIntegrityError(
                             "basis_finding_ids must reference findings in the same interaction"
                         )
@@ -173,7 +225,11 @@ def validate_evidence_integrity(
                 _require_events(direction.supporting_event_ids, events)
                 direction_case_ids = {case.case_id for case in direction.cases}
                 card_case_ids.extend(case.case_id for case in direction.cases)
-                if not set(direction.recommendation.basis_case_ids).issubset(
+                basis_case_ids = _require_nonempty_unique_ids(
+                    direction.recommendation.basis_case_ids,
+                    "basis_case_ids",
+                )
+                if not set(basis_case_ids).issubset(
                     direction_case_ids
                 ):
                     raise EvidenceIntegrityError(
@@ -231,6 +287,11 @@ def _validate_todo(
         raise EvidenceIntegrityError(
             f"a media event cannot be classified as a user todo: {event.event_id}"
         )
+    if event.event_type.strip().lower() not in _TODO_CAPABLE_EVENT_TYPES:
+        raise EvidenceIntegrityError(
+            f"event type {event.event_type!r} cannot support a user todo: "
+            f"{event.event_id}"
+        )
 
 
 def _require_event(event_id: str, events: dict[str, Event]) -> Event:
@@ -250,7 +311,9 @@ def _validate_event_evidence(
     event: Event,
     segment_ids: set[str],
 ) -> None:
-    evidence = set(evidence_segment_ids)
+    evidence = set(
+        _require_nonempty_unique_ids(evidence_segment_ids, "evidence_segment_ids")
+    )
     unknown = evidence - segment_ids
     if unknown:
         raise EvidenceIntegrityError(
@@ -270,7 +333,9 @@ def _validate_multi_event_evidence(
     segment_ids: set[str],
 ) -> None:
     referenced_events = _require_events(event_ids, events)
-    evidence = set(evidence_segment_ids)
+    evidence = set(
+        _require_nonempty_unique_ids(evidence_segment_ids, "evidence_segment_ids")
+    )
     unknown = evidence - segment_ids
     if unknown:
         raise EvidenceIntegrityError(
@@ -286,3 +351,15 @@ def _validate_multi_event_evidence(
         raise EvidenceIntegrityError(
             f"evidence segment IDs {sorted(outside)} are outside referenced events"
         )
+
+
+def _require_nonempty_unique_ids(
+    values: Iterable[str],
+    label: str,
+) -> list[str]:
+    identifiers = list(values)
+    if not identifiers:
+        raise EvidenceIntegrityError(f"{label} must not be empty")
+    if len(identifiers) != len(set(identifiers)):
+        raise EvidenceIntegrityError(f"{label} must be unique; duplicate IDs are invalid")
+    return identifiers

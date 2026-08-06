@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime
 from typing import Literal
 
@@ -8,6 +9,39 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SceneId = Literal[
     "todo", "meeting", "parenting", "content", "growth", "inspiration"
+]
+
+EventType = Literal[
+    "conversation",
+    "casual_chat",
+    "meeting",
+    "work_meeting",
+    "parenting",
+    "family_interaction",
+    "commitment",
+    "monologue",
+    "phone_call",
+    "discussion",
+    "work_session",
+    "media",
+    "video",
+    "podcast",
+    "music",
+    "song",
+    "audiobook",
+    "book",
+    "livestream",
+    "live_stream",
+    "launch_event",
+    "youtube_video",
+    "tiktok",
+    "douyin",
+    "interview",
+    "course",
+    "speech",
+    "news",
+    "program",
+    "other",
 ]
 
 
@@ -21,9 +55,23 @@ class UserSpeaker(StrictModel):
     reasoning: str = Field(min_length=1, max_length=500)
     evidence_segment_ids: list[str]
 
+    @model_validator(mode="after")
+    def validate_reliable_evidence(self) -> UserSpeaker:
+        if self.confidence >= 0.70:
+            if not self.evidence_segment_ids:
+                raise ValueError("reliable user speaker evidence must not be empty")
+            if len(self.evidence_segment_ids) != len(set(self.evidence_segment_ids)):
+                raise ValueError("reliable user speaker evidence must be unique")
+        return self
+
     @property
     def is_reliable(self) -> bool:
-        return self.speaker_id is not None and self.confidence >= 0.70
+        return (
+            self.speaker_id is not None
+            and self.confidence >= 0.70
+            and bool(self.evidence_segment_ids)
+            and len(self.evidence_segment_ids) == len(set(self.evidence_segment_ids))
+        )
 
 
 class StructuredTranscriptSegment(StrictModel):
@@ -48,7 +96,7 @@ class StructuredTranscriptSegment(StrictModel):
 class Event(StrictModel):
     event_id: str = Field(pattern=r"^event_[A-Za-z0-9_]+$")
     parent_event_id: str | None
-    event_type: str = Field(min_length=1, max_length=80)
+    event_type: EventType
     title: str = Field(min_length=1, max_length=160)
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
@@ -84,6 +132,21 @@ class EventMap(StrictModel):
             raise ValueError("event_id values must be unique")
         if len(self.unassigned_segment_ids) != len(set(self.unassigned_segment_ids)):
             raise ValueError("unassigned_segment_ids must be unique")
+        assignment_counts = Counter(
+            segment_id
+            for event in self.events
+            for segment_id in event.evidence_segment_ids
+        )
+        repeated_assignments = sorted(
+            segment_id
+            for segment_id, count in assignment_counts.items()
+            if count > 1
+        )
+        if repeated_assignments:
+            raise ValueError(
+                "a segment cannot belong to multiple events, including parent/child "
+                f"events: {repeated_assignments}"
+            )
         assigned_segment_ids = {
             segment_id
             for event in self.events

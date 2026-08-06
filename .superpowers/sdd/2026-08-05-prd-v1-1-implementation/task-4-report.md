@@ -130,10 +130,62 @@ transcript、event map 和 profile 均先 JSON 序列化，再放入明确的
 - `StrictSceneResult` JSON Schema 为 6 个 `oneOf` 分支；40 个对象定义全部禁止
  额外字段。
 
+## Fix round 1 审查闭环
+
+### RED / GREEN 证据
+
+1. 低置信具体作品名：
+   - RED：Growth `LearningResource` 在 `existence_confidence=0.89` 时仍接受
+     具体 `title`，且 `title=None` 无法表达 search-only 资源。
+   - GREEN：Content recommendation 与 Growth resource 统一为：低于 `0.90`
+     时 `title` / `creator` 必须均为 null，`0.90` 边界开始允许具体作品。
+2. 分层 confidence 门槛：
+   - RED：6 种 `should_generate=true` 结果和 5 种可见卡片均接受
+     `0.29`；待办责任归属、Growth 用户评价和画像兴趣信号均接受
+     `0.49`。
+   - GREEN：逐项验证 `0.29/0.30` 和 `0.49/0.50` 边界，未使用全局
+     单一门槛。
+3. 前端递归 allowlist：
+   - 六场景均递归收集 key，确认不含内部 confidence、event/evidence ID、
+     finding/case/basis ID、`generation_reason`、`internal_interest_signals` 和
+     `inferred_title_hint`。
+   - 测试使用非空 `meeting_todos`、Content `recommendations`、Growth
+     `cases` / `resources`，并确认标题、核心内容、详情、时间、可展示待办仍保留。
+
+### confidence 阈值矩阵
+
+| 对象 | 最低 confidence | 理由 |
+| --- | ---: | --- |
+| `should_generate=true` 场景 | 0.30 | 低于 0.30 不得输出结论 |
+| Meeting / Parenting / Content / Growth / Inspiration 可见卡片 | 0.30 | 可见结论最低门槛 |
+| Todo 用户/共同责任归属 | 0.50 | 0.30–0.49 不得用于待办归属 |
+| Growth case 中的用户评价 | 0.50 | 个人评价门槛；单事件另受 0.80 更严门槛 |
+| `internal_interest_signals` 画像候选 | 0.50 | 画像更新不接受薄弱可能性 |
+| Parenting issue | 0.60 | 保留冻结规格门槛 |
+| User identity | 0.70 | 保留事件地图身份门槛 |
+| Growth 单事件 case | 0.80 | 保留单事件例外门槛 |
+| 具体外部作品 | existence confidence 0.90 | 低于门槛只能 search-only |
+
+### 前端 allowlist 矩阵
+
+| 场景 | 保留的主要嵌套内容 | 专项覆盖 |
+| --- | --- | --- |
+| Todo | 可展示待办字段 | 待办证据/事件 ID 被清理 |
+| Meeting | 参与人、结论、决定、问题、`meeting_todos` | 嵌套待办可见且内部 ID 被清理 |
+| Parenting | 分事件互动、发现和建议 | finding / basis / evidence ID 被清理 |
+| Content | 消费内容、跨事件洞察、`recommendations` | 保留 search query，清理兴趣信号与推断标题 |
+| Growth | 方向、`cases`、建议、`resources`、优势 | case / direction / basis / event ID 被清理 |
+| Inspiration | 灵感、连接、探索步骤 | event / evidence ID 和 confidence 被清理 |
+
 ## 最终验证
 
-- Task 4 指定 Prompt + API 套件：`81 passed in 0.29s`。
-- 完整 backend 回归：`234 passed in 3.35s`。
+- 首版 Task 4 指定 Prompt + API 套件：`81 passed in 0.29s`。
+- 首版完整 backend 回归：`234 passed in 3.35s`。
+- Fix round 1 Task 4 指定 Prompt + API 套件：`132 passed in 0.33s`。
+- Fix round 1 完整 backend 回归：`285 passed in 3.65s`。
+- 冻结 Prompt 与规格 fenced block 精确比对：`9/9`。
+- wheel 构建成功，9 份 Prompt Markdown 资源全部在包内：`9/9`。
+- `compileall` 和 `git diff --check`：通过。
 - JSON Schema 复核：`oneOf=6`、`defs=40`、所有对象严格，且
   `inferred_title_hint` 为必填内部诊断字段。
 - `git diff --check`：通过。

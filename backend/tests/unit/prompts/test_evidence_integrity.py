@@ -146,6 +146,56 @@ def test_rejects_media_action_call_misclassified_as_user_todo() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "media_alias",
+    [
+        "media",
+        "video",
+        "podcast",
+        "music",
+        "audiobook",
+        "livestream",
+        "youtube_video",
+        "tiktok",
+        "douyin",
+    ],
+)
+def test_media_alias_cannot_bypass_user_todo_guard(media_alias: str) -> None:
+    alias_map = EventMap(
+        user_speaker=event_map().user_speaker,
+        events=[
+            event("event_001", "seg_001"),
+            event("event_002", "seg_002", event_type=media_alias),
+        ],
+        unassigned_segment_ids=[],
+    )
+
+    with pytest.raises(EvidenceIntegrityError, match="media event"):
+        validate_evidence_integrity(
+            todo_result(event_id="event_002", evidence_segment_ids=["seg_002"]),
+            alias_map,
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_other_event_kind_cannot_default_to_user_commitment() -> None:
+    other_map = EventMap(
+        user_speaker=event_map().user_speaker,
+        events=[
+            event("event_001", "seg_001"),
+            event("event_002", "seg_002", event_type="other"),
+        ],
+        unassigned_segment_ids=[],
+    )
+
+    with pytest.raises(EvidenceIntegrityError, match="cannot support a user todo"):
+        validate_evidence_integrity(
+            todo_result(event_id="event_002", evidence_segment_ids=["seg_002"]),
+            other_map,
+            {"seg_001", "seg_002"},
+        )
+
+
 def test_event_map_must_account_for_every_transcript_segment() -> None:
     with pytest.raises(EvidenceIntegrityError, match="unassigned"):
         validate_evidence_integrity(
@@ -194,6 +244,17 @@ def meeting_with_cross_event_conclusion() -> MeetingSceneResult:
         todos=[],
         confidence=0.9,
     )
+
+
+def meeting_with_user_owned_detail_todo() -> MeetingSceneResult:
+    payload = meeting_with_cross_event_conclusion().model_dump(mode="json")
+    payload["cards"][0]["detail"]["core_conclusions"][0][
+        "evidence_segment_ids"
+    ] = ["seg_001"]
+    payload["cards"][0]["detail"]["meeting_todos"] = [
+        todo_result().todos[0].model_dump(mode="json")
+    ]
+    return MeetingSceneResult.model_validate(payload)
 
 
 def parenting_with_cross_event_finding() -> ParentingSceneResult:
@@ -455,6 +516,23 @@ def test_low_identity_still_allows_objective_content_consumption_record() -> Non
     )
 
 
+def test_meeting_detail_user_todo_uses_point_seven_identity_boundary() -> None:
+    result = meeting_with_user_owned_detail_todo()
+
+    with pytest.raises(EvidenceIntegrityError, match="user identity"):
+        validate_evidence_integrity(
+            result,
+            event_map(user_confidence=0.69),
+            {"seg_001", "seg_002"},
+        )
+
+    validate_evidence_integrity(
+        result,
+        event_map(user_confidence=0.70),
+        {"seg_001", "seg_002"},
+    )
+
+
 def test_integrity_check_rejects_nonexistent_parenting_basis_even_if_model_was_bypassed() -> None:
     result = valid_parenting_result()
     card = result.cards[0]
@@ -498,5 +576,97 @@ def test_integrity_check_rejects_nonexistent_growth_basis_even_if_model_was_bypa
         validate_evidence_integrity(
             invalid_result,
             event_map(),
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_integrity_revalidates_model_construct_with_empty_evidence() -> None:
+    result = todo_result()
+    todo_payload = result.todos[0].model_dump(mode="python")
+    todo_payload["evidence_segment_ids"] = []
+    invalid_todo = StrictTodoDraft.model_construct(**todo_payload)
+    invalid_result = result.model_copy(update={"todos": [invalid_todo]})
+
+    with pytest.raises(EvidenceIntegrityError, match="strict schema|evidence"):
+        validate_evidence_integrity(
+            invalid_result,
+            event_map(),
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_integrity_rejects_duplicate_evidence_after_model_copy_bypass() -> None:
+    result = todo_result()
+    invalid_todo = result.todos[0].model_copy(
+        update={"evidence_segment_ids": ["seg_001", "seg_001"]}
+    )
+    invalid_result = result.model_copy(update={"todos": [invalid_todo]})
+
+    with pytest.raises(EvidenceIntegrityError, match="unique|duplicate"):
+        validate_evidence_integrity(
+            invalid_result,
+            event_map(),
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_integrity_rejects_empty_parenting_basis_after_model_copy_bypass() -> None:
+    result = valid_parenting_result()
+    card = result.cards[0]
+    interaction = card.detail.interactions[0]
+    recommendation = ParentingRecommendation(
+        title="先确认困难点",
+        why_it_helps="建议必须有本次互动 finding 支持。",
+        steps=["先确认事实"],
+        suggested_language="我们先确认发生了什么。再一起看下一步。",
+        profile_basis=None,
+        basis_finding_ids=["finding_parenting_event_001_01"],
+    ).model_copy(update={"basis_finding_ids": []})
+    invalid_interaction = interaction.model_copy(
+        update={"recommendations": [recommendation]}
+    )
+    invalid_card = card.model_copy(
+        update={
+            "detail": card.detail.model_copy(
+                update={"interactions": [invalid_interaction]}
+            )
+        }
+    )
+    invalid_result = result.model_copy(update={"cards": [invalid_card]})
+
+    with pytest.raises(EvidenceIntegrityError, match="basis_finding_ids|strict schema"):
+        validate_evidence_integrity(
+            invalid_result,
+            event_map(),
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_integrity_revalidates_reliable_user_evidence_after_model_copy_bypass() -> None:
+    valid_map = event_map(user_confidence=0.70)
+    invalid_speaker = valid_map.user_speaker.model_copy(
+        update={"evidence_segment_ids": []}
+    )
+    invalid_map = valid_map.model_copy(update={"user_speaker": invalid_speaker})
+
+    with pytest.raises(EvidenceIntegrityError, match="strict schema|evidence"):
+        validate_evidence_integrity(
+            todo_result(),
+            invalid_map,
+            {"seg_001", "seg_002"},
+        )
+
+
+def test_reliable_user_speaker_evidence_must_reference_a_transcript_segment() -> None:
+    valid_map = event_map(user_confidence=0.70)
+    invalid_speaker = valid_map.user_speaker.model_copy(
+        update={"evidence_segment_ids": ["seg_999"]}
+    )
+    invalid_map = valid_map.model_copy(update={"user_speaker": invalid_speaker})
+
+    with pytest.raises(EvidenceIntegrityError, match="unknown segment"):
+        validate_evidence_integrity(
+            todo_result(),
+            invalid_map,
             {"seg_001", "seg_002"},
         )

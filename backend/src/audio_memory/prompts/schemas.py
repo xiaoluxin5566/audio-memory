@@ -27,13 +27,23 @@ class StrictTodoDraft(StrictModel):
     source_event_id: str = Field(pattern=r"^event_[A-Za-z0-9_]+$")
     source_context: str = Field(min_length=1, max_length=500)
     evidence_segment_ids: list[str] = Field(min_length=1)
-    confidence: float = Field(ge=0.3, le=1)
+    confidence: float = Field(ge=0.5, le=1)
 
 
 class SceneResultBase(StrictModel):
     should_generate: bool
     generation_reason: str = Field(min_length=1, max_length=100)
     confidence: float = Field(ge=0, le=1)
+
+    def model_dump_for_frontend(self) -> dict[str, object]:
+        scene_id = getattr(self, "scene_id")
+        payload = _apply_frontend_allowlist(
+            self.model_dump(mode="json"),
+            _FRONTEND_SCENE_ALLOWLISTS[scene_id],
+        )
+        if not isinstance(payload, dict):
+            raise TypeError("frontend scene payload must be an object")
+        return payload
 
     @model_validator(mode="after")
     def validate_generation_state(self) -> SceneResultBase:
@@ -46,6 +56,8 @@ class SceneResultBase(StrictModel):
             raise ValueError("a generated todo scene must include at least one todo")
         if self.should_generate and scene_id != "todo" and not cards:
             raise ValueError("a generated visible scene must include at least one card")
+        if self.should_generate and self.confidence < 0.30:
+            raise ValueError("a generated scene requires confidence >= 0.30")
         return self
 
 
@@ -88,7 +100,7 @@ class MeetingDetail(StrictModel):
 class MeetingCard(StrictModel):
     event_ids: list[str] = Field(min_length=1, max_length=1)
     card: CardShell
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0.3, le=1)
     detail: MeetingDetail
 
     @model_validator(mode="after")
@@ -218,7 +230,9 @@ class ParentingInteraction(StrictModel):
             not set(recommendation.basis_finding_ids).issubset(known)
             for recommendation in self.recommendations
         ):
-            raise ValueError("recommendations must reference findings in the same interaction")
+            raise ValueError(
+                "basis_finding_ids must reference findings in the same interaction"
+            )
         return self
 
 
@@ -230,7 +244,7 @@ class ParentingDetail(StrictModel):
 class ParentingCard(StrictModel):
     event_ids: list[str] = Field(min_length=1)
     card: CardShell
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0.3, le=1)
     detail: ParentingDetail
 
     @model_validator(mode="after")
@@ -336,7 +350,7 @@ class CrossEventInsight(StrictModel):
 
 
 class ContentRecommendation(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(max_length=200)
     content_type: ContentType
     creator: str | None
     introduction: str = Field(min_length=1, max_length=1_200)
@@ -347,8 +361,13 @@ class ContentRecommendation(StrictModel):
 
     @model_validator(mode="after")
     def validate_uncertain_work_falls_back_to_search(self) -> ContentRecommendation:
-        if self.existence_confidence < 0.90 and self.creator is not None:
-            raise ValueError("uncertain works may only be represented by a search query")
+        if self.existence_confidence < 0.90 and (
+            self.title is not None or self.creator is not None
+        ):
+            raise ValueError(
+                "uncertain works may only be represented by a search query, "
+                "without a specific title or creator"
+            )
         return self
 
 
@@ -357,7 +376,7 @@ class InterestSignal(StrictModel):
     value: str = Field(min_length=1, max_length=500)
     evidence_mode: Literal["explicit_single_event", "multi_event_pattern"]
     supporting_event_ids: list[str] = Field(min_length=1)
-    confidence: float = Field(ge=0.3, le=1)
+    confidence: float = Field(ge=0.5, le=1)
 
     @model_validator(mode="after")
     def validate_evidence_mode(self) -> InterestSignal:
@@ -391,7 +410,7 @@ class ContentDetail(StrictModel):
 class ContentCard(StrictModel):
     event_ids: list[str] = Field(min_length=1)
     card: CardShell
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0.3, le=1)
     detail: ContentDetail
 
     @model_validator(mode="after")
@@ -430,13 +449,6 @@ class ContentSceneResult(SceneResultBase):
             raise ValueError("global todos must be owned by the user or shared")
         return self
 
-    def model_dump_for_frontend(self) -> dict[str, object]:
-        payload = self.model_dump(mode="json")
-        for card in payload["cards"]:
-            for item in card["detail"]["consumed_items"]:
-                item.pop("inferred_title_hint", None)
-        return payload
-
 
 class GrowthCase(StrictModel):
     case_id: str = Field(pattern=r"^case_growth_[a-z][a-z0-9_]*_event_[A-Za-z0-9_]+_[0-9]{2}$")
@@ -448,7 +460,7 @@ class GrowthCase(StrictModel):
     problem: str = Field(min_length=1, max_length=1_200)
     reasoning: str = Field(min_length=1, max_length=1_200)
     evidence_segment_ids: list[str] = Field(min_length=1)
-    confidence: float = Field(ge=0.3, le=1)
+    confidence: float = Field(ge=0.5, le=1)
 
 
 class GrowthRecommendation(StrictModel):
@@ -463,7 +475,7 @@ class GrowthRecommendation(StrictModel):
 
 
 class LearningResource(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(max_length=200)
     creator: str | None
     resource_type: Literal["book", "podcast", "course", "video", "article", "other"]
     reason: str = Field(min_length=1, max_length=1_200)
@@ -472,8 +484,13 @@ class LearningResource(StrictModel):
 
     @model_validator(mode="after")
     def validate_uncertain_resource_falls_back_to_search(self) -> LearningResource:
-        if self.existence_confidence < 0.90 and self.creator is not None:
-            raise ValueError("uncertain resources may only be represented by a search query")
+        if self.existence_confidence < 0.90 and (
+            self.title is not None or self.creator is not None
+        ):
+            raise ValueError(
+                "uncertain resources may only be represented by a search query, "
+                "without a specific title or creator"
+            )
         return self
 
 
@@ -493,10 +510,14 @@ class GrowthDirection(StrictModel):
         if len(supporting) != len(self.supporting_event_ids):
             raise ValueError("growth supporting_event_ids must be unique")
         case_ids = [case.case_id for case in self.cases]
+        case_events = {case.event_id for case in self.cases}
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("case_id values must be unique within a direction")
-        if any(case.event_id not in supporting for case in self.cases):
-            raise ValueError("growth cases must belong to a supporting event")
+        if case_events != supporting:
+            raise ValueError(
+                "growth case events must exactly match supporting events; "
+                "every supporting event requires a case"
+            )
         if any(
             not case.case_id.startswith(
                 f"case_growth_{self.direction_id}_{case.event_id}_"
@@ -505,8 +526,10 @@ class GrowthDirection(StrictModel):
         ):
             raise ValueError("case_id must encode its direction and event")
         if not set(self.recommendation.basis_case_ids).issubset(set(case_ids)):
-            raise ValueError("growth recommendation must reference cases in its direction")
-        if len(supporting) == 1:
+            raise ValueError(
+                "basis_case_ids must reference cases in the same growth direction"
+            )
+        if len(case_events) == 1:
             if "不足以判断为长期模式" not in self.pattern_summary:
                 raise ValueError("single-event observations must not claim a lasting pattern")
             if any(case.confidence < 0.80 for case in self.cases):
@@ -537,7 +560,7 @@ class GrowthDetail(StrictModel):
 class GrowthCard(StrictModel):
     event_ids: list[str] = Field(min_length=1)
     card: CardShell
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0.3, le=1)
     detail: GrowthDetail
 
     @model_validator(mode="after")
@@ -567,7 +590,7 @@ class GrowthSceneResult(SceneResultBase):
     @model_validator(mode="after")
     def validate_single_event_reason_and_global_todos(self) -> GrowthSceneResult:
         has_single_event_exception = any(
-            len(set(direction.supporting_event_ids)) == 1
+            len({case.event_id for case in direction.cases}) == 1
             for card in self.cards
             for direction in card.detail.directions
         )
@@ -647,7 +670,7 @@ class InspirationDetail(StrictModel):
 class InspirationCard(StrictModel):
     event_ids: list[str] = Field(min_length=1)
     card: CardShell
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0.3, le=1)
     detail: InspirationDetail
 
     @model_validator(mode="after")
@@ -691,6 +714,218 @@ StrictSceneResult: TypeAlias = Annotated[
 ]
 
 SceneResultUnion: TypeAlias = StrictSceneResult
+
+
+_FRONTEND_CARD_SHELL_FIELDS: dict[str, object | None] = {
+    "title": None,
+    "summary": None,
+}
+
+_FRONTEND_TODO_FIELDS: dict[str, object | None] = {
+    "text": None,
+    "owner_type": None,
+    "assignee_text": None,
+    "due_at": None,
+    "due_text": None,
+    "intent_type": None,
+    "source_context": None,
+}
+
+_FRONTEND_MEETING_CARD_FIELDS: dict[str, object | None] = {
+    "card": _FRONTEND_CARD_SHELL_FIELDS,
+    "detail": {
+        "topic": None,
+        "start_ms": None,
+        "end_ms": None,
+        "background": None,
+        "participants": {
+            "display_name": None,
+            "role": None,
+        },
+        "core_conclusions": {"content": None},
+        "decisions": {"content": None, "status": None},
+        "open_questions": {"content": None},
+        "meeting_todos": _FRONTEND_TODO_FIELDS,
+        "discussion_topics": {"content": None},
+    },
+}
+
+_FRONTEND_PARENTING_CARD_FIELDS: dict[str, object | None] = {
+    "card": _FRONTEND_CARD_SHELL_FIELDS,
+    "detail": {
+        "overall_observation": None,
+        "interactions": {
+            "title": None,
+            "start_ms": None,
+            "end_ms": None,
+            "background": None,
+            "child_difficulties": {"content": None, "basis": None},
+            "emotional_signals": {
+                "signal": None,
+                "possible_explanation": None,
+            },
+            "observed_parent_actions": {"content": None, "effect": None},
+            "possible_issues": {"content": None, "reasoning": None},
+            "recommendations": {
+                "title": None,
+                "why_it_helps": None,
+                "steps": None,
+                "suggested_language": None,
+            },
+        },
+    },
+}
+
+_FRONTEND_CONTENT_CARD_FIELDS: dict[str, object | None] = {
+    "card": _FRONTEND_CARD_SHELL_FIELDS,
+    "detail": {
+        "consumed_items": {
+            "content_type": None,
+            "platform": None,
+            "source_title": None,
+            "display_title": None,
+            "title_source": None,
+            "start_ms": None,
+            "end_ms": None,
+            "introduction": None,
+            "key_points": {"content": None},
+            "user_reactions": {"content": None},
+        },
+        "cross_event_insights": {"content": None},
+        "recommendations": {
+            "title": None,
+            "content_type": None,
+            "creator": None,
+            "introduction": None,
+            "recommendation_reason": None,
+            "search_query": None,
+        },
+    },
+}
+
+_FRONTEND_GROWTH_CARD_FIELDS: dict[str, object | None] = {
+    "card": _FRONTEND_CARD_SHELL_FIELDS,
+    "detail": {
+        "overall_assessment": None,
+        "directions": {
+            "title": None,
+            "importance": None,
+            "pattern_summary": None,
+            "cases": {
+                "title": None,
+                "scene": None,
+                "observed_behavior": None,
+                "counterparty_response": None,
+                "problem": None,
+                "reasoning": None,
+            },
+            "recommendation": {
+                "goal": None,
+                "method": None,
+                "steps": None,
+                "suggested_language": None,
+                "practice_task": None,
+                "success_signal": None,
+            },
+            "resources": {
+                "title": None,
+                "creator": None,
+                "resource_type": None,
+                "reason": None,
+                "search_query": None,
+            },
+        },
+        "strengths_to_keep": {"content": None},
+    },
+}
+
+_FRONTEND_INSPIRATION_CARD_FIELDS: dict[str, object | None] = {
+    "card": _FRONTEND_CARD_SHELL_FIELDS,
+    "detail": {
+        "overall_value": None,
+        "ideas": {
+            "title": None,
+            "start_ms": None,
+            "end_ms": None,
+            "background": None,
+            "conversation_summary": None,
+            "core_idea": None,
+            "why_valuable": None,
+            "novelty_basis": None,
+            "next_steps": {"direction": None, "action": None},
+        },
+        "connections": {"content": None},
+    },
+}
+
+_FRONTEND_SCENE_ALLOWLISTS: dict[str, dict[str, object | None]] = {
+    "todo": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": {},
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+    "meeting": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": _FRONTEND_MEETING_CARD_FIELDS,
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+    "parenting": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": _FRONTEND_PARENTING_CARD_FIELDS,
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+    "content": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": _FRONTEND_CONTENT_CARD_FIELDS,
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+    "growth": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": _FRONTEND_GROWTH_CARD_FIELDS,
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+    "inspiration": {
+        "scene_id": None,
+        "should_generate": None,
+        "cards": _FRONTEND_INSPIRATION_CARD_FIELDS,
+        "todos": _FRONTEND_TODO_FIELDS,
+    },
+}
+
+
+def _apply_frontend_allowlist(
+    value: object,
+    allowed_fields: dict[str, object | None],
+) -> object:
+    if isinstance(value, list):
+        return [
+            _apply_frontend_allowlist(item, allowed_fields)
+            if isinstance(item, (dict, list))
+            else item
+            for item in value
+        ]
+    if not isinstance(value, dict):
+        return value
+    cleaned: dict[str, object] = {}
+    for field_name, nested_allowlist in allowed_fields.items():
+        if field_name not in value:
+            continue
+        field_value = value[field_name]
+        if nested_allowlist is None:
+            cleaned[field_name] = field_value
+            continue
+        if not isinstance(nested_allowlist, dict):
+            raise TypeError("frontend allowlist nodes must be dictionaries")
+        cleaned[field_name] = _apply_frontend_allowlist(
+            field_value,
+            nested_allowlist,
+        )
+    return cleaned
 
 
 # Compatibility models for the phase-zero runner. Task 5 switches the runner to

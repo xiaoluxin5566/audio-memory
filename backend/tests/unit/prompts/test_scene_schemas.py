@@ -11,6 +11,7 @@ from audio_memory.prompts.schemas import (
     ContentEvidence,
     ContentRecommendation,
     ContentSceneResult,
+    EvidenceStatement,
     GrowthCard,
     GrowthCase,
     GrowthDetail,
@@ -18,6 +19,7 @@ from audio_memory.prompts.schemas import (
     GrowthRecommendation,
     GrowthSceneResult,
     InterestSignal,
+    LearningResource,
     InspirationCard,
     InspirationDetail,
     InspirationIdea,
@@ -25,6 +27,7 @@ from audio_memory.prompts.schemas import (
     InspirationSceneResult,
     MeetingCard,
     MeetingDetail,
+    MeetingParticipant,
     MeetingSceneResult,
     ParentingCard,
     ParentingDetail,
@@ -351,7 +354,18 @@ def test_content_frontend_dump_removes_inferred_title_hint_only_at_boundary() ->
                 detail=ContentDetail(
                     consumed_items=[consumed_item("event_010")],
                     cross_event_insights=[],
-                    recommendations=[],
+                    recommendations=[
+                        ContentRecommendation(
+                            title=None,
+                            content_type="podcast",
+                            creator=None,
+                            introduction="通过主题搜索找可靠来源。",
+                            recommendation_reason="与 event_010 直接相关。",
+                            related_event_ids=["event_010"],
+                            existence_confidence=0.50,
+                            search_query="端侧 AI 产品体验 播客",
+                        )
+                    ],
                     internal_interest_signals=[],
                 ),
             )
@@ -401,8 +415,39 @@ def test_uncertain_work_recommendation_degrades_to_search_query() -> None:
             search_query="端侧 AI 产品体验 播客",
         )
 
+
+def test_low_confidence_recommendation_rejects_specific_title_without_creator() -> None:
+    with pytest.raises(ValidationError):
+        ContentRecommendation(
+            title="深夜端侧 AI 播客",
+            content_type="podcast",
+            creator=None,
+            introduction="一档可能存在的具体播客。",
+            recommendation_reason="与 event_010 的主题相关。",
+            related_event_ids=["event_010"],
+            existence_confidence=0.10,
+            search_query="端侧 AI 产品体验 播客",
+        )
+
+
+def test_specific_work_recommendation_starts_at_point_nine() -> None:
+    recommendation = ContentRecommendation(
+        title="The Talk Show",
+        content_type="podcast",
+        creator="John Gruber",
+        introduction="一档已确认存在的具体播客。",
+        recommendation_reason="与 event_010 的主题直接相关。",
+        related_event_ids=["event_010"],
+        existence_confidence=0.90,
+        search_query="The Talk Show John Gruber",
+    )
+
+    assert recommendation.title == "The Talk Show"
+
+
+def test_search_only_recommendation_has_no_specific_title_or_creator() -> None:
     search_only = ContentRecommendation(
-        title="搜索端侧 AI 产品体验",
+        title=None,
         content_type="podcast",
         creator=None,
         introduction="通过主题搜索寻找可靠来源。",
@@ -411,7 +456,46 @@ def test_uncertain_work_recommendation_degrades_to_search_query() -> None:
         existence_confidence=0.89,
         search_query="端侧 AI 产品体验 播客",
     )
+    assert search_only.title is None
     assert search_only.search_query == "端侧 AI 产品体验 播客"
+
+
+def test_low_confidence_learning_resource_rejects_specific_title() -> None:
+    with pytest.raises(ValidationError):
+        LearningResource(
+            title="刻意练习",
+            creator=None,
+            resource_type="book",
+            reason="与沟通复盘相关。",
+            existence_confidence=0.89,
+            search_query="沟通复盘 刻意练习 书",
+        )
+
+
+def test_search_only_learning_resource_has_no_specific_title_or_creator() -> None:
+    resource = LearningResource(
+        title=None,
+        creator=None,
+        resource_type="book",
+        reason="通过通用主题搜索找可靠资源。",
+        existence_confidence=0.89,
+        search_query="沟通复盘 反馈技巧 书",
+    )
+
+    assert resource.title is None
+
+
+def test_specific_learning_resource_starts_at_point_nine() -> None:
+    resource = LearningResource(
+        title="Crucial Conversations",
+        creator="Joseph Grenny",
+        resource_type="book",
+        reason="该作品已确认存在且与沟通复盘相关。",
+        existence_confidence=0.90,
+        search_query="Crucial Conversations Joseph Grenny",
+    )
+
+    assert resource.title == "Crucial Conversations"
 
 
 def test_content_aggregates_multiple_events_once_and_keeps_items_separate() -> None:
@@ -547,6 +631,51 @@ def test_growth_recommendation_must_reference_case_in_same_direction() -> None:
         GrowthDirection.model_validate(payload)
 
 
+def test_growth_supporting_events_must_all_have_a_case() -> None:
+    payload = growth_direction().model_dump(mode="json")
+    payload["supporting_event_ids"] = ["event_006", "event_007"]
+
+    with pytest.raises(ValidationError, match="case events|supporting events"):
+        GrowthDirection.model_validate(payload)
+
+
+def test_duplicate_growth_case_event_cannot_bypass_single_event_threshold() -> None:
+    payload = growth_direction().model_dump(mode="json")
+    first_case = payload["cases"][0]
+    first_case["confidence"] = 0.79
+    second_case = {**first_case, "case_id": "case_growth_communication_event_006_02"}
+    payload["cases"] = [first_case, second_case]
+    payload["supporting_event_ids"] = ["event_006", "event_007"]
+    payload["recommendation"]["basis_case_ids"] = [
+        first_case["case_id"],
+        second_case["case_id"],
+    ]
+
+    with pytest.raises(ValidationError):
+        GrowthDirection.model_validate(payload)
+
+
+def test_multi_event_growth_requires_a_valid_case_for_each_event() -> None:
+    payload = growth_direction().model_dump(mode="json")
+    payload["cases"][0]["confidence"] = 0.50
+    second_case = {
+        **payload["cases"][0],
+        "case_id": "case_growth_communication_event_007_02",
+        "event_id": "event_007",
+        "evidence_segment_ids": ["seg_007"],
+    }
+    payload["cases"].append(second_case)
+    payload["supporting_event_ids"] = ["event_006", "event_007"]
+    payload["recommendation"]["basis_case_ids"] = [
+        "case_growth_communication_event_006_01",
+        "case_growth_communication_event_007_02",
+    ]
+
+    result = GrowthDirection.model_validate(payload)
+
+    assert {case.event_id for case in result.cases} == {"event_006", "event_007"}
+
+
 def test_growth_scene_has_at_most_one_aggregate_card() -> None:
     card = growth_card()
     with pytest.raises(ValidationError):
@@ -655,6 +784,304 @@ def test_inspiration_rejects_uninformative_card_title() -> None:
     payload["card"]["title"] = "今日灵感"
     with pytest.raises(ValidationError):
         InspirationCard.model_validate(payload)
+
+
+def frontend_todo_result() -> TodoSceneResult:
+    return TodoSceneResult(
+        scene_id="todo",
+        should_generate=True,
+        generation_reason="event_001 中用户明确承诺，seg_001 提供直接证据。",
+        cards=[],
+        todos=[todo()],
+        confidence=0.93,
+    )
+
+
+def frontend_meeting_result() -> MeetingSceneResult:
+    card = meeting_card("event_001")
+    detail = card.detail.model_copy(
+        update={
+            "participants": [
+                MeetingParticipant(
+                    speaker_id="speaker_A",
+                    display_name="用户",
+                    role="汇报人",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            "core_conclusions": [
+                EvidenceStatement(
+                    content="第一期只支持上传已有音频。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            "meeting_todos": [todo()],
+        }
+    )
+    return MeetingSceneResult(
+        scene_id="meeting",
+        should_generate=True,
+        generation_reason="event_001 形成明确结论。",
+        cards=[card.model_copy(update={"detail": detail})],
+        todos=[],
+        confidence=0.92,
+    )
+
+
+def frontend_parenting_result() -> ParentingSceneResult:
+    return ParentingSceneResult(
+        scene_id="parenting",
+        should_generate=True,
+        generation_reason="event_003 中存在可复盘互动。",
+        cards=[parenting_card("event_003")],
+        todos=[],
+        confidence=0.84,
+    )
+
+
+def frontend_content_result() -> ContentSceneResult:
+    return ContentSceneResult(
+        scene_id="content",
+        should_generate=True,
+        generation_reason="event_010 中有可回顾内容和可靠兴趣信号。",
+        cards=[
+            ContentCard(
+                event_ids=["event_010"],
+                card=CardShell(title="端侧体验视频", summary="记录可靠内容事实。"),
+                confidence=0.8,
+                detail=ContentDetail(
+                    consumed_items=[consumed_item("event_010")],
+                    cross_event_insights=[],
+                    recommendations=[
+                        ContentRecommendation(
+                            title=None,
+                            content_type="podcast",
+                            creator=None,
+                            introduction="通过主题搜索找可靠来源。",
+                            recommendation_reason="与 event_010 直接相关。",
+                            related_event_ids=["event_010"],
+                            existence_confidence=0.50,
+                            search_query="端侧 AI 产品体验 播客",
+                        )
+                    ],
+                    internal_interest_signals=[
+                        InterestSignal(
+                            dimension="product_interest",
+                            value="端侧 AI 产品体验",
+                            evidence_mode="explicit_single_event",
+                            supporting_event_ids=["event_010"],
+                            confidence=0.8,
+                        )
+                    ],
+                ),
+            )
+        ],
+        todos=[],
+        confidence=0.8,
+    )
+
+
+def frontend_growth_result() -> GrowthSceneResult:
+    card = growth_card()
+    direction = card.detail.directions[0].model_copy(
+        update={
+            "resources": [
+                LearningResource(
+                    title=None,
+                    creator=None,
+                    resource_type="book",
+                    reason="通过主题搜索找可靠资源。",
+                    existence_confidence=0.50,
+                    search_query="沟通复盘 反馈技巧 书",
+                )
+            ]
+        }
+    )
+    detail = card.detail.model_copy(update={"directions": [direction]})
+    return GrowthSceneResult(
+        scene_id="growth",
+        should_generate=True,
+        generation_reason="单事件例外：event_006 是高影响评审并出现明确返工。",
+        cards=[card.model_copy(update={"detail": detail})],
+        todos=[],
+        confidence=0.84,
+    )
+
+
+def frontend_inspiration_result() -> InspirationSceneResult:
+    return InspirationSceneResult(
+        scene_id="inspiration",
+        should_generate=True,
+        generation_reason="event_020 中形成可验证的新判断。",
+        cards=[
+            InspirationCard(
+                event_ids=["event_020"],
+                card=CardShell(
+                    title="入口应贴近已有习惯",
+                    summary="可以继续验证入口假设。",
+                ),
+                confidence=0.82,
+                detail=InspirationDetail(
+                    overall_value="形成可验证的新连接。",
+                    ideas=[inspiration_idea("event_020")],
+                    connections=[],
+                ),
+            )
+        ],
+        todos=[],
+        confidence=0.82,
+    )
+
+
+@pytest.mark.parametrize(
+    "result_factory",
+    [
+        frontend_todo_result,
+        frontend_meeting_result,
+        frontend_parenting_result,
+        frontend_content_result,
+        frontend_growth_result,
+        frontend_inspiration_result,
+    ],
+)
+def test_generated_scene_confidence_starts_at_point_three(result_factory: type) -> None:
+    payload = result_factory().model_dump(mode="json")
+    payload["confidence"] = 0.29
+    with pytest.raises(ValidationError):
+        type(result_factory()).model_validate(payload)
+
+    payload["confidence"] = 0.30
+    assert type(result_factory()).model_validate(payload).confidence == 0.30
+
+
+@pytest.mark.parametrize(
+    "result_factory",
+    [
+        frontend_meeting_result,
+        frontend_parenting_result,
+        frontend_content_result,
+        frontend_growth_result,
+        frontend_inspiration_result,
+    ],
+)
+def test_visible_card_confidence_starts_at_point_three(result_factory: type) -> None:
+    payload = result_factory().model_dump(mode="json")
+    payload["cards"][0]["confidence"] = 0.29
+    with pytest.raises(ValidationError):
+        type(result_factory()).model_validate(payload)
+
+    payload["cards"][0]["confidence"] = 0.30
+    assert type(result_factory()).model_validate(payload).cards[0].confidence == 0.30
+
+
+def test_user_responsibility_confidence_starts_at_point_five() -> None:
+    payload = todo().model_dump(mode="json")
+    payload["confidence"] = 0.49
+    with pytest.raises(ValidationError):
+        StrictTodoDraft.model_validate(payload)
+
+    payload["confidence"] = 0.50
+    assert StrictTodoDraft.model_validate(payload).confidence == 0.50
+
+
+def test_profile_signal_confidence_starts_at_point_five() -> None:
+    payload = {
+        "dimension": "product_interest",
+        "value": "端侧 AI 产品体验",
+        "evidence_mode": "explicit_single_event",
+        "supporting_event_ids": ["event_010"],
+        "confidence": 0.49,
+    }
+    with pytest.raises(ValidationError):
+        InterestSignal.model_validate(payload)
+
+    payload["confidence"] = 0.50
+    assert InterestSignal.model_validate(payload).confidence == 0.50
+
+
+def test_multi_event_personal_evaluation_confidence_starts_at_point_five() -> None:
+    payload = growth_direction().cases[0].model_dump(mode="json")
+    payload["confidence"] = 0.49
+    with pytest.raises(ValidationError):
+        GrowthCase.model_validate(payload)
+
+    payload["confidence"] = 0.50
+    assert GrowthCase.model_validate(payload).confidence == 0.50
+
+
+def nested_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {
+            nested_key
+            for child in value.values()
+            for nested_key in nested_keys(child)
+        }
+    if isinstance(value, list):
+        return {
+            nested_key
+            for child in value
+            for nested_key in nested_keys(child)
+        }
+    return set()
+
+
+def test_frontend_dump_keeps_nested_visible_collections() -> None:
+    meeting_payload = frontend_meeting_result().model_dump_for_frontend()
+    content_payload = frontend_content_result().model_dump_for_frontend()
+    growth_payload = frontend_growth_result().model_dump_for_frontend()
+
+    assert "发送Q3预算表" in str(meeting_payload["cards"][0]["detail"]["meeting_todos"])
+    assert "端侧 AI 产品体验 播客" in str(
+        content_payload["cards"][0]["detail"]["recommendations"]
+    )
+    assert "沟通复盘 反馈技巧 书" in str(
+        growth_payload["cards"][0]["detail"]["directions"][0]["resources"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "result_factory", "visible_value"),
+    [
+        ("todo", frontend_todo_result, "发送Q3预算表"),
+        ("meeting", frontend_meeting_result, "一期产品范围"),
+        ("parenting", frontend_parenting_result, "连续催促后孩子的抗拒加重"),
+        ("content", frontend_content_result, "一段关于端侧 AI 产品体验的视频"),
+        ("growth", frontend_growth_result, "用户直接展开方案细节"),
+        ("inspiration", frontend_inspiration_result, "音频回忆入口应嵌入"),
+    ],
+)
+def test_frontend_dump_uses_six_scene_recursive_allowlists(
+    scene_id: str,
+    result_factory: type,
+    visible_value: str,
+) -> None:
+    payload = result_factory().model_dump_for_frontend()
+
+    assert set(payload) == {"scene_id", "should_generate", "cards", "todos"}
+    assert payload["scene_id"] == scene_id
+    assert visible_value in str(payload)
+    assert nested_keys(payload).isdisjoint(
+        {
+            "generation_reason",
+            "internal_interest_signals",
+            "inferred_title_hint",
+            "confidence",
+            "event_id",
+            "event_ids",
+            "source_event_id",
+            "evidence_segment_ids",
+            "finding_id",
+            "case_id",
+            "direction_id",
+            "basis_finding_ids",
+            "basis_case_ids",
+            "supporting_event_ids",
+            "related_event_ids",
+            "speaker_id",
+            "profile_basis",
+            "existence_confidence",
+        }
+    )
 
 
 @pytest.mark.parametrize(
