@@ -26,6 +26,35 @@ def upgrade() -> None:
         "analysis_versions",
         sa.Column("published_todo_count", sa.Integer(), nullable=True),
     )
+    op.execute(
+        sa.text(
+            """
+            UPDATE analysis_versions
+            SET published_card_count = (
+                    SELECT count(*)
+                    FROM cards
+                    WHERE cards.analysis_version_id = analysis_versions.id
+                ),
+                published_todo_count = CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM todo_candidates
+                        WHERE todo_candidates.analysis_version_id = analysis_versions.id
+                    ) THEN (
+                        SELECT count(*)
+                        FROM todo_candidates
+                        WHERE todo_candidates.analysis_version_id = analysis_versions.id
+                    )
+                    ELSE (
+                        SELECT count(*)
+                        FROM todos
+                        WHERE todos.analysis_version_id = analysis_versions.id
+                    )
+                END
+            WHERE status = 'completed'
+            """
+        )
+    )
 
 
 def downgrade() -> None:

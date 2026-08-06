@@ -139,8 +139,9 @@ commit gate below supersedes these pre-report results if counts differ.
   provenance, normalized todo fields, profile candidates, and current-version
   pointers. Formal review fix round 1 adds migration 0006 for immutable
   `published_card_count` and `published_todo_count` fields on each analysis
-  version; migrated legacy completed versions retain nulls and use the
-  compatibility query path.
+  version. Formal review fix round 2 backfills every existing completed
+  version during upgrade, so completed rows never depend on a mutable live-row
+  compatibility query.
 - `AnalysisPublisher` remains an import alias to `VersionPublisher` so Task 5
   wiring and existing callers use the new strict implementation without a
   parallel legacy path.
@@ -219,8 +220,8 @@ commit gate below supersedes these pre-report results if counts differ.
   passed `3 passed in 0.42s`.
 - GREEN design: publication records card/todo counts on `AnalysisVersion` in
   the same transaction as cards, todos, the current pointer, and terminal
-  status. Completed retries read those immutable values. Migration 0006 leaves
-  legacy rows nullable and the publisher retains query fallbacks for them.
+  status. Completed retries read those immutable values. The round-2 migration
+  backfill and integrity guard below supersede the original nullable fallback.
 - Broader affected-surface check:
   `tests/unit/analysis/test_todo_reconciliation.py`,
   `tests/integration/test_atomic_batch_commit.py`, and
@@ -235,6 +236,52 @@ commit gate below supersedes these pre-report results if counts differ.
 - Full backend command:
   `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
   returned `360 passed in 7.21s`.
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
+  exited 0 with no output.
+- `git diff --check` exited 0 with no output.
+- `docs/HANDOFF-2026-08-06.md` remains untouched and excluded from this fix.
+
+## Formal review fix round 2
+
+### Migration-time publication outcome freeze
+
+- Root cause: migration 0006 created nullable count columns without populating
+  existing completed versions. `_completed_outcome` then fell back to counting
+  live `Card.analysis_version_id` and `Todo.analysis_version_id` rows. Those
+  associations can be deleted or transferred to a later version, so a
+  pre-0006 completed outcome was still mutable after migration.
+- RED migration fixture: upgrading a real 0005 completed version left
+  `(published_card_count, published_todo_count) == (None, None)` instead of
+  `(1, 1)`.
+- RED end-to-end command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/integration/test_analysis_version_migration.py::test_migrated_completed_outcome_stays_fixed_after_later_publication -q`
+  failed with the old outcome changing to `card_count == 0` and
+  `todo_count == 0` after a later publication transferred its todo and its old
+  card was deleted.
+- GREEN: migration 0006 now freezes counts for every existing completed
+  version. Cards are counted from immutable version-linked card rows at the
+  migration snapshot. Todo candidates are preferred as durable version
+  provenance; migrated versions without candidates use their migration-time
+  linked todo rows. Exact pre-version todo history is unrecoverable, so this is
+  the deterministic best-available snapshot.
+- GREEN: completed publication reads require both frozen fields and raise a
+  data-integrity error if either is absent; there is no mutable live-row
+  fallback. New publications continue to record both counts atomically.
+- GREEN command: the backfill/downgrade test and the end-to-end mutation test
+  passed `2 passed in 0.42s`; the complete migration suite passed
+  `8 passed in 0.65s`.
+- Downgrade verification removes only the two 0006 columns and preserves the
+  completed version's job/batch/provider/model/status plus its unrelated card
+  and todo rows and version associations.
+
+### Formal fix round 2 final verification
+
+- Focused Task 6 command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/unit/analysis/test_todo_reconciliation.py tests/unit/analysis/test_profile_rebuild.py tests/integration/test_atomic_batch_commit.py tests/integration/test_content_api.py tests/integration/test_feedback_and_clear.py tests/integration/test_analysis_version_migration.py -q`
+  returned `51 passed in 1.92s`.
+- Full backend command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  returned `361 passed in 6.18s`.
 - `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
   exited 0 with no output.
 - `git diff --check` exited 0 with no output.

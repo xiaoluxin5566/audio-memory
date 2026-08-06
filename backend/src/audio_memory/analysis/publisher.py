@@ -207,30 +207,17 @@ class VersionPublisher:
     async def _completed_outcome(
         self, session, version: AnalysisVersion, batch_id: str
     ) -> AnalysisOutcome:
-        card_count = version.published_card_count
-        if card_count is None:
-            card_count = int(
-                await session.scalar(
-                    select(func.count(Card.id)).where(
-                        Card.analysis_version_id == version.id
-                    )
-                )
-                or 0
-            )
-        todo_count = version.published_todo_count
-        if todo_count is None:
-            todo_count = int(
-                await session.scalar(
-                    select(func.count(Todo.id)).where(
-                        Todo.analysis_version_id == version.id
-                    )
-                )
-                or 0
+        if (
+            version.published_card_count is None
+            or version.published_todo_count is None
+        ):
+            raise RuntimeError(
+                "Completed analysis version is missing its published outcome"
             )
         return AnalysisOutcome(
             batch_id,
-            card_count,
-            todo_count,
+            version.published_card_count,
+            version.published_todo_count,
         )
 
     def _move_first_publication_audio(

@@ -1,9 +1,17 @@
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import select
+
+from audio_memory.analysis.publisher import VersionPublisher
+from audio_memory.db import Database
+from audio_memory.models import AnalysisVersion, Card, Todo
+from audio_memory.prompts.schemas import StrictTodoDraft
+from audio_memory.prompts.store import PROMPT_SCENES
 
 
 def migration_config(database_path: Path) -> Config:
@@ -71,6 +79,109 @@ def seed_version_0002_database(database_path: Path) -> Config:
         )
         connection.commit()
     return config
+
+
+def seed_version_0005_completed_database(database_path: Path) -> Config:
+    config = migration_config(database_path)
+    command.upgrade(config, "0005")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO analysis_jobs "
+            "(id, stage, provider_id, model_id, prompt_snapshot_json, "
+            "staged_results_json, created_at, updated_at) VALUES "
+            "('job-pre-0006', 'completed', 'kimi', 'model-old', '{}', '{}', "
+            "'2026-08-01T08:00:00+00:00', '2026-08-01T08:10:00+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO batches "
+            "(id, job_id, provider_id, model_id, uploaded_at, natural_date) VALUES "
+            "('batch-pre-0006', 'job-pre-0006', 'kimi', 'model-old', "
+            "'2026-08-01T08:10:00+00:00', '2026-08-01')"
+        )
+        connection.execute(
+            "INSERT INTO analysis_versions "
+            "(id, source_job_id, batch_id, provider_id, model_id, "
+            "credential_generation, prompt_snapshot_json, profile_snapshot_json, "
+            "fixed_rules_hash, staged_results_json, priority, status, created_at, "
+            "completed_at) VALUES "
+            "('version-pre-0006', 'job-pre-0006', 'batch-pre-0006', 'kimi', "
+            "'model-old', 1, '{}', '[]', 'rules', '{}', 10, 'completed', "
+            "'2026-08-01T08:00:00+00:00', '2026-08-01T08:10:00+00:00')"
+        )
+        connection.execute(
+            "UPDATE batches SET current_analysis_version_id='version-pre-0006' "
+            "WHERE id='batch-pre-0006'"
+        )
+        connection.execute(
+            "INSERT INTO cards "
+            "(id, batch_id, analysis_version_id, scene_id, position, payload_json) "
+            "VALUES ('card-pre-0006', 'batch-pre-0006', 'version-pre-0006', "
+            "'meeting', 0, '{}')"
+        )
+        connection.execute(
+            "INSERT INTO todo_candidates "
+            "(id, analysis_version_id, source_job_id, source_event_id, "
+            "evidence_segment_ids_json, normalized_action, normalized_object, "
+            "normalized_assignee, text, due_at, source_fingerprint) VALUES "
+            "('candidate-pre-0006', 'version-pre-0006', 'job-pre-0006', "
+            "'event_planning', '[\"seg-1\"]', 'send notes', 'meeting notes', "
+            "'user', 'send notes', '2026-08-10T09:00:00+08:00', "
+            "'candidate-fingerprint')"
+        )
+        connection.execute(
+            "INSERT INTO todos "
+            "(id, batch_id, analysis_version_id, source_job_id, source_event_id, "
+            "evidence_segment_ids_json, normalized_action, normalized_object, "
+            "normalized_assignee, source_fingerprint, user_edited, completion_source, "
+            "text, due_at, completed, created_at) VALUES "
+            "('todo-pre-0006', 'batch-pre-0006', 'version-pre-0006', "
+            "'job-pre-0006', 'event_planning', '[\"seg-1\"]', 'send notes', "
+            "'meeting notes', 'user', 'todo-fingerprint', 0, 'model', "
+            "'send notes', '2026-08-10T09:00:00+08:00', 0, "
+            "'2026-08-01T08:10:00+00:00')"
+        )
+        connection.commit()
+    return config
+
+
+@dataclass(frozen=True)
+class PublicationResult:
+    scene_id: str
+    should_generate: bool = False
+    todos: tuple = ()
+
+    def model_dump_for_frontend(self) -> dict[str, object]:
+        return {
+            "scene_id": self.scene_id,
+            "should_generate": self.should_generate,
+            "cards": [],
+            "todos": [],
+        }
+
+
+def complete_results_with_todo() -> list[PublicationResult]:
+    draft = StrictTodoDraft(
+        text="updated notes",
+        action="send notes",
+        object="meeting notes",
+        owner_type="user",
+        assignee_text="user",
+        due_at="2026-08-10T09:00:00+08:00",
+        due_text="Monday",
+        intent_type="commitment",
+        source_event_id="event_planning",
+        source_context="explicit commitment",
+        evidence_segment_ids=["seg-2"],
+        confidence=0.9,
+    )
+    return [
+        PublicationResult(
+            scene_id,
+            todos=(draft,) if scene_id == "todo" else (),
+        )
+        for scene_id in PROMPT_SCENES
+    ]
 
 
 def test_0003_backfills_one_current_version_without_copying_source_data(
@@ -217,7 +328,7 @@ def test_0006_adds_immutable_publication_counts_and_downgrades(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "published-outcome.sqlite3"
-    config = seed_version_0002_database(database_path)
+    config = seed_version_0005_completed_database(database_path)
 
     command.upgrade(config, "head")
 
@@ -231,8 +342,8 @@ def test_0006_adds_immutable_publication_counts_and_downgrades(
         } <= version_columns.keys()
         assert connection.execute(
             "SELECT published_card_count, published_todo_count "
-            "FROM analysis_versions ORDER BY id"
-        ).fetchall() == [(None, None)]
+            "FROM analysis_versions WHERE id='version-pre-0006'"
+        ).fetchone() == (1, 1)
 
     command.downgrade(config, "0005")
 
@@ -242,6 +353,74 @@ def test_0006_adds_immutable_publication_counts_and_downgrades(
         }
         assert "published_card_count" not in version_columns
         assert "published_todo_count" not in version_columns
+        assert connection.execute(
+            "SELECT source_job_id, batch_id, provider_id, model_id, status "
+            "FROM analysis_versions WHERE id='version-pre-0006'"
+        ).fetchone() == (
+            "job-pre-0006",
+            "batch-pre-0006",
+            "kimi",
+            "model-old",
+            "completed",
+        )
+        assert connection.execute(
+            "SELECT id, analysis_version_id FROM cards"
+        ).fetchall() == [("card-pre-0006", "version-pre-0006")]
+        assert connection.execute(
+            "SELECT id, text, analysis_version_id FROM todos"
+        ).fetchall() == [
+            ("todo-pre-0006", "send notes", "version-pre-0006")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_migrated_completed_outcome_stays_fixed_after_later_publication(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "frozen-published-outcome.sqlite3"
+    config = seed_version_0005_completed_database(database_path)
+    command.upgrade(config, "head")
+    database = Database(database_path)
+    publisher = VersionPublisher(database)
+
+    async with database.session() as session:
+        session.add(
+            AnalysisVersion(
+                id="version-post-0006",
+                source_job_id="job-pre-0006",
+                batch_id="batch-pre-0006",
+                provider_id="kimi",
+                model_id="model-new",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json="{}",
+                status="running",
+            )
+        )
+        await session.commit()
+
+    await publisher.publish(
+        "version-post-0006", complete_results_with_todo(), []
+    )
+    async with database.session() as session:
+        old_card = await session.get(Card, "card-pre-0006")
+        assert old_card is not None
+        await session.delete(old_card)
+        await session.commit()
+
+    old_outcome = await publisher.publish(
+        "version-pre-0006", complete_results_with_todo(), []
+    )
+
+    async with database.session() as session:
+        todo = await session.scalar(select(Todo))
+    assert todo is not None
+    assert todo.analysis_version_id == "version-post-0006"
+    assert old_outcome.card_count == 1
+    assert old_outcome.todo_count == 1
+    await database.dispose()
 
 
 def test_0003_downgrade_restores_0002_data_and_schema(tmp_path: Path) -> None:
