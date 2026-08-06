@@ -15,9 +15,18 @@ from audio_memory.providers.types import PROVIDER_CONFIGS
 
 
 class ProviderAnalysisError(RuntimeError):
-    def __init__(self, message: str, *, retriable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retriable: bool = False,
+        code: str = "model_analysis_failed",
+        pause_batch: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retriable = retriable
+        self.code = code
+        self.pause_batch = pause_batch
 
 
 class ProviderAnalysisClient:
@@ -61,7 +70,11 @@ class ProviderAnalysisClient:
     ) -> str:
         read = self.keychain.read(provider_id)
         if read.status is not KeychainStatus.CONFIGURED or read.secret is None:
-            raise ProviderAnalysisError("Provider credential is unavailable")
+            raise ProviderAnalysisError(
+                "Provider credential is unavailable",
+                code="keychain_unavailable",
+                pause_batch=True,
+            )
         last_error: ProviderAnalysisError | None = None
         for attempt in range(3):
             try:
@@ -115,21 +128,46 @@ class ProviderAnalysisClient:
             )
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise ProviderAnalysisError(
-                "Provider network request failed", retriable=True
+                "Provider network request failed",
+                retriable=True,
+                code="network_timeout",
             ) from exc
-        if response.status_code in {401, 402, 403}:
-            raise ProviderAnalysisError("Provider credential or account is unavailable")
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code == 402:
             raise ProviderAnalysisError(
-                "Provider is temporarily unavailable", retriable=True
+                "Provider account balance is unavailable",
+                code="insufficient_balance",
+                pause_batch=True,
+            )
+        if response.status_code in {401, 403}:
+            raise ProviderAnalysisError(
+                "Provider credential or account is unavailable",
+                code="authentication_failed",
+                pause_batch=True,
+            )
+        if response.status_code == 429:
+            raise ProviderAnalysisError(
+                "Provider is temporarily unavailable",
+                retriable=True,
+                code="rate_limited",
+                pause_batch=True,
+            )
+        if response.status_code >= 500:
+            raise ProviderAnalysisError(
+                "Provider is temporarily unavailable",
+                retriable=True,
+                code="provider_unavailable",
             )
         if response.is_error:
-            raise ProviderAnalysisError("Provider rejected the analysis request")
+            raise ProviderAnalysisError(
+                "Provider rejected the analysis request", code="content_rejected"
+            )
         try:
             body = response.json()
             return self.adapters[provider_id].extract_text(body)
         except (ValueError, TypeError) as exc:
-            raise ProviderAnalysisError("Provider returned an invalid response") from exc
+            raise ProviderAnalysisError(
+                "Provider returned an invalid response", code="model_response_invalid"
+            ) from exc
 
 
 class RemoteSceneAnalyzer:

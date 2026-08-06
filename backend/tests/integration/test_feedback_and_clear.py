@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
 
-from audio_memory.content.clear import HistoryCleaner
+from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
+from audio_memory.content.clear import HistoryBusyError, HistoryCleaner
 from audio_memory.content.feedback import FeedbackWriter
 from audio_memory.db import Database
 from audio_memory.models import (
@@ -111,7 +113,7 @@ async def test_clear_history_preserves_provider_prompts_and_feedback(tmp_path: P
                 profile_snapshot_json="[]",
                 fixed_rules_hash="rules",
                 staged_results_json="{}",
-                status="pending",
+                status="failed",
             )
         )
         session.add(
@@ -180,4 +182,74 @@ async def test_clear_history_preserves_provider_prompts_and_feedback(tmp_path: P
         assert int(await session.scalar(select(func.count(Todo.id))) or 0) == 0
         assert int(await session.scalar(select(func.count(TodoTombstone.source_fingerprint))) or 0) == 0
         assert int(await session.scalar(select(func.count(ReanalysisBatch.id))) or 0) == 0
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "running"])
+async def test_clear_history_rejects_ordinary_analysis_work(
+    tmp_path: Path, status: str
+) -> None:
+    database = Database(tmp_path / f"ordinary-{status}.sqlite3")
+    await database.create_schema()
+    audio = tmp_path / f"audio-{status}"
+    async with database.session() as session:
+        session.add(AnalysisJob(id="ordinary-job", stage="analyzing"))
+        session.add(
+            AnalysisVersion(
+                id="ordinary-version",
+                source_job_id="ordinary-job",
+                provider_id="kimi",
+                model_id="model",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json="{}",
+                status=status,
+            )
+        )
+        await session.commit()
+
+    cleaner = HistoryCleaner(
+        database,
+        audio,
+        task_coordinator=AnalysisTaskCoordinator(database),
+    )
+    with pytest.raises(HistoryBusyError, match="analysis work"):
+        await cleaner.clear(confirm=True)
+
+    async with database.session() as session:
+        assert await session.get(AnalysisJob, "ordinary-job") is not None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_clear_history_racing_profile_retry_is_rejected(tmp_path: Path) -> None:
+    database = Database(tmp_path / "profile-race.sqlite3")
+    await database.create_schema()
+    coordinator = AnalysisTaskCoordinator(database)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def profile_retry() -> None:
+        async with coordinator.profile_retry_guard():
+            entered.set()
+            await release.wait()
+
+    retry_task = asyncio.create_task(profile_retry())
+    await entered.wait()
+    cleaner = HistoryCleaner(
+        database,
+        tmp_path / "profile-audio",
+        task_coordinator=coordinator,
+    )
+    clear_task = asyncio.create_task(cleaner.clear(confirm=True))
+    await asyncio.sleep(0)
+    assert not clear_task.done()
+
+    release.set()
+    await retry_task
+    with pytest.raises(HistoryBusyError, match="profile rebuild"):
+        await clear_task
     await database.dispose()

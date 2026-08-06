@@ -197,10 +197,15 @@ class AnalysisRunner:
             raise
         except CredentialChangedError:
             raise
-        except ProviderAnalysisError:
+        except ProviderAnalysisError as exc:
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)
-            await self._mark_failed(version.id, worker_owner_id)
+            await self._mark_failed(
+                version.id,
+                worker_owner_id,
+                error_code=exc.code,
+                pause_history=exc.pause_batch,
+            )
             raise
         except BaseException:
             await self._require_ownership(version.id, worker_owner_id)
@@ -558,7 +563,12 @@ class AnalysisRunner:
         return verified
 
     async def _mark_failed(
-        self, version_id: str, worker_owner_id: str | None
+        self,
+        version_id: str,
+        worker_owner_id: str | None,
+        *,
+        error_code: str = "model_analysis_failed",
+        pause_history: bool = False,
     ) -> None:
         async with self.database.session() as session:
             statement = (
@@ -567,7 +577,10 @@ class AnalysisRunner:
                     AnalysisVersion.id == version_id,
                     AnalysisVersion.status == "running",
                 )
-                .values(status="failed", error_code="model_analysis_failed")
+                .values(
+                    status="provider_paused" if pause_history else "failed",
+                    error_code=error_code,
+                )
             )
             if worker_owner_id is not None:
                 statement = statement.where(
@@ -588,17 +601,17 @@ class AnalysisRunner:
                     )
                 )
                 if item is not None:
-                    item.status = "failed"
-                    item.error_code = "model_analysis_failed"
+                    item.status = "pending" if pause_history else "failed"
+                    item.error_code = error_code
                 history = await session.get(
                     ReanalysisBatch, version.reanalysis_batch_id
                 )
-                if history is not None:
-                    history.status = "paused_error"
+                if history is not None and history.status != "stopping":
+                    history.status = "paused" if pause_history else "running"
             job = await session.get(AnalysisJob, version.source_job_id)
             if job is not None and version.batch_id is None:
                 job.stage = "failed"
-                job.error_code = "model_analysis_failed"
+                job.error_code = error_code
             await session.commit()
 
     @staticmethod

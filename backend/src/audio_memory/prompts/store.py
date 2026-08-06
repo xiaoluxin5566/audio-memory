@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import contextmanager
+from contextlib import ExitStack
 from hashlib import sha256
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -71,6 +73,14 @@ class PromptStore:
 
     def initialize(self) -> list[PromptDocument]:
         return [self._initialize_scene(scene_id) for scene_id in PROMPT_SCENES]
+
+    @contextmanager
+    def freeze(self):
+        """Prevent Prompt mutation while another durable snapshot is committed."""
+        with ExitStack() as stack:
+            for scene_id in PROMPT_SCENES:
+                stack.enter_context(self._locks[scene_id])
+            yield
 
     def get(self, scene_id: str) -> PromptDocument:
         self._validate_scene(scene_id)

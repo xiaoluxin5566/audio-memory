@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from audio_memory.content.clear import HistoryBusyError
+
 
 router = APIRouter(prefix="/api", tags=["content"])
 
@@ -96,6 +98,11 @@ async def submit_feedback(
 async def clear_history(payload: ClearInput, request: Request) -> Response:
     try:
         await request.app.state.history_cleaner.clear(confirm=payload.confirm)
+    except HistoryBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "history_reanalysis_active", "message": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(status_code=204)

@@ -21,6 +21,7 @@ from audio_memory.api.jobs import router as jobs_router
 from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
 from audio_memory.api.content import router as content_router
+from audio_memory.api.reanalysis import router as reanalysis_router
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
@@ -47,6 +48,9 @@ from audio_memory.content.feedback import FeedbackWriter
 from audio_memory.content.clear import HistoryCleaner
 from audio_memory.security.local_session import LocalSessionSecurity
 from audio_memory.security.middleware import LocalWebSecurityMiddleware
+from audio_memory.reanalysis.preview import ReanalysisPreviewBuilder
+from audio_memory.reanalysis.service import ReanalysisService
+from audio_memory.reanalysis.worker import ReanalysisWorker
 
 
 def create_app(
@@ -127,18 +131,39 @@ def create_app(
             analysis_client = ProviderAnalysisClient(
                 keychain_repository, analysis_http_client
             )
+            analysis_publisher = AnalysisPublisher(database, resolved_paths)
             analysis_runner = AnalysisRunner(
                 database=database,
                 provider=RemoteSceneAnalyzer(analysis_client),
                 profile_extractor=RemoteProfileExtractor(analysis_client),
-                publisher=AnalysisPublisher(database, resolved_paths),
+                publisher=analysis_publisher,
                 generation_source=coordinator,
             )
             await coordinator.initialize()
             analysis_tasks = AnalysisTaskCoordinator(database)
+            reanalysis_worker = ReanalysisWorker(
+                database=database,
+                task_coordinator=analysis_tasks,
+                publisher=analysis_publisher,
+                provider_coordinator=coordinator,
+            )
+            await reanalysis_worker.start()
             await analysis_tasks.start(analysis_runner)
             app.state.analysis_runner = analysis_runner
             app.state.analysis_task_coordinator = analysis_tasks
+            app.state.reanalysis_worker = reanalysis_worker
+            app.state.reanalysis_service = ReanalysisService(
+                database=database,
+                preview_builder=ReanalysisPreviewBuilder(
+                    database=database,
+                    prompt_store=prompt_store,
+                    provider_coordinator=coordinator,
+                ),
+                provider_coordinator=coordinator,
+                task_coordinator=analysis_tasks,
+                worker=reanalysis_worker,
+                publisher=analysis_publisher,
+            )
             app.state.content_service = ContentService(
                 database,
                 resolved_paths,
@@ -148,10 +173,16 @@ def create_app(
                 database, resolved_paths.feedback
             )
             app.state.history_cleaner = HistoryCleaner(
-                database, resolved_paths.audio, resolved_paths.staging
+                database,
+                resolved_paths.audio,
+                resolved_paths.staging,
+                task_coordinator=analysis_tasks,
             )
             yield
         finally:
+            reanalysis_worker = getattr(app.state, "reanalysis_worker", None)
+            if reanalysis_worker is not None:
+                await reanalysis_worker.close()
             analysis_tasks = getattr(app.state, "analysis_task_coordinator", None)
             if analysis_tasks is not None:
                 await analysis_tasks.close()
@@ -184,6 +215,7 @@ def create_app(
     app.include_router(events_router)
     app.include_router(prompts_router)
     app.include_router(content_router)
+    app.include_router(reanalysis_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

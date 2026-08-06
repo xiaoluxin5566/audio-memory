@@ -122,6 +122,18 @@ class ProviderStateCoordinator:
                     raise LookupError("No active provider")
                 return active, self._generations[active.provider_id]
 
+    @asynccontextmanager
+    async def active_snapshot_guard(self):
+        """Freeze active provider/model/generation across paid-work creation."""
+        async with self._activation_lock:
+            async with self._state_lock:
+                active = next(
+                    (item for item in self._states.values() if item.active), None
+                )
+                if active is None:
+                    raise LookupError("No active provider")
+                yield active, self._generations[active.provider_id]
+
     async def credential_generation(self, provider_id: str) -> int:
         async with self._state_lock:
             return self._generations[provider_id]
