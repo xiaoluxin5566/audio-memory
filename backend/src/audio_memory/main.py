@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -44,14 +45,24 @@ from audio_memory.analysis.publisher import AnalysisPublisher
 from audio_memory.content.service import ContentService
 from audio_memory.content.feedback import FeedbackWriter
 from audio_memory.content.clear import HistoryCleaner
+from audio_memory.security.local_session import LocalSessionSecurity
+from audio_memory.security.middleware import LocalWebSecurityMiddleware
 
 
 def create_app(
     *,
     paths: AppPaths | None = None,
     frontend_dir: Path | None = None,
+    local_port: int | None = None,
 ) -> FastAPI:
     resolved_paths = paths or AppPaths.from_home(Path.home())
+    resolved_port = (
+        local_port
+        if local_port is not None
+        else int(os.environ.get("AUDIO_MEMORY_PORT", "8765"))
+    )
+    if not 1 <= resolved_port <= 65535:
+        raise ValueError("local_port must be between 1 and 65535")
     resolved_frontend = frontend_dir or (
         Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
     )
@@ -159,6 +170,15 @@ def create_app(
             instance_lock.release()
 
     app = FastAPI(title="Audio Memory", version=__version__, lifespan=lifespan)
+    local_security = LocalSessionSecurity(
+        resolved_paths.runtime / "local-web-security.sqlite3"
+    )
+    app.state.local_web_security = local_security
+    app.add_middleware(
+        LocalWebSecurityMiddleware,
+        security=local_security,
+        allowed_port=resolved_port,
+    )
     app.include_router(providers_router)
     app.include_router(jobs_router)
     app.include_router(events_router)

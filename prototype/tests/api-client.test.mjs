@@ -35,3 +35,164 @@ test('successful provider configuration activates it and closes the modal', asyn
   assert.match(submitBody, /onClose\(\)/)
   assert.ok(submitBody.indexOf('activateProvider') < submitBody.indexOf('onClose()'))
 })
+
+
+test('mutating requests use one memory-only local session and an action idempotency key', async () => {
+  const client = await import(`../src/api/client.js?session-headers=${Date.now()}`)
+  assert.equal(typeof client.getLocalSessionHeaders, 'function')
+
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url, options })
+    if (url === '/api/session') {
+      return Response.json({ token: 'page-session-token' })
+    }
+    return Response.json({ ok: true }, { status: 201 })
+  }
+  try {
+    await client.apiRequest('/jobs', {
+      method: 'POST',
+      idempotencyKey: 'same-action-key',
+    })
+    await client.apiRequest('/jobs', {
+      method: 'POST',
+      idempotencyKey: 'same-action-key',
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(requests.filter(({ url }) => url === '/api/session').length, 1)
+  for (const request of requests.filter(({ url }) => url === '/api/jobs')) {
+    assert.equal(request.options.headers['X-Audio-Memory-Session'], 'page-session-token')
+    assert.equal(request.options.headers['Idempotency-Key'], 'same-action-key')
+    assert.equal('idempotencyKey' in request.options, false)
+  }
+})
+
+
+test('read-only calls skip sessions while separate actions receive separate UUID keys', async () => {
+  const client = await import(`../src/api/client.js?action-keys=${Date.now()}`)
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url, options })
+    if (url === '/api/session') return Response.json({ token: 'memory-token' })
+    return Response.json({ ok: true })
+  }
+  try {
+    await client.apiRequest('/providers')
+    await client.apiRequest('/jobs', { method: 'POST' })
+    await client.apiRequest('/jobs', { method: 'POST' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(requests[0].url, '/api/providers')
+  assert.equal(requests[0].options.headers['X-Audio-Memory-Session'], undefined)
+  const mutations = requests.filter(({ url }) => url === '/api/jobs')
+  assert.match(mutations[0].options.headers['Idempotency-Key'], /^[0-9a-f-]{36}$/)
+  assert.notEqual(
+    mutations[0].options.headers['Idempotency-Key'],
+    mutations[1].options.headers['Idempotency-Key'],
+  )
+})
+
+
+test('an expired fetch session refreshes once and retries the same action key', async () => {
+  const client = await import(`../src/api/client.js?expired-fetch=${Date.now()}`)
+  const originalFetch = globalThis.fetch
+  const sessions = ['expired-token', 'fresh-token']
+  const actions = []
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/session') return Response.json({ token: sessions.shift() })
+    actions.push(options.headers)
+    if (actions.length === 1) {
+      return Response.json(
+        { detail: { code: 'invalid_session', message: 'expired' } },
+        { status: 401 },
+      )
+    }
+    return Response.json({ ok: true })
+  }
+  try {
+    await client.apiRequest('/jobs', {
+      method: 'POST',
+      idempotencyKey: 'refresh-same-action',
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(actions.length, 2)
+  assert.equal(actions[0]['X-Audio-Memory-Session'], 'expired-token')
+  assert.equal(actions[1]['X-Audio-Memory-Session'], 'fresh-token')
+  assert.equal(actions[0]['Idempotency-Key'], 'refresh-same-action')
+  assert.equal(actions[1]['Idempotency-Key'], 'refresh-same-action')
+})
+
+
+test('expired XHR upload session refreshes and retries the explicit action key', async () => {
+  const originalFetch = globalThis.fetch
+  const OriginalXHR = globalThis.XMLHttpRequest
+  const requests = []
+  const sessionRequests = []
+
+  class FakeXHR {
+    constructor() {
+      this.headers = {}
+      this.listeners = {}
+      this.upload = { addEventListener() {} }
+      requests.push(this)
+    }
+
+    open(method, url) {
+      this.method = method
+      this.url = url
+    }
+
+    setRequestHeader(name, value) {
+      this.headers[name] = value
+    }
+
+    addEventListener(name, listener) {
+      this.listeners[name] = listener
+    }
+
+    send(body) {
+      this.body = body
+      if (requests.length === 1) {
+        this.status = 401
+        this.response = { detail: { code: 'invalid_session', message: 'expired' } }
+      } else {
+        this.status = 201
+        this.response = { id: 'file-1' }
+      }
+      queueMicrotask(() => this.listeners.load())
+    }
+  }
+
+  globalThis.fetch = async (url) => {
+    sessionRequests.push(url)
+    const token = sessionRequests.length === 1 ? 'upload-session-token' : 'fresh-upload-token'
+    return Response.json({ token })
+  }
+  globalThis.XMLHttpRequest = FakeXHR
+  try {
+    const upload = await import(`../src/api/upload.js?xhr-security=${Date.now()}`)
+    const file = new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' })
+    await upload.uploadFile('job/unsafe', file, { idempotencyKey: 'upload-retry-key' })
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.XMLHttpRequest = OriginalXHR
+  }
+
+  assert.deepEqual(sessionRequests, ['/api/session', '/api/session'])
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].url, '/api/jobs/job%2Funsafe/files')
+  assert.equal(requests[0].headers['X-Audio-Memory-Session'], 'upload-session-token')
+  assert.equal(requests[0].headers['Idempotency-Key'], 'upload-retry-key')
+  assert.equal(requests[1].headers['X-Audio-Memory-Session'], 'fresh-upload-token')
+  assert.equal(requests[1].headers['Idempotency-Key'], 'upload-retry-key')
+})

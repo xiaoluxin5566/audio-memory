@@ -1,32 +1,62 @@
-export function uploadFile(jobId, file, { onProgress = () => {} } = {}) {
+import { getLocalSessionHeaders, refreshLocalSessionHeaders } from './client.js'
+
+
+export async function uploadFile(
+  jobId,
+  file,
+  { onProgress = () => {}, idempotencyKey = crypto.randomUUID() } = {},
+) {
+  let localHeaders = await getLocalSessionHeaders(idempotencyKey)
+  const body = new FormData()
+  body.append('file', file, file.name)
   return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest()
-    request.open('POST', `/api/jobs/${encodeURIComponent(jobId)}/files`)
-    request.responseType = 'json'
-    request.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) {
-        onProgress(Math.round((event.loaded / event.total) * 100))
+    let refreshed = false
+
+    function send() {
+      const request = new XMLHttpRequest()
+      request.open('POST', `/api/jobs/${encodeURIComponent(jobId)}/files`)
+      for (const [name, value] of Object.entries(localHeaders)) {
+        request.setRequestHeader(name, value)
       }
-    })
-    request.addEventListener('load', () => {
-      if (request.status >= 200 && request.status < 300) {
-        resolve(request.response)
-        return
-      }
-      const detail = request.response?.detail ?? {}
-      const error = new Error(detail.message ?? '上传失败')
-      error.code = detail.code ?? 'upload_failed'
-      error.fileId = detail.file_id ?? null
-      reject(error)
-    })
-    request.addEventListener('error', () => {
-      const error = new Error('网络连接失败，请重新上传')
-      error.code = 'network_error'
-      reject(error)
-    })
-    const body = new FormData()
-    body.append('file', file, file.name)
-    request.send(body)
+      request.responseType = 'json'
+      request.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100))
+        }
+      })
+      request.addEventListener('load', async () => {
+        const detail = request.response?.detail ?? {}
+        if (request.status === 401 && detail.code === 'invalid_session' && !refreshed) {
+          refreshed = true
+          try {
+            localHeaders = await refreshLocalSessionHeaders(
+              idempotencyKey,
+              localHeaders['X-Audio-Memory-Session'],
+            )
+            send()
+          } catch (error) {
+            reject(error)
+          }
+          return
+        }
+        if (request.status >= 200 && request.status < 300) {
+          resolve(request.response)
+          return
+        }
+        const error = new Error(detail.message ?? '上传失败')
+        error.code = detail.code ?? 'upload_failed'
+        error.fileId = detail.file_id ?? null
+        reject(error)
+      })
+      request.addEventListener('error', () => {
+        const error = new Error('网络连接失败，请重新上传')
+        error.code = 'network_error'
+        reject(error)
+      })
+      request.send(body)
+    }
+
+    send()
   })
 }
 
@@ -57,4 +87,3 @@ export async function uploadFilesSequentially(
   }
   return { completed, pausedAt: null, error: null, pending: [] }
 }
-

@@ -15,7 +15,7 @@ async def test_health_is_ready_after_application_startup(tmp_path: Path) -> None
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://testserver",
+            base_url="http://127.0.0.1:8765",
         ) as client:
             response = await client.get("/api/health")
 

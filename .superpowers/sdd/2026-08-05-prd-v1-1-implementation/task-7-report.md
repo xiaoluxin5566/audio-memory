@@ -1,0 +1,196 @@
+# Task 7 implementation report
+
+## Status
+
+Implemented the loopback web trust boundary for every `/api` request and the
+session/idempotency boundary for every API `POST`, `PUT`, `PATCH`, and `DELETE`.
+The browser fetch and XHR upload paths obtain a 256-bit page token, retain the
+raw token only in JavaScript memory, and attach action-scoped idempotency keys.
+
+The implementation preserves the Task 5/6 worker, lease, credential-generation,
+version-publication, and immutable-outcome code unchanged. No external provider
+request or real credential was used.
+
+## Threat model and trust decisions
+
+- **DNS rebinding:** every `/api` request, including read-only data, requires an
+  exact configured-port `Host` of `127.0.0.1`, `localhost`, or IPv6 `[::1]`.
+  Localhost suffixes, other loopback aliases, missing/duplicate hosts, wrong
+  ports, and attacker domains fail with 403.
+- **Cross-site mutation / CSRF:** every API mutation requires exactly one HTTP
+  `Origin` equal to one of those configured loopback origins. Missing,
+  malformed, HTTPS, lookalike, duplicate, or cross-origin values fail with 403.
+- **Session theft/replay:** `GET /api/session` is available only through a
+  trusted Host; a supplied foreign Origin is rejected. It returns a 256-bit
+  random token with `Cache-Control: no-store`. Only SHA-256 token hashes are
+  stored; malformed, expired, duplicate-header, non-ASCII, or unknown tokens
+  fail with 401.
+- **Duplicate paid/destructive execution:** each mutation also requires a
+  bounded ASCII `Idempotency-Key`. The durable key is
+  `(session_hash, method + path, idempotency_key)` and its record holds a
+  canonical query-plus-body hash plus the exact original response status,
+  headers, and body. A changed body fails with 409.
+- **Concurrent/restart races:** SQLite `BEGIN IMMEDIATE` elects one owner before
+  dispatch. Same-process and cross-connection duplicates see `pending` and wait
+  for the durable result instead of executing. Completed outcomes and session
+  hashes survive backend restart for the 24-hour page/session lifetime.
+- **Bounded persistence:** expired sessions and records are pruned lazily after
+  24 hours. The global ledger is capped at 1,000 live entries. At capacity it
+  rejects new mutations rather than evicting still-live replay protection.
+- **Large uploads:** request bodies spool to disk above 1 MiB before the route
+  is dispatched. A streaming multipart parser hashes ordered part headers,
+  byte counts, and content digests rather than MIME delimiter bytes, so random
+  boundaries do not conflict and boundary-like bytes inside a file cannot
+  collide. JSON object ordering/whitespace is canonicalized.
+- **Non-API navigation:** `/`, frontend routes, assets, and `/api`-lookalike
+  paths such as `/apiary` bypass this middleware. Trusted-host read-only API
+  calls require neither a session token nor an idempotency key.
+
+## Protected endpoint matrix
+
+| Area | Protected mutations |
+| --- | --- |
+| Upload/job lifecycle | `POST /api/jobs`, upload file, remove file, start, resume, retry analysis, cancel job |
+| Provider validation/change | validate configured, validate provider, save key, cancel candidate, activate provider |
+| Prompt/history analysis controls | prompt `PUT`; future `POST /api/history/reanalysis-batches` is protected before route dispatch |
+| Todos | todo `PATCH` and `DELETE` |
+| Feedback / QA | card question and feedback `POST` |
+| Clear/history | history `DELETE` |
+
+Because enforcement is method-wide under the exact `/api` namespace, later
+paid/destructive routes cannot accidentally omit the dependency. Read-only
+health, feed, history, provider, prompt, job and event `GET`s require only the
+trusted Host boundary.
+
+## RED / GREEN evidence
+
+1. **Backend boundary:** initial Task 7 run failed 11/11 focused tests because
+   `audio_memory.security` did not exist. GREEN covered session/Origin/Host,
+   loopback forms, navigation/read-only behavior, response replay, endpoint /
+   body / session scope, concurrency, restart durability, and 4xx/204 replay.
+2. **Main-app wiring:** RED was `TypeError: create_app() got an unexpected
+   keyword argument 'local_port'`. GREEN installed the middleware and protected
+   the complete product endpoint matrix before route dispatch.
+3. **Body replay:** GREEN exposed a real spooled-stream defect
+   (`SpooledTemporaryFile` has no `peek`). The failing real request test was
+   retained; the fix tracks remaining bytes explicitly.
+4. **Configured port:** RED returned 403 when `AUDIO_MEMORY_PORT=9123`. GREEN
+   resolves and validates the runtime port used by the launcher.
+5. **Bounded ledger:** RED executed a second mutation after the one-record test
+   ledger filled. GREEN fails closed with `idempotency_capacity` and retains the
+   first replay outcome.
+6. **Multipart retries:** RED returned 409 for identical file content because
+   two requests had different random MIME boundaries. GREEN hashes normalized
+   boundaries and replays the original 201 without a second upload dispatch.
+7. **Malformed token:** RED accepted a valid token with a non-ASCII byte because
+   decoding silently discarded it. GREEN uses strict ASCII decoding and returns
+   401 before dispatch.
+8. **Static-prefix isolation:** RED returned 403 for `/apiary` because namespace
+   matching used `startswith('/api')`. GREEN matches only `/api` and `/api/`.
+9. **Browser fetch:** RED showed `getLocalSessionHeaders` was absent. GREEN
+   fetches the session once per module/page, strips the client-only option,
+   preserves explicit retry keys, generates distinct UUID keys for distinct
+   actions, and leaves GET requests session-free.
+10. **XHR upload:** RED made no `/api/session` call and attached no headers.
+    GREEN acquires the same in-memory session and attaches session/idempotency
+    headers before sending multipart data.
+11. **Query fingerprint:** RED executed the same key twice when only the query
+    changed because query text was treated as a separate endpoint. GREEN scopes
+    by method/path and folds raw query input into the request hash, producing the
+    required mismatch conflict.
+12. **Unhandled route failure (review):** RED returned the outer 500 once, left
+    the claim pending, then returned `409 request_in_progress`. GREEN catches
+    ordinary route exceptions inside the protected boundary, logs them, durably
+    publishes one sanitized 500, and replays the identical response without a
+    second dispatch.
+13. **Multipart collision (review):** RED replayed the first upload when two
+    different files each contained their request's boundary token. GREEN uses
+    the streaming multipart parser's semantic part callbacks, so delimiter
+    randomness is excluded while file bytes remain part of the digest.
+14. **Expired browser session (review):** RED left fetch and XHR actions on a
+    cached expired token. GREEN refreshes once on structured
+    `401 invalid_session`, compares the rejected token before clearing shared
+    state to avoid concurrent refresh races, and retries with the original
+    action key.
+
+## Persistence, concurrency, and replay semantics
+
+- The owner claim is committed before the protected route receives the body.
+- The route response is buffered, durably completed with full synchronous
+  SQLite publication, and only then released to the original client.
+- Concurrent duplicates poll the durable claim and receive the published
+  response bytes; they never enter the route.
+- A completed response remains replayable after a new app/security-store
+  instance opens the same runtime database.
+- 2xx, 4xx, and empty 204 outcomes use the same publication/replay path.
+- A process failure while a record is still `pending` fails safe: later callers
+  do not repeat an uncertain side effect. After a bounded wait they receive
+  `request_in_progress`; the stale claim expires at 24 hours.
+- Ordinary provider/route exceptions are converted to a sanitized durable 500
+  and therefore do not leave a pending claim. Cancellation or hard process loss
+  remains the conservative pending case.
+- The body hash is independent of JSON formatting and multipart boundary but
+  remains sensitive to actual form metadata/file bytes.
+
+## Exact verification commands and results
+
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/integration/test_local_web_security.py tests/integration/test_provider_api.py tests/integration/test_content_api.py -q`
+  - `32 passed in 0.92s`
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  - `379 passed in 6.43s`
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
+  - exit 0, no output
+- `cd prototype && node --test tests/api-client.test.mjs`
+  - `7 passed, 0 failed`
+- `cd prototype && npm run build`
+  - exit 0; Vite built 36 modules and the Sites packaging artifacts
+- `cd prototype && npm run test:sites`
+  - `4 passed, 0 failed`
+- `git diff --check`
+  - exit 0, no output
+
+These commands are rerun at the final commit gate; later results supersede the
+pre-report timings above if they differ.
+
+## Self-review
+
+- Confirmed no Task 5/6 analysis worker, queue, lease, provider-generation,
+  publisher, migration, or content-version code changed.
+- Confirmed authorization happens before request-body spooling and route
+  dispatch; rejected requests cannot reach upload/provider/analysis/content
+  side effects.
+- Confirmed duplicate Host, Origin, token, or idempotency headers are not
+  merged or accepted.
+- Confirmed session tokens and API keys do not enter the security ledger;
+  request records contain hashes and responses only. Existing provider tests
+  continue to prove API keys are absent from responses.
+- Confirmed the cap rejects new work rather than deleting a completed live key,
+  preserving the 24-hour at-most-once guarantee.
+- Confirmed test fixtures that exercise the real product app now use the
+  configured loopback Host rather than weakening production to accept
+  `testserver`.
+- Independent review found three Important issues: exception-stranded claims,
+  multipart boundary-token collisions, and non-refreshing expired browser
+  sessions. Each received an observed RED regression and implementation fix.
+  Follow-up verdict: **READY**, with no remaining Critical or Important
+  findings; the reviewer independently confirmed 379 backend and 11 combined
+  client/worker tests.
+- `docs/HANDOFF-2026-08-06.md` remains untouched, untracked, unstaged, and
+  excluded from the commit.
+
+## Concerns and explicit limits
+
+- The security ledger deliberately persists session **hashes** for 24 hours,
+  rather than losing them at process exit, because restart-safe replay scoped
+  by session cannot otherwise authenticate the browser's existing token. Raw
+  tokens remain JavaScript-memory-only and never persist.
+- Middleware cannot atomically commit one transaction across SQLite, Keychain,
+  filesystem mutations, and remote provider calls. A crash after a side effect
+  but before response publication therefore leaves a conservative pending
+  claim: it prevents duplicate fees/destruction but cannot reconstruct the
+  missing response. After the 24-hour safety window expires, a retry is a new
+  execution and must be treated as recovery from an uncertain outcome.
+- The 1,000-entry bound can temporarily reject new mutations under sustained
+  volume. This is an intentional fail-safe tradeoff; expiry restores capacity.
+- The developer Vite proxy must present one of the configured backend Host /
+  Origin pairs. The packaged same-origin application does so directly.

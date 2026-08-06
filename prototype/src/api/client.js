@@ -1,15 +1,77 @@
 const API_BASE = '/api'
+const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+let localSessionPromise = null
+
+
+async function fetchLocalSession() {
+  const response = await fetch(`${API_BASE}/session`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  if (!response.ok) {
+    throw new Error('无法建立本地安全会话')
+  }
+  const payload = await response.json()
+  if (typeof payload?.token !== 'string' || !payload.token) {
+    throw new Error('本地服务返回了无效会话')
+  }
+  return payload.token
+}
+
+
+export async function getLocalSessionHeaders(idempotencyKey = crypto.randomUUID()) {
+  if (localSessionPromise === null) {
+    localSessionPromise = fetchLocalSession().catch((error) => {
+      localSessionPromise = null
+      throw error
+    })
+  }
+  const token = await localSessionPromise
+  return {
+    'X-Audio-Memory-Session': token,
+    'Idempotency-Key': idempotencyKey,
+  }
+}
+
+
+export async function refreshLocalSessionHeaders(idempotencyKey, rejectedToken) {
+  const observedPromise = localSessionPromise
+  if (observedPromise !== null) {
+    const observedToken = await observedPromise.catch(() => null)
+    if (observedToken === rejectedToken && localSessionPromise === observedPromise) {
+      localSessionPromise = null
+    }
+  }
+  return getLocalSessionHeaders(idempotencyKey)
+}
 
 
 export async function apiRequest(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
+  const { idempotencyKey, ...fetchOptions } = options
+  const method = (fetchOptions.method ?? 'GET').toUpperCase()
+  const isMutation = MUTATION_METHODS.has(method)
+  const actionKey = isMutation ? (idempotencyKey ?? crypto.randomUUID()) : null
+  let localHeaders = isMutation
+    ? await getLocalSessionHeaders(actionKey)
+    : {}
+  const send = () => fetch(`${API_BASE}${path}`, {
+    ...fetchOptions,
     headers: {
       Accept: 'application/json',
-      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
-      ...options.headers,
+      ...(fetchOptions.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...fetchOptions.headers,
+      ...localHeaders,
     },
   })
+  let response = await send()
+  if (isMutation && await isInvalidSession(response)) {
+    localHeaders = await refreshLocalSessionHeaders(
+      actionKey,
+      localHeaders['X-Audio-Memory-Session'],
+    )
+    response = await send()
+  }
   let payload = null
   let responseText = ''
   if (response.status !== 204) {
@@ -39,6 +101,17 @@ export async function apiRequest(path, options = {}) {
     throw error
   }
   return payload
+}
+
+
+async function isInvalidSession(response) {
+  if (response.status !== 401) return false
+  try {
+    const payload = await response.clone().json()
+    return payload?.detail?.code === 'invalid_session'
+  } catch {
+    return false
+  }
 }
 
 export const api = {
