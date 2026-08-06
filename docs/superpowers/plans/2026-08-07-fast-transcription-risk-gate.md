@@ -33,11 +33,12 @@
 - Produces: `Transcript.risk_state: str | None`, `Transcript.is_reliable: bool`, `Transcript.reliability_weight: float`, `Transcript.risk_reason: str | None`；`JobFile.vad_energy_json: str` 保存不含音频内容的分桶能量范围。
 - Produces: `TranscriptSegment` 同名字段，默认可靠、权重 1.0。
 
-- [ ] **Step 1: 写失败测试**：保存 `POST_EDIT_FAILED/is_reliable=False` 后，数据库保留时间范围和原因；`AnalysisRunner._transcript()` 只返回 `is_reliable=True`，中风险返回 `reliability_weight=0.6`。
+- [ ] **Step 1: 写失败测试**：保存 `POST_EDIT_FAILED/is_reliable=False` 后，数据库保留时间范围和原因，但 `text=""`、`words_json="[]"`；`AnalysisRunner._transcript()` 只返回 `is_reliable=True`，中风险返回 `reliability_weight=0.6`。
 
 ```python
 assert stored.risk_state == "POST_EDIT_FAILED"
 assert stored.is_reliable is False
+assert stored.text == "" and stored.words_json == "[]"
 assert [item["text"] for item in await runner._transcript("job-1")] == ["可信文本"]
 ```
 
@@ -45,7 +46,7 @@ assert [item["text"] for item in await runner._transcript("job-1")] == ["可信�
 
 Run: `cd backend && uv run pytest tests/integration/test_transcription_recovery.py tests/integration/test_analysis_pipeline.py -q`
 
-- [ ] **Step 3: 新增 0008 迁移和字段**：默认 `risk_state=NULL`、`is_reliable=1`、`reliability_weight=1.0`、`vad_energy_json=[]`；保存段落时复制风险字段；分析 SQL 增加 `Transcript.is_reliable.is_(True)` 并透传权重。
+- [ ] **Step 3: 新增 0008 迁移和字段**：默认 `risk_state=NULL`、`is_reliable=1`、`reliability_weight=1.0`、`vad_energy_json=[]`；保存段落时复制风险字段；状态转为 `REJECTED` 或 `POST_EDIT_FAILED` 的同一事务中清空 `text` 与 `words_json`；分析 SQL 增加 `Transcript.is_reliable.is_(True)` 并透传权重。
 
 - [ ] **Step 4: 运行测试并提交**
 
