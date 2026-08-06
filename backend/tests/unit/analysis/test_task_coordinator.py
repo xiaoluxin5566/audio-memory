@@ -146,6 +146,67 @@ async def test_restart_returns_running_request_to_pending(tmp_path) -> None:
     await database.dispose()
 
 
+@pytest.mark.asyncio
+async def test_restart_returns_linked_history_item_to_pending(tmp_path) -> None:
+    database = Database(tmp_path / "history-restart.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-history-restart")
+    await seed_active_history(
+        database,
+        job_id="job-history-restart",
+        batch_id="batch-history-restart",
+        run_id="run-history-restart",
+    )
+    first = AnalysisTaskCoordinator(database)
+    item = request(
+        "job-history-restart", batch_id="batch-history-restart", priority=10
+    )
+    await first.submit_reanalysis(item)
+    assert await first.next_request() == item
+    async with database.session() as session:
+        version = await session.scalar(select(AnalysisVersion))
+        assert version is not None
+        version.lease_expires_at = "2000-01-01T00:00:00+00:00"
+        await session.commit()
+
+    await AnalysisTaskCoordinator(database).initialize()
+
+    async with database.session() as session:
+        stored_item = await session.get(
+            ReanalysisItem, "run-history-restart-item"
+        )
+        version = await session.scalar(select(AnalysisVersion))
+    assert version is not None and version.status == "pending"
+    assert stored_item is not None and stored_item.status == "pending"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_close_releases_linked_history_item_with_owned_claim(tmp_path) -> None:
+    database = Database(tmp_path / "history-close.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-history-close")
+    await seed_active_history(
+        database,
+        job_id="job-history-close",
+        batch_id="batch-history-close",
+        run_id="run-history-close",
+    )
+    coordinator = AnalysisTaskCoordinator(database)
+    item = request("job-history-close", batch_id="batch-history-close", priority=10)
+    await coordinator.submit_reanalysis(item)
+    assert await coordinator.next_request() == item
+
+    await coordinator.close()
+
+    async with database.session() as session:
+        stored_item = await session.get(ReanalysisItem, "run-history-close-item")
+        version = await session.scalar(select(AnalysisVersion))
+    assert version is not None and version.status == "pending"
+    assert stored_item is not None and stored_item.status == "pending"
+    await database.dispose()
+
+
 @pytest.mark.parametrize(
     "paused_status",
     ("stopped", "paused_rules_changed", "paused_error"),

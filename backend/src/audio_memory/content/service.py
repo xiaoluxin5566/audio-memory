@@ -11,13 +11,14 @@ from sqlalchemy import select
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.models import (
-    AnalysisJob,
+    AnalysisVersion,
     Batch,
     Card,
     JobFile,
     ProfileFact,
     QAMessage,
     Todo,
+    TodoTombstone,
     Transcript,
 )
 
@@ -54,7 +55,14 @@ class ContentService:
                 (
                     await session.execute(
                         select(Batch, Card)
-                        .join(Card, Card.batch_id == Batch.id)
+                        .join(
+                            Card,
+                            (Card.batch_id == Batch.id)
+                            & (
+                                Card.analysis_version_id
+                                == Batch.current_analysis_version_id
+                            ),
+                        )
                         .order_by(Batch.uploaded_at.desc(), Card.position)
                     )
                 ).all()
@@ -147,10 +155,13 @@ class ContentService:
                 if not text.strip():
                     raise ValueError("Todo text cannot be blank")
                 todo.text = text.strip()
+                todo.user_edited = True
             if completed is not None:
                 todo.completed = completed
+                todo.completion_source = "user"
             if update_due_at:
                 todo.due_at = self._normalize_due_at(due_at)
+                todo.user_edited = True
             await session.commit()
             await session.refresh(todo)
             return self._todo_view(todo, now=datetime.now(UTC))
@@ -160,6 +171,16 @@ class ContentService:
             todo = await session.get(Todo, todo_id)
             if todo is None:
                 raise LookupError("Unknown todo")
+            if todo.source_fingerprint is not None:
+                tombstone = await session.get(
+                    TodoTombstone, todo.source_fingerprint
+                )
+                if tombstone is None:
+                    session.add(
+                        TodoTombstone(
+                            source_fingerprint=todo.source_fingerprint
+                        )
+                    )
             await session.delete(todo)
             await session.commit()
 
@@ -214,7 +235,11 @@ class ContentService:
         async with self.database.session() as session:
             card_row = await session.get(Card, card_id)
             batch = await session.get(Batch, card_row.batch_id) if card_row else None
-            job = await session.get(AnalysisJob, batch.job_id) if batch else None
+            version = (
+                await session.get(AnalysisVersion, card_row.analysis_version_id)
+                if card_row and card_row.analysis_version_id
+                else None
+            )
             files = list(await session.scalars(select(JobFile).where(JobFile.job_id == batch.job_id))) if batch else []
             qa = list(await session.scalars(select(QAMessage).where(QAMessage.card_id == card_id).order_by(QAMessage.position)))
         return {
@@ -223,10 +248,10 @@ class ContentService:
             "audio": [{"name": item.original_name, "duration_ms": item.duration_ms} for item in files],
             "transcript": transcript,
             "qa": [{"role": item.role, "content": item.content} for item in qa],
-            "provider_id": batch.provider_id if batch else None,
-            "model_id": batch.model_id if batch else None,
+            "provider_id": version.provider_id if version else None,
+            "model_id": version.model_id if version else None,
             "prompt_snapshot": (
-                json.loads(job.prompt_snapshot_json) if job else {}
+                json.loads(version.prompt_snapshot_json) if version else {}
             ),
         }
 

@@ -137,7 +137,7 @@ def create_app(
                 database, resolved_paths.feedback
             )
             app.state.history_cleaner = HistoryCleaner(
-                database, resolved_paths.audio
+                database, resolved_paths.audio, resolved_paths.staging
             )
             yield
         finally:

@@ -19,6 +19,7 @@ class CardShell(StrictModel):
 class StrictTodoDraft(StrictModel):
     text: str = Field(min_length=1, max_length=120)
     action: str = Field(min_length=1, max_length=120)
+    object: str | None = Field(default=None, max_length=120)
     owner_type: Literal["user", "shared", "other", "unknown"]
     assignee_text: str | None
     due_at: datetime | None

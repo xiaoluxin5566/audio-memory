@@ -73,6 +73,21 @@ class AnalysisTaskCoordinator:
                 return
             async with self.database.session() as session:
                 now = datetime.now(UTC).isoformat()
+                expired_versions = select(AnalysisVersion.id).where(
+                    AnalysisVersion.status == "running",
+                    or_(
+                        AnalysisVersion.lease_expires_at.is_(None),
+                        AnalysisVersion.lease_expires_at < now,
+                    ),
+                )
+                await session.execute(
+                    update(ReanalysisItem)
+                    .where(
+                        ReanalysisItem.analysis_version_id.in_(expired_versions),
+                        ReanalysisItem.status == "running",
+                    )
+                    .values(status="pending")
+                )
                 await session.execute(
                     update(AnalysisVersion)
                     .where(
@@ -295,6 +310,18 @@ class AnalysisTaskCoordinator:
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
         async with self.database.session() as session:
+            owned_versions = select(AnalysisVersion.id).where(
+                AnalysisVersion.status == "running",
+                AnalysisVersion.worker_owner_id == self.owner_id,
+            )
+            await session.execute(
+                update(ReanalysisItem)
+                .where(
+                    ReanalysisItem.analysis_version_id.in_(owned_versions),
+                    ReanalysisItem.status == "running",
+                )
+                .values(status="pending")
+            )
             await session.execute(
                 update(AnalysisVersion)
                 .where(

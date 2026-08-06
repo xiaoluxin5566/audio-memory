@@ -475,7 +475,7 @@ async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None
     async with database.session() as session:
         item = await session.get(ReanalysisItem, "history-item")
         batch = await session.get(ReanalysisBatch, "history-1")
-    assert item is not None and item.status == "completed"
+    assert item is not None and item.status == "succeeded"
     assert item.completed_at is not None
     assert batch is not None and batch.status == "completed"
     assert batch.completed_at is not None
@@ -637,7 +637,7 @@ async def test_publication_recovers_when_audio_was_moved_before_database_commit(
     paths.ensure_directories()
     source = tmp_path / "meeting.mp3"
     source.write_bytes(b"audio")
-    batch_id = str(uuid5(NAMESPACE_URL, "audio-memory-batch:version-1"))
+    batch_id = str(uuid5(NAMESPACE_URL, "audio-memory-batch:job-1"))
     destination = paths.audio / batch_id / "file-1.mp3"
     destination.parent.mkdir(parents=True)
     os.replace(source, destination)
