@@ -97,7 +97,7 @@ async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_wei
                     end_ms=2000,
                     text="中风险文本",
                     words_json="[]",
-                    risk_state="LOW_CONFIDENCE",
+                    risk_state="HIGH_RISK_PENDING",
                     reliability_weight=0.6,
                 ),
                 Transcript(

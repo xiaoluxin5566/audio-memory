@@ -99,7 +99,10 @@ class TranscriptionService:
             return int(maximum if maximum is not None else -1) + 1
 
     async def _save_segment(self, segment: TranscriptSegment) -> None:
-        discard_content = segment.risk_state in {"REJECTED", "POST_EDIT_FAILED"}
+        discard_content = (
+            not segment.is_reliable
+            or segment.risk_state in {"REJECTED", "POST_EDIT_FAILED"}
+        )
         async with self.database.session() as session:
             session.add(
                 Transcript(

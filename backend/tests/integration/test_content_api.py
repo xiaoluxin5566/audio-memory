@@ -28,6 +28,7 @@ from audio_memory.models import (
 class FakeQuestionAnswerer:
     async def answer(self, **kwargs):
         assert "会议原文" in kwargs["transcript"]
+        assert "不可信文本" not in kwargs["transcript"]
         return "本次会议决定先做 macOS。"
 
 
@@ -64,6 +65,19 @@ async def content_client(tmp_path: Path):
         batch.current_analysis_version_id = version_id
         session.add(JobFile(id=file_id, job_id=job_id, original_name="会议.mp3", extension=".mp3", size_bytes=10, sha256="c" * 64, duration_ms=1000, position=0, temporary_path=str(paths.audio / "会议.mp3")))
         session.add(Transcript(id=str(uuid4()), job_file_id=file_id, segment_index=0, start_ms=0, end_ms=1000, text="会议原文", words_json="[]"))
+        session.add(
+            Transcript(
+                id=str(uuid4()),
+                job_file_id=file_id,
+                segment_index=1,
+                start_ms=1000,
+                end_ms=2000,
+                text="不可信文本",
+                words_json="[]",
+                risk_state="HIGH_RISK_PENDING",
+                is_reliable=False,
+            )
+        )
         session.add(Card(id=card_id, batch_id=batch_id, analysis_version_id=version_id, scene_id="meeting", position=0, payload_json=json.dumps({"card": {"title": "评审会", "summary": "确认一期范围"}, "detail_sections": []}, ensure_ascii=False)))
         session.add(Todo(id=todo_id, batch_id=batch_id, analysis_version_id=version_id, source_job_id=job_id, source_event_id="event_1", normalized_action="follow up", normalized_assignee="user", source_fingerprint="fingerprint-1", text="已过期事项", due_at="2026-08-04T08:00:00+00:00"))
         await session.commit()

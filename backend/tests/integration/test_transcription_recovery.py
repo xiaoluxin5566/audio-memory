@@ -79,8 +79,9 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_post_edit_failed_segment_keeps_timing_and_reason_without_content(
-    tmp_path: Path,
+@pytest.mark.parametrize("risk_state", ["POST_EDIT_FAILED", "HIGH_RISK_PENDING"])
+async def test_unreliable_segment_keeps_timing_and_reason_without_content(
+    tmp_path: Path, risk_state: str
 ) -> None:
     database = Database(tmp_path / "risk-state.sqlite3")
     await database.create_schema()
@@ -111,7 +112,7 @@ async def test_post_edit_failed_segment_keeps_timing_and_reason_without_content(
             end_ms=900,
             text="不得保留的原始转写",
             words=[{"word": "不得保留"}],
-            risk_state="POST_EDIT_FAILED",
+            risk_state=risk_state,
             is_reliable=False,
             reliability_weight=0.2,
             risk_reason="精转写失败",
@@ -124,7 +125,7 @@ async def test_post_edit_failed_segment_keeps_timing_and_reason_without_content(
         )
 
     assert stored is not None
-    assert stored.risk_state == "POST_EDIT_FAILED"
+    assert stored.risk_state == risk_state
     assert stored.is_reliable is False
     assert stored.reliability_weight == 0.2
     assert stored.risk_reason == "精转写失败"

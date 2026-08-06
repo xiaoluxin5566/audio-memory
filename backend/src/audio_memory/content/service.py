@@ -264,7 +264,10 @@ class ContentService:
             rows = await session.execute(
                 select(Transcript.text)
                 .join(JobFile, JobFile.id == Transcript.job_file_id)
-                .where(JobFile.job_id == batch.job_id)
+                .where(
+                    JobFile.job_id == batch.job_id,
+                    Transcript.is_reliable.is_(True),
+                )
                 .order_by(JobFile.position, Transcript.segment_index)
             )
         return "\n".join(row[0] for row in rows), json.loads(card.payload_json)

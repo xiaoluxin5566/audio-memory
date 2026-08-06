@@ -15,6 +15,19 @@ def test_segment_rejects_invalid_timestamps() -> None:
         TranscriptSegment("file-1", 0, 500, 400, "倒序", [])
 
 
+def test_segment_rejects_unknown_risk_state() -> None:
+    with pytest.raises(ValueError, match="Unknown transcript risk state"):
+        TranscriptSegment(
+            "file-1",
+            0,
+            0,
+            1000,
+            "风险状态无效",
+            [],
+            risk_state="LOW_CONFIDENCE",
+        )
+
+
 def test_ordered_text_is_stable_across_files_and_segments() -> None:
     segments = [
         TranscriptSegment("b", 1, 100, 200, "第四", []),

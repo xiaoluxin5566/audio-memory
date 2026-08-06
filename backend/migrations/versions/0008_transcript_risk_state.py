@@ -47,9 +47,18 @@ def upgrade() -> None:
         ),
     )
     op.add_column("transcripts", sa.Column("risk_reason", sa.Text()))
+    with op.batch_alter_table("transcripts", recreate="always") as batch_op:
+        batch_op.create_check_constraint(
+            "ck_transcripts_risk_state",
+            "risk_state IS NULL OR risk_state IN "
+            "('REJECTED', 'HIGH_RISK_PENDING', 'POST_EDIT_PASSED', "
+            "'POST_EDIT_FAILED')",
+        )
 
 
 def downgrade() -> None:
+    with op.batch_alter_table("transcripts", recreate="always") as batch_op:
+        batch_op.drop_constraint("ck_transcripts_risk_state", type_="check")
     op.drop_column("transcripts", "risk_reason")
     op.drop_column("transcripts", "reliability_weight")
     op.drop_column("transcripts", "is_reliable")

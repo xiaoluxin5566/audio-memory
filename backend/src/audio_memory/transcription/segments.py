@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+_VALID_RISK_STATES = frozenset(
+    {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_PASSED", "POST_EDIT_FAILED"}
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptSegment:
     file_id: str
@@ -23,6 +28,8 @@ class TranscriptSegment:
             raise ValueError("Segment timestamps must be increasing")
         if not self.text.strip():
             raise ValueError("Segment text cannot be blank")
+        if self.risk_state is not None and self.risk_state not in _VALID_RISK_STATES:
+            raise ValueError("Unknown transcript risk state")
 
 
 def ordered_text(

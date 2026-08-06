@@ -145,6 +145,21 @@ def test_structured_transcript_segment_uid_is_unique(tmp_path: Path) -> None:
             )
 
 
+def test_transcript_risk_state_migration_rejects_unknown_state(tmp_path: Path) -> None:
+    database_path = tmp_path / "transcript-risk-state.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0001")
+    seed_v1_transcript(database_path)
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE transcripts SET risk_state = 'LOW_CONFIDENCE' "
+                "WHERE id = 'transcript-1'"
+            )
+
+
 def test_analysis_version_source_and_running_attempt_constraints(
     tmp_path: Path,
 ) -> None:

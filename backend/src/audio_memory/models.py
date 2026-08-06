@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -96,6 +97,12 @@ class Transcript(Base):
     __tablename__ = "transcripts"
     __table_args__ = (
         UniqueConstraint("job_file_id", "segment_index", name="uq_transcript_segment"),
+        CheckConstraint(
+            "risk_state IS NULL OR risk_state IN "
+            "('REJECTED', 'HIGH_RISK_PENDING', 'POST_EDIT_PASSED', "
+            "'POST_EDIT_FAILED')",
+            name="ck_transcripts_risk_state",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
