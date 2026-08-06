@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -37,6 +38,8 @@ class MetadataStore(Protocol):
         error_code: str | None,
         error_message: str | None,
     ) -> None: ...
+
+    async def update_generation(self, provider_id: str, generation: int) -> None: ...
 
 
 class ProviderStateCoordinator:
@@ -83,8 +86,12 @@ class ProviderStateCoordinator:
                 }
             )
             for row in await self._metadata.list_all():
+                provider_id = str(getattr(row, "provider_id"))
+                self._generations[provider_id] = int(
+                    getattr(row, "credential_generation", 0)
+                )
                 if getattr(row, "active", False):
-                    self._set_active(str(getattr(row, "provider_id")))
+                    self._set_active(provider_id)
         await asyncio.gather(
             *(self.validate_saved(provider_id) for provider_id in self._states)
         )
@@ -118,6 +125,11 @@ class ProviderStateCoordinator:
     async def credential_generation(self, provider_id: str) -> int:
         async with self._state_lock:
             return self._generations[provider_id]
+
+    @asynccontextmanager
+    async def publication_guard(self, provider_id: str):
+        async with self._state_lock:
+            yield self._generations[provider_id]
 
     def _set_active(self, provider_id: str) -> None:
         for item_id, item in tuple(self._states.items()):
@@ -214,15 +226,23 @@ class ProviderStateCoordinator:
                 current = self._candidates.get(key)
                 if current is None or current[0] != candidate_id:
                     raise asyncio.CancelledError
-                self._keychain.replace(provider_id, candidate)
-                confirmed = self._keychain.read(provider_id)
-                if confirmed.status is not KeychainStatus.CONFIGURED:
-                    return ValidationResult(
-                        False, ValidationErrorCode.KEYCHAIN_UNAVAILABLE
-                    )
                 async with self._state_lock:
+                    current = self._candidates.get(key)
+                    if current is None or current[0] != candidate_id:
+                        raise asyncio.CancelledError
+                    self._keychain.replace(provider_id, candidate)
+                    confirmed = self._keychain.read(provider_id)
+                    if confirmed.status is not KeychainStatus.CONFIGURED:
+                        return ValidationResult(
+                            False, ValidationErrorCode.KEYCHAIN_UNAVAILABLE
+                        )
                     self._generations[provider_id] += 1
                     self._set_state(provider_id, ProviderStateName.AVAILABLE)
+                    generation = self._generations[provider_id]
+                    if self._metadata is not None:
+                        await self._metadata.update_generation(
+                            provider_id, generation
+                        )
                 await self._persist_state(provider_id)
             return result
         finally:

@@ -236,3 +236,11 @@ class ProviderMetadataRepository:
                 row.last_validated_at = validated_at
                 row.last_validation_error_code = error_code
                 row.last_validation_error_message = error_message
+
+    async def update_generation(self, provider_id: str, generation: int) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                row = await session.get(ProviderMetadata, provider_id)
+                if row is None:
+                    raise LookupError(f"Unknown provider: {provider_id}")
+                row.credential_generation = generation

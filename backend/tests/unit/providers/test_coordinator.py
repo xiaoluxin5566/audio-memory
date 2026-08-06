@@ -4,6 +4,8 @@ import asyncio
 
 import pytest
 
+from audio_memory.db import Database
+from audio_memory.repositories import ProviderMetadataRepository
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
 from audio_memory.providers.types import (
@@ -165,3 +167,68 @@ async def test_active_snapshot_includes_credential_generation_atomically() -> No
     assert first_state.provider_id == second_state.provider_id == "kimi"
     assert first_generation == 0
     assert second_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_credential_generation_survives_coordinator_restart(tmp_path) -> None:
+    class AcceptingValidator:
+        async def validate(self, secret: bytes) -> ValidationResult:
+            return ValidationResult(ok=True)
+
+    database = Database(tmp_path / "provider-generation.sqlite3")
+    await database.create_schema()
+    keychain = FakeKeychain()
+    validators = {"kimi": AcceptingValidator()}
+    first = ProviderStateCoordinator(
+        keychain=keychain,
+        validators=validators,
+        metadata=ProviderMetadataRepository(database),
+    )
+    await first.initialize()
+    await first.activate("kimi")
+    await first.validate_candidate("kimi", "settings", b"replacement")
+
+    restarted = ProviderStateCoordinator(
+        keychain=keychain,
+        validators=validators,
+        metadata=ProviderMetadataRepository(database),
+    )
+    await restarted.initialize()
+    provider, generation = await restarted.snapshot_active_with_generation()
+
+    assert provider.provider_id == "kimi"
+    assert generation == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publication_guard_blocks_physical_credential_replacement() -> None:
+    class AcceptingValidator:
+        async def validate(self, secret: bytes) -> ValidationResult:
+            return ValidationResult(ok=True)
+
+    class GuardedKeychain(FakeKeychain):
+        def __init__(self) -> None:
+            super().__init__()
+            self.replace_called = asyncio.Event()
+
+        def replace(self, provider_id: str, candidate: bytes) -> None:
+            self.replace_called.set()
+            super().replace(provider_id, candidate)
+
+    keychain = GuardedKeychain()
+    coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators={"kimi": AcceptingValidator()},
+    )
+
+    async with coordinator.publication_guard("kimi"):
+        replacement = asyncio.create_task(
+            coordinator.validate_candidate("kimi", "settings", b"replacement")
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(keychain.replace_called.wait(), timeout=0.05)
+        assert keychain.values["kimi"] == b"saved"
+
+    assert (await replacement).ok
+    assert keychain.values["kimi"] == b"replacement"

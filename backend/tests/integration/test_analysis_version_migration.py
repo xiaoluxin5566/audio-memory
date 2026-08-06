@@ -168,6 +168,49 @@ def test_head_normalizes_all_checkpoint_payloads_and_adds_queue_priority(
         assert version_payload == ("{}", 10)
 
 
+def test_0005_adds_durable_generation_and_worker_lease_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "durable-owner.sqlite3"
+    config = seed_version_0002_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO provider_metadata "
+            "(provider_id, active, validation_status, default_model_id) "
+            "VALUES ('kimi', 1, 'available', 'kimi-k2.5')"
+        )
+        connection.commit()
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        provider_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(provider_metadata)")
+        }
+        version_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(analysis_versions)")
+        }
+        assert provider_columns["credential_generation"][3] == 1
+        assert {
+            "worker_owner_id",
+            "lease_expires_at",
+        } <= version_columns.keys()
+        assert connection.execute(
+            "SELECT credential_generation FROM provider_metadata ORDER BY provider_id"
+        ).fetchall() == [(0,)]
+
+    command.downgrade(config, "0004")
+
+    with sqlite3.connect(database_path) as connection:
+        assert "credential_generation" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(provider_metadata)")
+        }
+        version_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(analysis_versions)")
+        }
+        assert "worker_owner_id" not in version_columns
+        assert "lease_expires_at" not in version_columns
+
+
 def test_0003_downgrade_restores_0002_data_and_schema(tmp_path: Path) -> None:
     database_path = tmp_path / "rollback.sqlite3"
     config = seed_version_0002_database(database_path)

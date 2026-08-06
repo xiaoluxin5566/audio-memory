@@ -39,13 +39,53 @@ async def seed_jobs(database: Database, *job_ids: str) -> None:
         await session.commit()
 
 
+async def seed_active_history(
+    database: Database,
+    *,
+    job_id: str,
+    batch_id: str,
+    run_id: str,
+) -> None:
+    async with database.session() as session:
+        session.add(Batch(id=batch_id, job_id=job_id, natural_date="2026-08-05"))
+        session.add(
+            ReanalysisBatch(
+                id=run_id,
+                status="running",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                snapshot_hash="s" * 64,
+            )
+        )
+        session.add(
+            ReanalysisItem(
+                id=f"{run_id}-item",
+                reanalysis_batch_id=run_id,
+                source_batch_id=batch_id,
+                position=0,
+                status="pending",
+            )
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_new_upload_priority_precedes_history(tmp_path) -> None:
     database = Database(tmp_path / "priority.sqlite3")
     await database.create_schema()
     await seed_jobs(database, "job-old", "job-new")
+    await seed_active_history(
+        database,
+        job_id="job-old",
+        batch_id="batch-old",
+        run_id="run-old",
+    )
     coordinator = AnalysisTaskCoordinator(database)
-    old = request("job-old", batch_id=None, priority=10)
+    old = request("job-old", batch_id="batch-old", priority=10)
     new = request("job-new", batch_id=None, priority=0)
 
     await coordinator.submit_reanalysis(old)
@@ -61,14 +101,14 @@ async def test_same_source_cannot_be_pending_or_running_twice(tmp_path) -> None:
     await database.create_schema()
     await seed_jobs(database, "job-same")
     coordinator = AnalysisTaskCoordinator(database)
-    item = request("job-same", batch_id=None, priority=10)
+    item = request("job-same", batch_id=None, priority=0)
 
-    await coordinator.submit_reanalysis(item)
+    await coordinator.submit_new_upload(item)
     with pytest.raises(AlreadyRunningError):
-        await coordinator.submit_reanalysis(item)
+        await coordinator.submit_new_upload(item)
     assert await coordinator.next_request() == item
     with pytest.raises(AlreadyRunningError):
-        await coordinator.submit_reanalysis(item)
+        await coordinator.submit_new_upload(item)
     await database.dispose()
 
 
@@ -81,6 +121,11 @@ async def test_restart_returns_running_request_to_pending(tmp_path) -> None:
     item = request("job-restart", batch_id=None, priority=0)
     await first.submit_new_upload(item)
     assert await first.next_request() == item
+    async with database.session() as session:
+        version = await session.scalar(select(AnalysisVersion))
+        assert version is not None
+        version.lease_expires_at = "2000-01-01T00:00:00+00:00"
+        await session.commit()
 
     restarted = AnalysisTaskCoordinator(database)
     assert await restarted.next_request() == item
@@ -104,7 +149,7 @@ async def test_stopped_history_batch_does_not_yield_a_new_item(tmp_path) -> None
         session.add(
             ReanalysisBatch(
                 id="history-run",
-                status="stopped",
+                status="running",
                 provider_id="kimi",
                 model_id="kimi-k2.5",
                 credential_generation=3,
@@ -128,6 +173,11 @@ async def test_stopped_history_batch_does_not_yield_a_new_item(tmp_path) -> None
     await coordinator.submit_reanalysis(
         request("job-history", batch_id="batch-source", priority=10)
     )
+    async with database.session() as session:
+        history_run = await session.get(ReanalysisBatch, "history-run")
+        assert history_run is not None
+        history_run.status = "stopped"
+        await session.commit()
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(coordinator.next_request(), timeout=0.05)
@@ -224,4 +274,95 @@ async def test_two_coordinators_cannot_claim_the_same_pending_version(tmp_path) 
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_requires_a_source_batch(tmp_path) -> None:
+    database = Database(tmp_path / "history-source-required.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-history-required")
+    coordinator = AnalysisTaskCoordinator(database)
+
+    with pytest.raises(ValueError, match="source_batch_id"):
+        await coordinator.submit_reanalysis(
+            request("job-history-required", batch_id=None, priority=10)
+        )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_requires_active_owning_item_and_matching_job(tmp_path) -> None:
+    database = Database(tmp_path / "history-owner.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-request", "job-batch")
+    async with database.session() as session:
+        session.add(
+            Batch(
+                id="batch-other-job",
+                job_id="job-batch",
+                natural_date="2026-08-06",
+            )
+        )
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+
+    with pytest.raises(ValueError, match="active owning"):
+        await coordinator.submit_reanalysis(
+            request("job-request", batch_id="batch-other-job", priority=10)
+        )
+
+    async with database.session() as session:
+        session.add(
+            ReanalysisBatch(
+                id="history-owner",
+                status="running",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                snapshot_hash="s" * 64,
+            )
+        )
+        await session.flush()
+        session.add(
+            ReanalysisItem(
+                id="history-owner-item",
+                reanalysis_batch_id="history-owner",
+                source_batch_id="batch-other-job",
+                position=0,
+                status="pending",
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(ValueError, match="source job"):
+        await coordinator.submit_reanalysis(
+            request("job-request", batch_id="batch-other-job", priority=10)
+        )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_initializing_second_coordinator_does_not_steal_live_claim(tmp_path) -> None:
+    database = Database(tmp_path / "live-owner.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-live-owner")
+    first = AnalysisTaskCoordinator(database)
+    item = request("job-live-owner", batch_id=None, priority=0)
+    await first.submit_new_upload(item)
+    assert await first.next_request() == item
+
+    second = AnalysisTaskCoordinator(database)
+    await second.initialize()
+
+    async with database.session() as session:
+        version = await session.scalar(select(AnalysisVersion))
+    assert version is not None
+    assert version.status == "running"
+    assert version.worker_owner_id == first.owner_id
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(second.next_request(), timeout=0.05)
     await database.dispose()

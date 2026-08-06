@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
-from audio_memory.analysis.publisher import AnalysisOutcome
-from audio_memory.analysis.runner import AnalysisRunner, CredentialChangedError
+from audio_memory.analysis.provider import ProviderAnalysisError
+from audio_memory.analysis.publisher import AnalysisOutcome, AnalysisPublisher
+from audio_memory.analysis.runner import (
+    AnalysisRunner,
+    CredentialChangedError,
+    FixedRulesChangedError,
+)
+from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
@@ -20,6 +29,7 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.schemas import SceneResultUnion
 from audio_memory.prompts.store import PROMPT_SCENES
 from pydantic import TypeAdapter
@@ -97,7 +107,7 @@ class RecordingPublisher:
         self.results = None
         self.profile_delta = None
 
-    async def publish(self, job_id, results, profile_delta):
+    async def publish(self, version_id, results, profile_delta):
         self.results = results
         self.profile_delta = profile_delta
         return AnalysisOutcome("published-batch", 0, 0)
@@ -107,6 +117,10 @@ class StableGeneration:
     async def credential_generation(self, provider_id: str) -> int:
         return 4
 
+    @asynccontextmanager
+    async def publication_guard(self, provider_id: str):
+        yield 4
+
 
 class ChangingGeneration:
     def __init__(self) -> None:
@@ -115,6 +129,30 @@ class ChangingGeneration:
     async def credential_generation(self, provider_id: str) -> int:
         self.calls += 1
         return 4 if self.calls == 1 else 5
+
+    @asynccontextmanager
+    async def publication_guard(self, provider_id: str):
+        yield 5
+
+
+class FailingProvider(RecordingProvider):
+    async def analyze_event_map(self, request, provider_snapshot):
+        raise ProviderAnalysisError("request failed")
+
+
+class ChangesAfterProviderFailure(StableGeneration):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def credential_generation(self, provider_id: str) -> int:
+        self.calls += 1
+        return 4 if self.calls == 1 else 5
+
+
+class ChangesOnlyAtPublication(StableGeneration):
+    @asynccontextmanager
+    async def publication_guard(self, provider_id: str):
+        yield 5
 
 
 class BlockingProvider(RecordingProvider):
@@ -212,7 +250,7 @@ async def seed_version(
                 credential_generation=4,
                 prompt_snapshot_json=json.dumps(prompts),
                 profile_snapshot_json="[]",
-                fixed_rules_hash="f" * 64,
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
                 staged_results_json="{}",
                 priority=0,
                 status="running",
@@ -389,7 +427,7 @@ async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None
         database=database,
         provider=RecordingProvider(),
         profile_extractor=EmptyProfileExtractor(),
-        publisher=RecordingPublisher(),
+        publisher=AnalysisPublisher(database),
         generation_source=StableGeneration(),
     )
 
@@ -402,4 +440,143 @@ async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None
     assert item.completed_at is not None
     assert batch is not None and batch.status == "completed"
     assert batch.completed_at is not None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_changed_fixed_rules_before_remote_request(tmp_path) -> None:
+    database = Database(tmp_path / "rules-changed.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        version.fixed_rules_hash = "0" * 64
+        version.event_map_json = json.dumps(event_map().model_dump(mode="json"))
+        version.staged_results_json = json.dumps(
+            {"todo": empty_scene("todo").model_dump(mode="json")}
+        )
+        await session.commit()
+    provider = RecordingProvider()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(FixedRulesChangedError):
+        await runner.run("version-1")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert provider.calls == []
+    assert version is not None and version.status == "fixed_rules_changed"
+    assert version.event_map_json is None
+    assert json.loads(version.staged_results_json) == {}
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_after_key_replacement_is_credential_changed(tmp_path) -> None:
+    database = Database(tmp_path / "provider-error-generation.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    runner = AnalysisRunner(
+        database=database,
+        provider=FailingProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=ChangesAfterProviderFailure(),
+    )
+
+    with pytest.raises(CredentialChangedError):
+        await runner.run("version-1")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.status == "credential_changed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_final_publication_guard_blocks_changed_generation(tmp_path) -> None:
+    database = Database(tmp_path / "publication-generation.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=publisher,
+        generation_source=ChangesOnlyAtPublication(),
+    )
+
+    with pytest.raises(CredentialChangedError):
+        await runner.run("version-1")
+
+    assert publisher.results is None
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.status == "credential_changed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publication_is_idempotent_by_version_and_commits_terminal_snapshot(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "idempotent-publication.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    results = [empty_scene(scene_id) for scene_id in PROMPT_SCENES]
+    publisher = AnalysisPublisher(database)
+
+    first = await publisher.publish("version-1", results, [])
+    second = await publisher.publish("version-1", results, [])
+
+    async with database.session() as session:
+        batches = list(await session.scalars(select(Batch)))
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert first == second
+    assert len(batches) == 1
+    assert version is not None and version.status == "completed"
+    assert version.batch_id == first.batch_id
+    assert batches[0].current_analysis_version_id == "version-1"
+    assert job is not None and job.provider_id == "kimi"
+    assert job.model_id == "kimi-k2.5"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publication_recovers_when_audio_was_moved_before_database_commit(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "moved-before-commit.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    paths = AppPaths.from_home(tmp_path / "home")
+    paths.ensure_directories()
+    source = tmp_path / "meeting.mp3"
+    source.write_bytes(b"audio")
+    batch_id = str(uuid5(NAMESPACE_URL, "audio-memory-batch:version-1"))
+    destination = paths.audio / batch_id / "file-1.mp3"
+    destination.parent.mkdir(parents=True)
+    os.replace(source, destination)
+    publisher = AnalysisPublisher(database, paths)
+
+    outcome = await publisher.publish(
+        "version-1",
+        [empty_scene(scene_id) for scene_id in PROMPT_SCENES],
+        [],
+    )
+
+    async with database.session() as session:
+        stored_file = await session.get(JobFile, "file-1")
+        version = await session.get(AnalysisVersion, "version-1")
+    assert outcome.batch_id == batch_id
+    assert stored_file is not None and stored_file.temporary_path == str(destination)
+    assert version is not None and version.status == "completed"
     await database.dispose()

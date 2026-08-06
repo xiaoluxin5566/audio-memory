@@ -38,6 +38,9 @@ class ProviderMetadata(Base):
     last_validation_error_code: Mapped[str | None] = mapped_column(String(80))
     last_validation_error_message: Mapped[str | None] = mapped_column(Text)
     default_model_id: Mapped[str | None] = mapped_column(String(120))
+    credential_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
 
 
 Index(
@@ -236,6 +239,8 @@ class AnalysisVersion(Base):
         Text, nullable=False, default="{}"
     )
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    worker_owner_id: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[str | None] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
     reanalysis_batch_id: Mapped[str | None] = mapped_column(

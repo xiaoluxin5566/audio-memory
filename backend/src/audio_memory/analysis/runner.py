@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
@@ -11,12 +10,12 @@ from pydantic import TypeAdapter
 from sqlalchemy import delete, select
 
 from audio_memory.analysis.profile import validate_profile_delta
+from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
     AnalysisVersion,
-    Batch,
     JobFile,
     ProfileCandidate,
     ReanalysisBatch,
@@ -42,6 +41,10 @@ class CredentialChangedError(RuntimeError):
     pass
 
 
+class FixedRulesChangedError(RuntimeError):
+    pass
+
+
 class StrictAnalysisProvider(Protocol):
     async def analyze_event_map(self, request, provider_snapshot) -> EventMap: ...
 
@@ -55,11 +58,13 @@ class ProfileExtractor(Protocol):
 
 
 class Publisher(Protocol):
-    async def publish(self, job_id, results, profile_delta) -> AnalysisOutcome: ...
+    async def publish(self, version_id, results, profile_delta) -> AnalysisOutcome: ...
 
 
 class GenerationSource(Protocol):
     async def credential_generation(self, provider_id: str) -> int: ...
+
+    def publication_guard(self, provider_id: str): ...
 
 
 _SCENE_MODELS = {
@@ -94,6 +99,7 @@ class AnalysisRunner:
 
     async def run(self, version_id: str) -> AnalysisOutcome:
         version = await self._version(version_id)
+        await self._require_fixed_rules(version)
         provider_snapshot = {
             "provider_id": version.provider_id,
             "model_id": version.model_id,
@@ -149,14 +155,22 @@ class AnalysisRunner:
                 version.id, raw_delta, segment_ids
             )
             delta = validate_profile_delta(verified_delta)
-            outcome = await self.publisher.publish(
-                version.source_job_id, results, delta
-            )
-            await self._mark_completed(version.id, outcome)
+            async with self.generation_source.publication_guard(
+                version.provider_id
+            ) as final_generation:
+                if final_generation != version.credential_generation:
+                    await self._mark_credential_changed(version)
+                outcome = await self.publisher.publish(version.id, results, delta)
             return outcome
         except asyncio.CancelledError:
             raise
+        except FixedRulesChangedError:
+            raise
         except CredentialChangedError:
+            raise
+        except ProviderAnalysisError:
+            await self._require_generation(version)
+            await self._mark_failed(version.id)
             raise
         except BaseException:
             await self._mark_failed(version.id)
@@ -259,6 +273,9 @@ class AnalysisRunner:
         )
         if current == version.credential_generation:
             return
+        await self._mark_credential_changed(version)
+
+    async def _mark_credential_changed(self, version: AnalysisVersion) -> None:
         async with self.database.session() as session:
             stored = await session.get(AnalysisVersion, version.id)
             if stored is not None:
@@ -288,6 +305,40 @@ class AnalysisRunner:
         raise CredentialChangedError(
             f"Credential generation changed for {version.provider_id}"
         )
+
+    async def _require_fixed_rules(self, version: AnalysisVersion) -> None:
+        current_hash = PromptComposer.fixed_rules_hash()
+        if version.fixed_rules_hash == current_hash:
+            return
+        async with self.database.session() as session:
+            stored = await session.get(AnalysisVersion, version.id)
+            if stored is not None:
+                stored.status = "fixed_rules_changed"
+                stored.error_code = "fixed_rules_changed"
+                stored.event_map_json = None
+                stored.event_map_hash = None
+                stored.staged_results_json = "{}"
+                if stored.reanalysis_batch_id is not None:
+                    history = await session.get(
+                        ReanalysisBatch, stored.reanalysis_batch_id
+                    )
+                    if history is not None:
+                        history.status = "paused_rules_changed"
+                    item = await session.scalar(
+                        select(ReanalysisItem).where(
+                            ReanalysisItem.analysis_version_id == stored.id
+                        )
+                    )
+                    if item is not None:
+                        item.status = "pending"
+                        item.error_code = "fixed_rules_changed"
+                else:
+                    job = await session.get(AnalysisJob, stored.source_job_id)
+                    if job is not None:
+                        job.stage = "failed"
+                        job.error_code = "fixed_rules_changed"
+                await session.commit()
+        raise FixedRulesChangedError("Fixed analysis rules changed")
 
     async def _version(self, version_id: str) -> AnalysisVersion:
         async with self.database.session() as session:
@@ -388,50 +439,6 @@ class AnalysisRunner:
                     job.stage = "failed"
                     job.error_code = "model_analysis_failed"
                 await session.commit()
-
-    async def _mark_completed(
-        self, version_id: str, outcome: AnalysisOutcome
-    ) -> None:
-        async with self.database.session() as session:
-            version = await session.get(AnalysisVersion, version_id)
-            if version is None:
-                raise LookupError(f"Unknown analysis version: {version_id}")
-            version.status = "completed"
-            version.error_code = None
-            version.completed_at = datetime.now(UTC).isoformat()
-            if version.reanalysis_batch_id is not None:
-                now = version.completed_at
-                item = await session.scalar(
-                    select(ReanalysisItem).where(
-                        ReanalysisItem.analysis_version_id == version.id
-                    )
-                )
-                if item is not None:
-                    item.status = "completed"
-                    item.error_code = None
-                    item.completed_at = now
-                remaining = await session.scalar(
-                    select(ReanalysisItem.id)
-                    .where(
-                        ReanalysisItem.reanalysis_batch_id
-                        == version.reanalysis_batch_id,
-                        ReanalysisItem.status.in_(("pending", "running")),
-                        ReanalysisItem.id != (item.id if item is not None else ""),
-                    )
-                    .limit(1)
-                )
-                if remaining is None:
-                    history = await session.get(
-                        ReanalysisBatch, version.reanalysis_batch_id
-                    )
-                    if history is not None:
-                        history.status = "completed"
-                        history.completed_at = now
-            published_batch = await session.get(Batch, outcome.batch_id)
-            if published_batch is not None:
-                version.batch_id = published_batch.id
-                published_batch.current_analysis_version_id = version.id
-            await session.commit()
 
     @staticmethod
     def _prompt_from_snapshot(

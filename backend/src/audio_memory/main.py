@@ -66,7 +66,6 @@ def create_app(
         app.state.instance_lock = instance_lock
         database: Database | None = None
         provider_clients: list[httpx.AsyncClient] = []
-        initialization_task: asyncio.Task[None] | None = None
         whisper_engine: MLXWhisperEngine | None = None
         try:
             await asyncio.to_thread(run_migrations, resolved_paths.database)
@@ -124,6 +123,7 @@ def create_app(
                 publisher=AnalysisPublisher(database, resolved_paths),
                 generation_source=coordinator,
             )
+            await coordinator.initialize()
             analysis_tasks = AnalysisTaskCoordinator(database)
             await analysis_tasks.start(analysis_runner)
             app.state.analysis_runner = analysis_runner
@@ -139,15 +139,11 @@ def create_app(
             app.state.history_cleaner = HistoryCleaner(
                 database, resolved_paths.audio
             )
-            initialization_task = asyncio.create_task(coordinator.initialize())
             yield
         finally:
             analysis_tasks = getattr(app.state, "analysis_task_coordinator", None)
             if analysis_tasks is not None:
                 await analysis_tasks.close()
-            if initialization_task is not None and not initialization_task.done():
-                initialization_task.cancel()
-                await asyncio.gather(initialization_task, return_exceptions=True)
             for client in provider_clients:
                 await client.aclose()
             for task in getattr(app.state, "transcription_tasks", {}).values():

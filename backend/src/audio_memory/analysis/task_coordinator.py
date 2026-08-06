@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
     AnalysisVersion,
+    Batch,
     ReanalysisBatch,
     ReanalysisItem,
 )
@@ -28,6 +30,8 @@ _PAUSED_HISTORY_STATES = {
     "paused_credential_changed",
     "credential_changed",
 }
+_LEASE_SECONDS = 30
+_HEARTBEAT_SECONDS = 10
 
 
 class AlreadyRunningError(RuntimeError):
@@ -55,6 +59,7 @@ class AnalysisTaskCoordinator:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+        self.owner_id = str(uuid4())
         self._condition = asyncio.Condition()
         self._initialized = False
         self._worker: asyncio.Task[None] | None = None
@@ -65,10 +70,22 @@ class AnalysisTaskCoordinator:
             if self._initialized:
                 return
             async with self.database.session() as session:
+                now = datetime.now(UTC).isoformat()
                 await session.execute(
                     update(AnalysisVersion)
-                    .where(AnalysisVersion.status == "running")
-                    .values(status="pending", error_code=None)
+                    .where(
+                        AnalysisVersion.status == "running",
+                        or_(
+                            AnalysisVersion.lease_expires_at.is_(None),
+                            AnalysisVersion.lease_expires_at < now,
+                        ),
+                    )
+                    .values(
+                        status="pending",
+                        error_code=None,
+                        worker_owner_id=None,
+                        lease_expires_at=None,
+                    )
                 )
                 await session.commit()
             self._initialized = True
@@ -82,6 +99,8 @@ class AnalysisTaskCoordinator:
         return await self._submit(request)
 
     async def submit_reanalysis(self, request: AnalysisRequest) -> str:
+        if request.source_batch_id is None:
+            raise ValueError("History reanalysis requires source_batch_id")
         if request.priority != HISTORY_REANALYSIS_PRIORITY:
             raise ValueError("History reanalysis must use priority 10")
         return await self._submit(request)
@@ -112,15 +131,46 @@ class AnalysisTaskCoordinator:
                         )
                     reanalysis_item = None
                     if request.source_batch_id is not None:
-                        reanalysis_item = await session.scalar(
-                            select(ReanalysisItem)
-                            .where(
-                                ReanalysisItem.source_batch_id
-                                == request.source_batch_id,
-                                ReanalysisItem.status.in_(("pending", "running")),
+                        ownership = (
+                            await session.execute(
+                                select(ReanalysisItem, ReanalysisBatch, Batch)
+                                .join(
+                                    ReanalysisBatch,
+                                    ReanalysisBatch.id
+                                    == ReanalysisItem.reanalysis_batch_id,
+                                )
+                                .join(
+                                    Batch,
+                                    Batch.id == ReanalysisItem.source_batch_id,
+                                )
+                                .where(
+                                    ReanalysisItem.source_batch_id
+                                    == request.source_batch_id,
+                                    ReanalysisItem.status == "pending",
+                                    ReanalysisBatch.status.in_(("pending", "running")),
+                                )
+                                .order_by(ReanalysisItem.created_at.desc())
+                                .limit(1)
                             )
-                            .order_by(ReanalysisItem.created_at.desc())
-                        )
+                        ).first()
+                        if ownership is None:
+                            raise ValueError(
+                                "History reanalysis requires an active owning item and batch"
+                            )
+                        reanalysis_item, owning_run, source_batch = ownership
+                        if source_batch.job_id != request.source_job_id:
+                            raise ValueError(
+                                "History source batch does not belong to source job"
+                            )
+                        if (
+                            owning_run.provider_id != request.provider_id
+                            or owning_run.model_id != request.model_id
+                            or owning_run.credential_generation
+                            != request.credential_generation
+                        ):
+                            raise ValueError(
+                                "History request does not match owning batch snapshot"
+                            )
                     version = AnalysisVersion(
                         id=version_id,
                         source_job_id=request.source_job_id,
@@ -195,7 +245,11 @@ class AnalysisTaskCoordinator:
                                 AnalysisVersion.id == row.id,
                                 AnalysisVersion.status == "pending",
                             )
-                            .values(status="running")
+                            .values(
+                                status="running",
+                                worker_owner_id=self.owner_id,
+                                lease_expires_at=self._lease_deadline(),
+                            )
                         )
                         if int(claimed.rowcount) != 1:
                             await session.rollback()
@@ -227,10 +281,25 @@ class AnalysisTaskCoordinator:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
+        async with self.database.session() as session:
+            await session.execute(
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.status == "running",
+                    AnalysisVersion.worker_owner_id == self.owner_id,
+                )
+                .values(
+                    status="pending",
+                    worker_owner_id=None,
+                    lease_expires_at=None,
+                )
+            )
+            await session.commit()
 
     async def _work(self, runner: VersionRunner) -> None:
         while not self._closed:
             version_id, _request = await self._claim_next()
+            heartbeat = asyncio.create_task(self._heartbeat(version_id))
             try:
                 await runner.run(version_id)
             except asyncio.CancelledError:
@@ -242,6 +311,40 @@ class AnalysisTaskCoordinator:
                         version.status = "failed"
                         version.error_code = "model_analysis_failed"
                         await session.commit()
+            finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+                async with self.database.session() as session:
+                    await session.execute(
+                        update(AnalysisVersion)
+                        .where(
+                            AnalysisVersion.id == version_id,
+                            AnalysisVersion.worker_owner_id == self.owner_id,
+                        )
+                        .values(worker_owner_id=None, lease_expires_at=None)
+                    )
+                    await session.commit()
+
+    async def _heartbeat(self, version_id: str) -> None:
+        while True:
+            await asyncio.sleep(_HEARTBEAT_SECONDS)
+            async with self.database.session() as session:
+                renewed = await session.execute(
+                    update(AnalysisVersion)
+                    .where(
+                        AnalysisVersion.id == version_id,
+                        AnalysisVersion.status == "running",
+                        AnalysisVersion.worker_owner_id == self.owner_id,
+                    )
+                    .values(lease_expires_at=self._lease_deadline())
+                )
+                await session.commit()
+                if int(renewed.rowcount) != 1:
+                    return
+
+    @staticmethod
+    def _lease_deadline() -> str:
+        return (datetime.now(UTC) + timedelta(seconds=_LEASE_SECONDS)).isoformat()
 
     @staticmethod
     def _request_from_version(version: AnalysisVersion) -> AnalysisRequest:

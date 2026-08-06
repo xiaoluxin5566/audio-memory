@@ -181,3 +181,70 @@ After these fixes the complete verification gate was rerun, producing the
 - History-batch creation/API feeding is outside Task 5. The coordinator consumes
   persisted `ReanalysisItem` ownership, priority, stopped/paused state, and
   credential pause correctly when those items are submitted.
+
+## Formal review fix round 1
+
+The seven Important findings from the formal lifecycle review were each closed
+with executable regression coverage:
+
+1. Durable credential generation and startup ordering:
+   - RED: a replacement reached generation 1 in memory, but a newly constructed
+     coordinator restored generation 0.
+   - GREEN: `provider_metadata.credential_generation` is migrated with a
+     non-null zero default, replacement persists each increment, initialization
+     restores it, and application startup awaits provider initialization before
+     starting queue recovery/the worker.
+2. Generation/publication and provider-error races:
+   - RED: a provider error after credential replacement escaped as the generic
+     provider failure, and a change visible only at final publication still
+     called the publisher. A separate lock-order test showed physical keychain
+     replacement could begin while the publication guard was held.
+   - GREEN: provider errors recheck generation before failure classification;
+     the final generation check and publication run under the provider state
+     guard; physical key replacement, in-memory generation increment, and
+     durable generation update now share that same guard.
+3. Idempotent, terminal publication:
+   - RED: the publisher accepted a job ID, so retrying by version failed with
+     `LookupError` and could not prove version idempotency.
+   - GREEN: publication is keyed by `AnalysisVersion.id`; batch/card/todo/profile
+     identifiers are deterministic; result rows, current-version pointer,
+     version/job/history terminal state, and snapshot provider/model metadata
+     commit in one transaction. Retry after an audio move but before the
+     database commit reconciles the deterministic destination instead of
+     duplicating or losing publication.
+4. History reanalysis ownership:
+   - RED: missing batch IDs and a batch belonging to another source job were
+     both accepted.
+   - GREEN: submission requires a pending `ReanalysisItem` owned by an active
+     `ReanalysisBatch`, matching source job, provider, model, and credential
+     generation.
+5. Provider-switch publication metadata:
+   - RED was covered by the version-id publication test: the old publisher read
+     mutable job metadata at publish time.
+   - GREEN: provider/model written to `Batch` and `AnalysisJob` come only from
+     the immutable `AnalysisVersion` snapshot.
+6. Live-worker ownership:
+   - RED: initializing a second coordinator reset every `running` version to
+     pending and could steal live work.
+   - GREEN: claims carry an owner UUID and expiring lease, heartbeat renewal is
+     conditional on owner/status, startup recovers only missing/expired leases,
+     and orderly close releases only the coordinator's own claims.
+7. Fixed-rule resume safety:
+   - RED: a running version with a stale `fixed_rules_hash` reused its event map
+     and staged scenes.
+   - GREEN: the runner checks packaged fixed rules before transcript or remote
+     work, clears incompatible checkpoints, marks the version/job explicitly,
+     and pauses history ownership for a fresh snapshot.
+
+Migration `0005` adds the durable provider generation and worker lease columns;
+its focused test exercises upgrade from `0002`, legacy-row backfill, and
+downgrade to `0004`.
+
+Fresh final verification from the completed fix-round worktree:
+
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  - `314 passed in 4.73s`
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
+  - exit 0, no output
+- `git diff --check`
+  - exit 0, no output
