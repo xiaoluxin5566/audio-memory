@@ -179,6 +179,36 @@ test('a late first preview cannot replace the fresh preview after close and reop
   expect(createdBody).toEqual({ preview_token: 'fresh-token' })
 })
 
+test('closing the modal preserves a slow initial running status response', async ({ page }) => {
+  let releaseCurrent
+  const slowCurrent = new Promise((resolve) => { releaseCurrent = resolve })
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { todos: [], days: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [{ date: '2026年8月6日', audio: [{ id: 'f1', original_name: '会议.mp3', duration_ms: 1000, uploaded_at: '2026-08-06T10:00:00Z' }] }] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/history/reanalysis-batches/current') {
+      await slowCurrent
+      return route.fulfill({ json: { id: 'running-1', status: 'running', total: 4, pending: 2, running: 1, succeeded: 1, failed: 0, stopped: 0 } })
+    }
+    if (pathname === '/api/history/reanalysis-batches/preview') return route.fulfill({ json: { source_batch_count: 1, audio_file_count: 1, transcript_character_count: 10, provider_display_name: 'Kimi', model_id: 'kimi-k2.5', prompt_summary: { todo: { version: 1 } }, estimated_calls_min: 1, estimated_calls_max: 1, blockers: [], preview_token: 'preview-token' } })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/history')
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByRole('heading', { name: '重新分析历史' })).toBeVisible()
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  releaseCurrent()
+
+  await expect(page.getByRole('button', { name: '重新分析中 1/4' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '清除所有历史' })).toBeDisabled()
+})
+
 test('clearing after closing a slow request ignores late preview and current responses', async ({ page }) => {
   let releaseCurrent
   let releasePreview

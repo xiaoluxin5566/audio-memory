@@ -32,6 +32,10 @@ export function useReanalysis() {
     generation.preview += 1
   }
 
+  function invalidatePreviewRequest() {
+    requestGeneration.current.preview += 1
+  }
+
   const refreshCurrent = useCallback(async () => {
     const token = beginRequest('current')
     const batch = await api.currentReanalysis()
@@ -107,7 +111,7 @@ export function useReanalysis() {
   }, [])
 
   const dismissPreview = useCallback(() => {
-    invalidateRequests()
+    invalidatePreviewRequest()
     setPreview(null)
     setError('')
     setLoadingPreview(false)
