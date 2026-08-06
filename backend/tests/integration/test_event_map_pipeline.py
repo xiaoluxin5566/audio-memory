@@ -15,6 +15,7 @@ from audio_memory.analysis.runner import (
     AnalysisRunner,
     CredentialChangedError,
     FixedRulesChangedError,
+    LeaseLostError,
 )
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
@@ -107,7 +108,14 @@ class RecordingPublisher:
         self.results = None
         self.profile_delta = None
 
-    async def publish(self, version_id, results, profile_delta):
+    async def publish(
+        self,
+        version_id,
+        results,
+        profile_delta,
+        *,
+        worker_owner_id=None,
+    ):
         self.results = results
         self.profile_delta = profile_delta
         return AnalysisOutcome("published-batch", 0, 0)
@@ -163,6 +171,18 @@ class BlockingProvider(RecordingProvider):
     async def analyze_event_map(self, request, provider_snapshot):
         self.started.set()
         await asyncio.Event().wait()
+
+
+class ReleasableProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def analyze_event_map(self, request, provider_snapshot):
+        self.started.set()
+        await self.release.wait()
+        return event_map()
 
 
 class InvalidEvidenceProfileExtractor:
@@ -579,4 +599,73 @@ async def test_publication_recovers_when_audio_was_moved_before_database_commit(
     assert outcome.batch_id == batch_id
     assert stored_file is not None and stored_file.temporary_path == str(destination)
     assert version is not None and version.status == "completed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_stops_after_its_worker_lease_is_reassigned(tmp_path) -> None:
+    database = Database(tmp_path / "lease-fence-runner.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.worker_owner_id = "worker-a"
+        await session.commit()
+    provider = ReleasableProvider()
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+    task = asyncio.create_task(
+        runner.run("version-1", worker_owner_id="worker-a")
+    )
+    await provider.started.wait()
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.worker_owner_id = "worker-b"
+        await session.commit()
+    provider.release.set()
+
+    with pytest.raises(LeaseLostError):
+        await task
+
+    assert publisher.results is None
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.status == "running"
+    assert version.worker_owner_id == "worker-b"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publisher_rejects_a_stale_worker_owner(tmp_path) -> None:
+    database = Database(tmp_path / "lease-fence-publisher.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.worker_owner_id = "worker-b"
+        await session.commit()
+
+    with pytest.raises(RuntimeError, match="lease"):
+        await AnalysisPublisher(database).publish(
+            "version-1",
+            [empty_scene(scene_id) for scene_id in PROMPT_SCENES],
+            [],
+            worker_owner_id="worker-a",
+        )
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        batches = list(await session.scalars(select(Batch)))
+    assert version is not None and version.status == "running"
+    assert version.worker_owner_id == "worker-b"
+    assert batches == []
     await database.dispose()

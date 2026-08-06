@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from audio_memory.analysis.profile import ProfileDelta
 from audio_memory.db import Database
@@ -48,6 +48,8 @@ class AnalysisPublisher:
         version_id: str,
         results: list[SceneResultBase],
         profile_delta: list[ProfileDelta],
+        *,
+        worker_owner_id: str | None = None,
     ) -> AnalysisOutcome:
         by_scene = {result.scene_id: result for result in results}
         visible = [
@@ -85,6 +87,14 @@ class AnalysisPublisher:
                         or 0
                     ),
                 )
+            if (
+                version.status != "running"
+                or (
+                    worker_owner_id is not None
+                    and version.worker_owner_id != worker_owner_id
+                )
+            ):
+                raise RuntimeError("Analysis worker lease was lost before publication")
             files = list(
                 await session.scalars(
                     select(JobFile)
@@ -114,6 +124,20 @@ class AnalysisPublisher:
 
         async with self.database.session() as session:
             async with session.begin():
+                if worker_owner_id is not None:
+                    fenced = await session.execute(
+                        update(AnalysisVersion)
+                        .where(
+                            AnalysisVersion.id == version_id,
+                            AnalysisVersion.status == "running",
+                            AnalysisVersion.worker_owner_id == worker_owner_id,
+                        )
+                        .values(worker_owner_id=worker_owner_id)
+                    )
+                    if int(fenced.rowcount) != 1:
+                        raise RuntimeError(
+                            "Analysis worker lease was lost before publication"
+                        )
                 version = await session.get(AnalysisVersion, version_id)
                 if version is None:
                     raise LookupError(f"Unknown analysis version: {version_id}")

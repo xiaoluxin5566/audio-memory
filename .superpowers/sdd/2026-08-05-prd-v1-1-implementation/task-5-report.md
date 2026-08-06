@@ -248,3 +248,54 @@ Fresh final verification from the completed fix-round worktree:
   - exit 0, no output
 - `git diff --check`
   - exit 0, no output
+
+## Formal review follow-up: ownership and fencing
+
+Independent review of `7c76f5e..cee7869` found three additional Important
+edge cases. They were closed with a second RED/GREEN cycle:
+
+1. Complete immutable history snapshot:
+   - RED: `test_reanalysis_must_match_the_owning_run_snapshot` failed with
+     `DID NOT RAISE ValueError`; provider/model/generation matched, but altered
+     prompt/profile/fixed-rule inputs were still accepted.
+   - GREEN: history submission semantically compares prompt and profile
+     snapshots and requires the current fixed-rules hash to equal the owning
+     `ReanalysisBatch`, in the same transaction as ownership validation.
+2. All terminal pause states block claiming:
+   - RED: parameter cases `paused_rules_changed` and `paused_error` both failed
+     with `DID NOT RAISE TimeoutError`, proving pending sibling work remained
+     claimable.
+   - GREEN: both states join the existing stopped/cancelled/credential-change
+     states in `_PAUSED_HISTORY_STATES`; the three-case regression now leaves
+     each version pending without yielding remote work.
+3. Lease fencing after reclaim:
+   - RED: fencing tests could not import `LeaseLostError`, reflecting that the
+     runner/publisher had no owner token to verify after a reclaim.
+   - GREEN: the coordinator passes its owner UUID into the runner; ownership is
+     rechecked before and after remote calls and enforced by conditional writes
+     for event maps, scene checkpoints, profile candidates, failure handling,
+     and publication. The publisher acquires a conditional database write fence
+     before its terminal transaction, so a stale owner cannot publish after a
+     new owner reclaims the version. Worker cleanup also retains a live owner on
+     cancellation until orderly `close()` returns its claim to pending.
+
+Targeted follow-up GREEN:
+
+- immutable snapshot + three pause cases + runner/publisher fencing:
+  - `6 passed in 0.75s`
+- full Task 5 focused regression set:
+  - `56 passed in 3.01s`
+
+Final verification after the follow-up (superseding earlier intermediate suite
+counts):
+
+- migration suite:
+  - `6 passed in 0.56s`
+- full Task 5 focused regression set:
+  - `56 passed in 2.84s`
+- complete backend suite:
+  - `319 passed in 5.23s`
+- `python -m compileall -q src tests`:
+  - exit 0, no output
+- `git diff --check`:
+  - exit 0, no output

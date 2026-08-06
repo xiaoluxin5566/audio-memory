@@ -7,7 +7,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from pydantic import TypeAdapter
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from audio_memory.analysis.profile import validate_profile_delta
 from audio_memory.analysis.provider import ProviderAnalysisError
@@ -45,6 +45,10 @@ class FixedRulesChangedError(RuntimeError):
     pass
 
 
+class LeaseLostError(RuntimeError):
+    pass
+
+
 class StrictAnalysisProvider(Protocol):
     async def analyze_event_map(self, request, provider_snapshot) -> EventMap: ...
 
@@ -58,7 +62,14 @@ class ProfileExtractor(Protocol):
 
 
 class Publisher(Protocol):
-    async def publish(self, version_id, results, profile_delta) -> AnalysisOutcome: ...
+    async def publish(
+        self,
+        version_id,
+        results,
+        profile_delta,
+        *,
+        worker_owner_id: str | None = None,
+    ) -> AnalysisOutcome: ...
 
 
 class GenerationSource(Protocol):
@@ -97,8 +108,10 @@ class AnalysisRunner:
         self.generation_source = generation_source
         self.composer = PromptComposer()
 
-    async def run(self, version_id: str) -> AnalysisOutcome:
-        version = await self._version(version_id)
+    async def run(
+        self, version_id: str, worker_owner_id: str | None = None
+    ) -> AnalysisOutcome:
+        version = await self._version(version_id, worker_owner_id)
         await self._require_fixed_rules(version)
         provider_snapshot = {
             "provider_id": version.provider_id,
@@ -113,7 +126,11 @@ class AnalysisRunner:
         try:
             await self._require_generation(version)
             event_map = await self._event_map(
-                version, transcript, profile, provider_snapshot
+                version,
+                transcript,
+                profile,
+                provider_snapshot,
+                worker_owner_id,
             )
             results: list[SceneResultBase] = []
             for scene_id in PROMPT_SCENES:
@@ -130,10 +147,12 @@ class AnalysisRunner:
                         prompt=prompt,
                         schema=_SCENE_MODELS[scene_id].model_json_schema(),
                     )
+                    await self._require_ownership(version.id, worker_owner_id)
                     await self._require_generation(version)
                     generated = await self.provider.analyze_scene(
                         scene_id, request, provider_snapshot
                     )
+                    await self._require_ownership(version.id, worker_owner_id)
                     await self._require_generation(version)
                     result = adapter.validate_python(
                         generated.model_dump(mode="python")
@@ -142,38 +161,49 @@ class AnalysisRunner:
                     )
                     validate_evidence_integrity(result, event_map, segment_ids)
                     staged[scene_id] = result.model_dump(mode="json")
-                    await self._save_staged(version.id, staged)
+                    await self._save_staged(version.id, staged, worker_owner_id)
                 validate_evidence_integrity(result, event_map, segment_ids)
                 results.append(result)
 
+            await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version)
             raw_delta = await self.profile_extractor.extract(
                 transcript, profile, provider_snapshot
             )
+            await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version)
             verified_delta = await self._save_profile_candidates(
-                version.id, raw_delta, segment_ids
+                version.id, raw_delta, segment_ids, worker_owner_id
             )
             delta = validate_profile_delta(verified_delta)
+            await self._require_ownership(version.id, worker_owner_id)
             async with self.generation_source.publication_guard(
                 version.provider_id
             ) as final_generation:
                 if final_generation != version.credential_generation:
                     await self._mark_credential_changed(version)
-                outcome = await self.publisher.publish(version.id, results, delta)
+                outcome = await self.publisher.publish(
+                    version.id,
+                    results,
+                    delta,
+                    worker_owner_id=worker_owner_id,
+                )
             return outcome
         except asyncio.CancelledError:
             raise
         except FixedRulesChangedError:
             raise
+        except LeaseLostError:
+            raise
         except CredentialChangedError:
             raise
         except ProviderAnalysisError:
+            await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version)
-            await self._mark_failed(version.id)
+            await self._mark_failed(version.id, worker_owner_id)
             raise
         except BaseException:
-            await self._mark_failed(version.id)
+            await self._mark_failed(version.id, worker_owner_id)
             raise
 
     async def _event_map(
@@ -182,6 +212,7 @@ class AnalysisRunner:
         transcript: list[dict[str, object]],
         profile: list[dict[str, object]],
         provider_snapshot: dict[str, object],
+        worker_owner_id: str | None,
     ) -> EventMap:
         if version.event_map_json:
             return EventMap.model_validate_json(version.event_map_json)
@@ -190,7 +221,9 @@ class AnalysisRunner:
             profile=profile,
             schema=EventMap.model_json_schema(),
         )
+        await self._require_ownership(version.id, worker_owner_id)
         generated = await self.provider.analyze_event_map(request, provider_snapshot)
+        await self._require_ownership(version.id, worker_owner_id)
         await self._require_generation(version)
         event_map = EventMap.model_validate(
             generated.model_dump(mode="python")
@@ -217,11 +250,25 @@ class AnalysisRunner:
             separators=(",", ":"),
         )
         async with self.database.session() as session:
-            current = await session.get(AnalysisVersion, version.id)
-            if current is None:
-                raise LookupError(f"Unknown analysis version: {version.id}")
-            current.event_map_json = serialized
-            current.event_map_hash = sha256(serialized.encode("utf-8")).hexdigest()
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version.id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(
+                    event_map_json=serialized,
+                    event_map_hash=sha256(serialized.encode("utf-8")).hexdigest(),
+                )
+            )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            stored = await session.execute(statement)
+            if int(stored.rowcount) != 1:
+                await session.rollback()
+                raise LeaseLostError("Analysis worker lease was lost")
             await session.commit()
         version.event_map_json = serialized
         version.event_map_hash = sha256(serialized.encode("utf-8")).hexdigest()
@@ -340,25 +387,65 @@ class AnalysisRunner:
                 await session.commit()
         raise FixedRulesChangedError("Fixed analysis rules changed")
 
-    async def _version(self, version_id: str) -> AnalysisVersion:
+    async def _version(
+        self, version_id: str, worker_owner_id: str | None
+    ) -> AnalysisVersion:
         async with self.database.session() as session:
             version = await session.get(AnalysisVersion, version_id)
             if version is None:
                 raise LookupError(f"Unknown analysis version: {version_id}")
             if version.status != "running":
                 raise ValueError(f"Analysis version is not running: {version.status}")
+            if (
+                worker_owner_id is not None
+                and version.worker_owner_id != worker_owner_id
+            ):
+                raise LeaseLostError("Analysis worker lease was lost")
             return version
 
+    async def _require_ownership(
+        self, version_id: str, worker_owner_id: str | None
+    ) -> None:
+        if worker_owner_id is None:
+            return
+        async with self.database.session() as session:
+            owned = await session.scalar(
+                select(AnalysisVersion.id).where(
+                    AnalysisVersion.id == version_id,
+                    AnalysisVersion.status == "running",
+                    AnalysisVersion.worker_owner_id == worker_owner_id,
+                )
+            )
+        if owned is None:
+            raise LeaseLostError("Analysis worker lease was lost")
+
     async def _save_staged(
-        self, version_id: str, staged: dict[str, object]
+        self,
+        version_id: str,
+        staged: dict[str, object],
+        worker_owner_id: str | None,
     ) -> None:
         async with self.database.session() as session:
-            version = await session.get(AnalysisVersion, version_id)
-            if version is None:
-                raise LookupError(f"Unknown analysis version: {version_id}")
-            version.staged_results_json = json.dumps(
-                staged, ensure_ascii=False, separators=(",", ":")
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version_id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(
+                    staged_results_json=json.dumps(
+                        staged, ensure_ascii=False, separators=(",", ":")
+                    )
+                )
             )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            stored = await session.execute(statement)
+            if int(stored.rowcount) != 1:
+                await session.rollback()
+                raise LeaseLostError("Analysis worker lease was lost")
             await session.commit()
 
     async def _save_profile_candidates(
@@ -366,6 +453,7 @@ class AnalysisRunner:
         version_id: str,
         raw_candidates: list[dict[str, object]],
         segment_ids: set[str],
+        worker_owner_id: str | None,
     ) -> list[dict[str, object]]:
         accepted: list[ProfileCandidate] = []
         verified: list[dict[str, object]] = []
@@ -405,6 +493,19 @@ class AnalysisRunner:
             )
             verified.append(item)
         async with self.database.session() as session:
+            if worker_owner_id is not None:
+                fenced = await session.execute(
+                    update(AnalysisVersion)
+                    .where(
+                        AnalysisVersion.id == version_id,
+                        AnalysisVersion.status == "running",
+                        AnalysisVersion.worker_owner_id == worker_owner_id,
+                    )
+                    .values(worker_owner_id=worker_owner_id)
+                )
+                if int(fenced.rowcount) != 1:
+                    await session.rollback()
+                    raise LeaseLostError("Analysis worker lease was lost")
             await session.execute(
                 delete(ProfileCandidate).where(
                     ProfileCandidate.analysis_version_id == version_id
@@ -414,31 +515,49 @@ class AnalysisRunner:
             await session.commit()
         return verified
 
-    async def _mark_failed(self, version_id: str) -> None:
+    async def _mark_failed(
+        self, version_id: str, worker_owner_id: str | None
+    ) -> None:
         async with self.database.session() as session:
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version_id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(status="failed", error_code="model_analysis_failed")
+            )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            failed = await session.execute(statement)
+            if int(failed.rowcount) != 1:
+                await session.rollback()
+                return
             version = await session.get(AnalysisVersion, version_id)
-            if version is not None and version.status == "running":
-                version.status = "failed"
-                version.error_code = "model_analysis_failed"
-                if version.reanalysis_batch_id is not None:
-                    item = await session.scalar(
-                        select(ReanalysisItem).where(
-                            ReanalysisItem.analysis_version_id == version.id
-                        )
+            if version is None:
+                await session.rollback()
+                return
+            if version.reanalysis_batch_id is not None:
+                item = await session.scalar(
+                    select(ReanalysisItem).where(
+                        ReanalysisItem.analysis_version_id == version.id
                     )
-                    if item is not None:
-                        item.status = "failed"
-                        item.error_code = "model_analysis_failed"
-                    history = await session.get(
-                        ReanalysisBatch, version.reanalysis_batch_id
-                    )
-                    if history is not None:
-                        history.status = "paused_error"
-                job = await session.get(AnalysisJob, version.source_job_id)
-                if job is not None and version.batch_id is None:
-                    job.stage = "failed"
-                    job.error_code = "model_analysis_failed"
-                await session.commit()
+                )
+                if item is not None:
+                    item.status = "failed"
+                    item.error_code = "model_analysis_failed"
+                history = await session.get(
+                    ReanalysisBatch, version.reanalysis_batch_id
+                )
+                if history is not None:
+                    history.status = "paused_error"
+            job = await session.get(AnalysisJob, version.source_job_id)
+            if job is not None and version.batch_id is None:
+                job.stage = "failed"
+                job.error_code = "model_analysis_failed"
+            await session.commit()
 
     @staticmethod
     def _prompt_from_snapshot(

@@ -28,6 +28,8 @@ _PAUSED_HISTORY_STATES = {
     "cancelled",
     "paused",
     "paused_credential_changed",
+    "paused_error",
+    "paused_rules_changed",
     "credential_changed",
 }
 _LEASE_SECONDS = 30
@@ -51,7 +53,7 @@ class AnalysisRequest:
 
 
 class VersionRunner(Protocol):
-    async def run(self, version_id: str): ...
+    async def run(self, version_id: str, worker_owner_id: str): ...
 
 
 class AnalysisTaskCoordinator:
@@ -115,6 +117,7 @@ class AnalysisTaskCoordinator:
         profile_json = json.dumps(
             request.profile_snapshot, ensure_ascii=False, sort_keys=True
         )
+        fixed_rules_hash = PromptComposer.fixed_rules_hash()
         version_id = str(uuid4())
         async with self._condition:
             try:
@@ -171,6 +174,16 @@ class AnalysisTaskCoordinator:
                             raise ValueError(
                                 "History request does not match owning batch snapshot"
                             )
+                        if (
+                            json.loads(owning_run.prompt_snapshot_json)
+                            != request.prompt_snapshot
+                            or json.loads(owning_run.profile_snapshot_json)
+                            != request.profile_snapshot
+                            or owning_run.fixed_rules_hash != fixed_rules_hash
+                        ):
+                            raise ValueError(
+                                "History request does not match owning batch snapshot"
+                            )
                     version = AnalysisVersion(
                         id=version_id,
                         source_job_id=request.source_job_id,
@@ -180,7 +193,7 @@ class AnalysisTaskCoordinator:
                         credential_generation=request.credential_generation,
                         prompt_snapshot_json=prompt_json,
                         profile_snapshot_json=profile_json,
-                        fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+                        fixed_rules_hash=fixed_rules_hash,
                         staged_results_json="{}",
                         priority=request.priority,
                         status="pending",
@@ -301,16 +314,24 @@ class AnalysisTaskCoordinator:
             version_id, _request = await self._claim_next()
             heartbeat = asyncio.create_task(self._heartbeat(version_id))
             try:
-                await runner.run(version_id)
+                await runner.run(version_id, self.owner_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 async with self.database.session() as session:
-                    version = await session.get(AnalysisVersion, version_id)
-                    if version is not None and version.status == "running":
-                        version.status = "failed"
-                        version.error_code = "model_analysis_failed"
-                        await session.commit()
+                    await session.execute(
+                        update(AnalysisVersion)
+                        .where(
+                            AnalysisVersion.id == version_id,
+                            AnalysisVersion.status == "running",
+                            AnalysisVersion.worker_owner_id == self.owner_id,
+                        )
+                        .values(
+                            status="failed",
+                            error_code="model_analysis_failed",
+                        )
+                    )
+                    await session.commit()
             finally:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
@@ -320,6 +341,7 @@ class AnalysisTaskCoordinator:
                         .where(
                             AnalysisVersion.id == version_id,
                             AnalysisVersion.worker_owner_id == self.owner_id,
+                            AnalysisVersion.status != "running",
                         )
                         .values(worker_owner_id=None, lease_expires_at=None)
                     )

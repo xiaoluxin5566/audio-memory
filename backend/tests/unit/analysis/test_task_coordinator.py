@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+import json
 
 import pytest
 from sqlalchemy import select
@@ -18,6 +20,7 @@ from audio_memory.models import (
     ReanalysisBatch,
     ReanalysisItem,
 )
+from audio_memory.prompts.composer import PromptComposer
 
 
 def request(job_id: str, *, batch_id: str | None, priority: int) -> AnalysisRequest:
@@ -55,9 +58,13 @@ async def seed_active_history(
                 provider_id="kimi",
                 model_id="kimi-k2.5",
                 credential_generation=3,
-                prompt_snapshot_json="{}",
-                profile_snapshot_json="[]",
-                fixed_rules_hash="f" * 64,
+                prompt_snapshot_json=json.dumps(
+                    {"meeting": {"version": 2, "content": "meeting"}}
+                ),
+                profile_snapshot_json=json.dumps(
+                    [{"subject_id": "user", "dimension": "role"}]
+                ),
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
                 snapshot_hash="s" * 64,
             )
         )
@@ -139,8 +146,14 @@ async def test_restart_returns_running_request_to_pending(tmp_path) -> None:
     await database.dispose()
 
 
+@pytest.mark.parametrize(
+    "paused_status",
+    ("stopped", "paused_rules_changed", "paused_error"),
+)
 @pytest.mark.asyncio
-async def test_stopped_history_batch_does_not_yield_a_new_item(tmp_path) -> None:
+async def test_paused_history_batch_does_not_yield_a_new_item(
+    tmp_path, paused_status: str
+) -> None:
     database = Database(tmp_path / "stopped.sqlite3")
     await database.create_schema()
     await seed_jobs(database, "job-history")
@@ -153,9 +166,13 @@ async def test_stopped_history_batch_does_not_yield_a_new_item(tmp_path) -> None
                 provider_id="kimi",
                 model_id="kimi-k2.5",
                 credential_generation=3,
-                prompt_snapshot_json="{}",
-                profile_snapshot_json="[]",
-                fixed_rules_hash="f" * 64,
+                prompt_snapshot_json=json.dumps(
+                    {"meeting": {"version": 2, "content": "meeting"}}
+                ),
+                profile_snapshot_json=json.dumps(
+                    [{"subject_id": "user", "dimension": "role"}]
+                ),
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
                 snapshot_hash="s" * 64,
             )
         )
@@ -176,7 +193,7 @@ async def test_stopped_history_batch_does_not_yield_a_new_item(tmp_path) -> None
     async with database.session() as session:
         history_run = await session.get(ReanalysisBatch, "history-run")
         assert history_run is not None
-        history_run.status = "stopped"
+        history_run.status = paused_status
         await session.commit()
 
     with pytest.raises(asyncio.TimeoutError):
@@ -342,6 +359,32 @@ async def test_reanalysis_requires_active_owning_item_and_matching_job(tmp_path)
         await coordinator.submit_reanalysis(
             request("job-request", batch_id="batch-other-job", priority=10)
         )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_must_match_the_owning_run_snapshot(tmp_path) -> None:
+    database = Database(tmp_path / "history-snapshot.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-history-snapshot")
+    await seed_active_history(
+        database,
+        job_id="job-history-snapshot",
+        batch_id="batch-history-snapshot",
+        run_id="run-history-snapshot",
+    )
+    coordinator = AnalysisTaskCoordinator(database)
+    altered = replace(
+        request(
+            "job-history-snapshot",
+            batch_id="batch-history-snapshot",
+            priority=10,
+        ),
+        prompt_snapshot={"meeting": {"version": 3, "content": "altered"}},
+    )
+
+    with pytest.raises(ValueError, match="snapshot"):
+        await coordinator.submit_reanalysis(altered)
     await database.dispose()
 
 
