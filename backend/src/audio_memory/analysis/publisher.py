@@ -172,6 +172,8 @@ class VersionPublisher:
                 version.status = "completed"
                 version.error_code = None
                 version.completed_at = now.isoformat()
+                version.published_card_count = len(visible)
+                version.published_todo_count = todo_count
                 version.worker_owner_id = None
                 version.lease_expires_at = None
                 batch.current_analysis_version_id = version.id
@@ -205,24 +207,30 @@ class VersionPublisher:
     async def _completed_outcome(
         self, session, version: AnalysisVersion, batch_id: str
     ) -> AnalysisOutcome:
-        return AnalysisOutcome(
-            batch_id,
-            int(
+        card_count = version.published_card_count
+        if card_count is None:
+            card_count = int(
                 await session.scalar(
                     select(func.count(Card.id)).where(
                         Card.analysis_version_id == version.id
                     )
                 )
                 or 0
-            ),
-            int(
+            )
+        todo_count = version.published_todo_count
+        if todo_count is None:
+            todo_count = int(
                 await session.scalar(
                     select(func.count(Todo.id)).where(
                         Todo.analysis_version_id == version.id
                     )
                 )
                 or 0
-            ),
+            )
+        return AnalysisOutcome(
+            batch_id,
+            card_count,
+            todo_count,
         )
 
     def _move_first_publication_audio(

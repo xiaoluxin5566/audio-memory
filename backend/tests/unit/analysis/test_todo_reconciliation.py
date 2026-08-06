@@ -80,6 +80,28 @@ def test_user_edited_text_and_due_date_are_preserved() -> None:
     assert old.analysis_version_id == "version-new"
 
 
+def test_user_edited_deadline_does_not_duplicate_stable_source_on_reanalysis() -> None:
+    old = existing_todo(
+        user_edited=True,
+        text="用户自己的描述",
+        due_at="2026-08-15T12:00:00+08:00",
+    )
+
+    first = reconcile_todos("batch-1", [candidate()], [old], [])
+    second = reconcile_todos(
+        "batch-1",
+        [candidate(candidate_id="candidate-later", version_id="version-later")],
+        first,
+        [],
+    )
+
+    assert first == [old]
+    assert second == [old]
+    assert old.text == "用户自己的描述"
+    assert old.due_at == "2026-08-15T12:00:00+08:00"
+    assert old.analysis_version_id == "version-later"
+
+
 def test_manually_completed_todo_stays_completed() -> None:
     old = existing_todo(completed=True, completion_source="user")
 

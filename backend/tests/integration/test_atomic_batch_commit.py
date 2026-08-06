@@ -747,6 +747,76 @@ async def test_publication_keeps_same_source_todos_with_incompatible_deadlines(
 
 
 @pytest.mark.asyncio
+async def test_completed_version_keeps_immutable_todo_count_after_newer_publication(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "todo-outcome.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-todo-outcome", stage="analyzing"))
+        session.add(
+            AnalysisVersion(
+                id="version-todo-old",
+                source_job_id="job-todo-outcome",
+                provider_id="kimi",
+                model_id="model",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json="{}",
+                status="running",
+            )
+        )
+        await session.commit()
+
+    draft = StrictTodoDraft(
+        text="send notes Monday",
+        action="send notes",
+        object="meeting notes",
+        owner_type="user",
+        assignee_text="user",
+        due_at="2026-08-10T09:00:00+08:00",
+        due_text="Monday",
+        intent_type="commitment",
+        source_event_id="event_planning",
+        source_context="explicit commitment",
+        evidence_segment_ids=["seg_0_0"],
+        confidence=0.9,
+    )
+    results = complete_results()
+    results[0] = PublicationResult("todo", should_generate=True, todos=(draft,))
+    publisher = VersionPublisher(database)
+
+    first = await publisher.publish("version-todo-old", results, [])
+    async with database.session() as session:
+        session.add(
+            AnalysisVersion(
+                id="version-todo-new",
+                source_job_id="job-todo-outcome",
+                batch_id=first.batch_id,
+                provider_id="kimi",
+                model_id="model",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json="{}",
+                status="running",
+            )
+        )
+        await session.commit()
+
+    second = await publisher.publish("version-todo-new", results, [])
+    retried_first = await publisher.publish("version-todo-old", results, [])
+
+    assert first.todo_count == 1
+    assert second.todo_count == 1
+    assert retried_first.todo_count == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publication_keeps_same_action_todos_for_different_objects(
     tmp_path: Path,
 ) -> None:

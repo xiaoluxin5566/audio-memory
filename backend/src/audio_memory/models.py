@@ -238,6 +238,8 @@ class AnalysisVersion(Base):
     staged_results_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="{}"
     )
+    published_card_count: Mapped[int | None] = mapped_column(Integer)
+    published_todo_count: Mapped[int | None] = mapped_column(Integer)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     worker_owner_id: Mapped[str | None] = mapped_column(String(36))
     lease_expires_at: Mapped[str | None] = mapped_column(String(40))

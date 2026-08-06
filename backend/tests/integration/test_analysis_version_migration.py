@@ -187,7 +187,8 @@ def test_0005_adds_durable_generation_and_worker_lease_and_downgrades(
             row[1]: row for row in connection.execute("PRAGMA table_info(provider_metadata)")
         }
         version_columns = {
-            row[1]: row for row in connection.execute("PRAGMA table_info(analysis_versions)")
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(analysis_versions)")
         }
         assert provider_columns["credential_generation"][3] == 1
         assert {
@@ -205,10 +206,42 @@ def test_0005_adds_durable_generation_and_worker_lease_and_downgrades(
             row[1] for row in connection.execute("PRAGMA table_info(provider_metadata)")
         }
         version_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(analysis_versions)")
+            row[1]
+            for row in connection.execute("PRAGMA table_info(analysis_versions)")
         }
         assert "worker_owner_id" not in version_columns
         assert "lease_expires_at" not in version_columns
+
+
+def test_0006_adds_immutable_publication_counts_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "published-outcome.sqlite3"
+    config = seed_version_0002_database(database_path)
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        version_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(analysis_versions)")
+        }
+        assert {
+            "published_card_count",
+            "published_todo_count",
+        } <= version_columns.keys()
+        assert connection.execute(
+            "SELECT published_card_count, published_todo_count "
+            "FROM analysis_versions ORDER BY id"
+        ).fetchall() == [(None, None)]
+
+    command.downgrade(config, "0005")
+
+    with sqlite3.connect(database_path) as connection:
+        version_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(analysis_versions)")
+        }
+        assert "published_card_count" not in version_columns
+        assert "published_todo_count" not in version_columns
 
 
 def test_0003_downgrade_restores_0002_data_and_schema(tmp_path: Path) -> None:

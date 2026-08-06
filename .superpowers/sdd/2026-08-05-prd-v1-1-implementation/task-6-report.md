@@ -135,9 +135,12 @@ commit gate below supersedes these pre-report results if counts differ.
 
 ## Migration and compatibility decisions
 
-- No database migration was required. Migration 0003 already provides
-  `analysis_version_id`, todo candidate/tombstone provenance, normalized todo
-  fields, profile candidates, and current-version pointers.
+- Migration 0003 provides `analysis_version_id`, todo candidate/tombstone
+  provenance, normalized todo fields, profile candidates, and current-version
+  pointers. Formal review fix round 1 adds migration 0006 for immutable
+  `published_card_count` and `published_todo_count` fields on each analysis
+  version; migrated legacy completed versions retain nulls and use the
+  compatibility query path.
 - `AnalysisPublisher` remains an import alias to `VersionPublisher` so Task 5
   wiring and existing callers use the new strict implementation without a
   parallel legacy path.
@@ -183,3 +186,56 @@ commit gate below supersedes these pre-report results if counts differ.
   `fixed_rules_changed` remain outside Task 6 because this task did not modify
   the retry API. The stale `ReanalysisItem` recovery/release observation was in
   scope and is closed.
+
+## Formal review fix round 1
+
+### Protected todo deadline identity
+
+- Root cause: reconciliation compared a candidate's immutable source deadline
+  to mutable `Todo.due_at`. Moving a user-edited todo to another calendar date
+  therefore made the same stable source appear incompatible and created a
+  duplicate on every reanalysis.
+- RED command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/unit/analysis/test_todo_reconciliation.py::test_user_edited_deadline_does_not_duplicate_stable_source_on_reanalysis tests/integration/test_atomic_batch_commit.py::test_completed_version_keeps_immutable_todo_count_after_newer_publication -q`
+  failed exactly 2 tests: the first reconciliation returned two todos and the
+  older completed version later returned `todo_count == 0`.
+- GREEN: a protected (`user_edited`) todo with the exact persisted source
+  fingerprint is matched before comparing its mutable display deadline. Its
+  text/deadline remain untouched across repeated reanalysis. Unedited todos
+  still require deadline compatibility, and disambiguated candidates retain
+  their own stable fingerprints, so genuinely incompatible candidates remain
+  separate.
+
+### Immutable completed-publication outcome
+
+- Root cause: `_completed_outcome` counted `Todo.analysis_version_id`, but
+  reconciliation intentionally transfers a stable global todo to the newest
+  version. Retrying an older completed publication therefore changed its
+  previously returned count.
+- RED migration command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/integration/test_analysis_version_migration.py::test_0006_adds_immutable_publication_counts_and_downgrades -q`
+  failed because the outcome columns did not exist.
+- GREEN command: the two behavior regressions plus the migration round-trip
+  passed `3 passed in 0.42s`.
+- GREEN design: publication records card/todo counts on `AnalysisVersion` in
+  the same transaction as cards, todos, the current pointer, and terminal
+  status. Completed retries read those immutable values. Migration 0006 leaves
+  legacy rows nullable and the publisher retains query fallbacks for them.
+- Broader affected-surface check:
+  `tests/unit/analysis/test_todo_reconciliation.py`,
+  `tests/integration/test_atomic_batch_commit.py`, and
+  `tests/integration/test_analysis_version_migration.py` passed
+  `34 passed in 1.31s`.
+
+### Formal fix round 1 final verification
+
+- Focused Task 6 command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/unit/analysis/test_todo_reconciliation.py tests/unit/analysis/test_profile_rebuild.py tests/integration/test_atomic_batch_commit.py tests/integration/test_content_api.py tests/integration/test_feedback_and_clear.py tests/integration/test_analysis_version_migration.py -q`
+  returned `50 passed in 2.12s`.
+- Full backend command:
+  `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
+  returned `360 passed in 7.21s`.
+- `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
+  exited 0 with no output.
+- `git diff --check` exited 0 with no output.
+- `docs/HANDOFF-2026-08-06.md` remains untouched and excluded from this fix.

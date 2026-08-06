@@ -34,7 +34,10 @@ def reconcile_todos(
                 todo
                 for todo in available
                 if _same_source(todo, candidate)
-                and _compatible_due_at(todo.due_at, candidate.due_at)
+                and (
+                    _protected_exact_fingerprint(todo, candidate)
+                    or _compatible_due_at(todo.due_at, candidate.due_at)
+                )
             ),
             None,
         )
@@ -55,6 +58,14 @@ def _same_source(todo: Todo, candidate: TodoCandidate) -> bool:
         and todo.normalized_action == candidate.normalized_action
         and todo.normalized_object == candidate.normalized_object
         and todo.normalized_assignee == candidate.normalized_assignee
+    )
+
+
+def _protected_exact_fingerprint(todo: Todo, candidate: TodoCandidate) -> bool:
+    return (
+        todo.user_edited
+        and todo.source_fingerprint is not None
+        and todo.source_fingerprint == candidate.source_fingerprint
     )
 
 
