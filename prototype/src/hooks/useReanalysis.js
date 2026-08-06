@@ -33,6 +33,7 @@ export function useReanalysis() {
   const loadPreview = useCallback(async () => {
     setLoadingPreview(true)
     setError('')
+    setPreview(null)
     try {
       const next = normalizeReanalysisPreview(await api.reanalysisPreview())
       setPreview(next)
@@ -73,5 +74,12 @@ export function useReanalysis() {
     return batch
   }, [])
 
-  return { current, preview, loadingPreview, error, refreshCurrent, loadPreview, start, stop, resume, retryProfile }
+  const clearState = useCallback(() => {
+    currentRef.current = null
+    setCurrent(null)
+    setPreview(null)
+    setError('')
+  }, [])
+
+  return { current, preview, loadingPreview, error, refreshCurrent, loadPreview, start, stop, resume, retryProfile, clearState }
 }

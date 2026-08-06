@@ -5,7 +5,7 @@ export function ReanalysisModal({ preview, loading, error, current, view, onClos
     <h1 id="reanalysis-modal-title">重新分析历史</h1>
     {loading && <p>正在读取本次重新分析范围…</p>}
     {error && <div className="inline-error"><b>{error}</b></div>}
-    {preview && <>
+    {preview && !loading && !error && <>
       <p>将使用当前模型和最新 Prompt 重新生成历史结果；原始音频与转写不会变化。</p>
       <div className="reanalysis-facts"><b>{preview.batchCount} 个上传批次 · {preview.fileCount} 个音频文件</b><span>{preview.characterCount.toLocaleString('zh-CN')} 个字符</span><span>{preview.modelLabel}</span><span>预计 {preview.callRange}</span></div>
       <div className="reanalysis-prompts"><b>Prompt 版本</b><div>{preview.promptVersions.map((prompt) => <span key={prompt.sceneId}>{prompt.label}</span>)}</div></div>
@@ -20,7 +20,7 @@ export function ReanalysisModal({ preview, loading, error, current, view, onClos
       {view?.state === 'paused' && <button className="primary" onClick={onAction}>继续重新分析</button>}
       {current?.status === 'stopped' && <button className="primary" onClick={onAction}>继续剩余项目</button>}
       {view?.actionLabel === '重试画像更新' && <button className="primary" onClick={onAction}>重试画像更新</button>}
-      {!current || view?.state === 'finished' ? <button className="primary" disabled={!preview?.previewToken || preview.blockers.length > 0} onClick={onConfirm}>确认重新分析</button> : null}
+      {!current || view?.state === 'finished' ? <button className="primary" disabled={loading || Boolean(error) || !preview?.previewToken || preview?.blockers?.length > 0} onClick={onConfirm}>确认重新分析</button> : null}
     </div>
   </section></div>
 }

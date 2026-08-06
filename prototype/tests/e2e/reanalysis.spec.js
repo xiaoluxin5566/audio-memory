@@ -74,3 +74,69 @@ test('a terminal batch exposes a fresh run and stopped work can continue', async
   expect(previewReads).toBeGreaterThanOrEqual(2)
   expect(created).toBe(true)
 })
+
+test('clearing terminal history immediately disables the reanalysis entry', async ({ page }) => {
+  let cleared = false
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: cleared ? { todos: [], days: [] } : { todos: [], days: [] } })
+    if (pathname === '/api/history' && request.method() === 'DELETE') { cleared = true; return route.fulfill({ status: 204 }) }
+    if (pathname === '/api/history') return route.fulfill({ json: cleared ? { days: [] } : { days: [{ date: '2026年8月6日', audio: [{ id: 'f1', original_name: '会议.mp3', duration_ms: 1000, uploaded_at: '2026-08-06T10:00:00Z' }] }] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ json: cleared ? null : { id: 'finished-1', status: 'completed', total: 1, pending: 0, running: 0, succeeded: 1, failed: 0, stopped: 0 } })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/history')
+  await expect(page.getByRole('button', { name: '重新分析历史' })).toBeEnabled()
+  await page.getByRole('button', { name: '清除所有历史' }).click()
+  await page.getByRole('button', { name: '永久清除' }).click()
+  await expect(page.getByRole('button', { name: '重新分析历史' })).toBeDisabled()
+})
+
+test('terminal preview hides stale costs and disables confirmation until a fresh preview arrives', async ({ page }) => {
+  let previewReads = 0
+  let releaseFreshPreview
+  const freshPreview = new Promise((resolve) => { releaseFreshPreview = resolve })
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { todos: [], days: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [{ date: '2026年8月6日', audio: [{ id: 'f1', original_name: '会议.mp3', duration_ms: 1000, uploaded_at: '2026-08-06T10:00:00Z' }] }] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ json: { id: 'finished-1', status: 'completed', total: 1, pending: 0, running: 0, succeeded: 1, failed: 0, stopped: 0 } })
+    if (pathname === '/api/history/reanalysis-batches/preview') {
+      previewReads += 1
+      if (previewReads === 2) await freshPreview
+      if (previewReads === 3) return route.fulfill({ status: 500, json: { detail: { message: '预览读取失败' } } })
+      return route.fulfill({ json: previewReads === 1
+        ? { source_batch_count: 1, audio_file_count: 1, transcript_character_count: 10, provider_display_name: 'OldModel', model_id: 'old-1', prompt_summary: { todo: { version: 1 } }, estimated_calls_min: 1, estimated_calls_max: 1, blockers: [], preview_token: 'old-token' }
+        : { source_batch_count: 1, audio_file_count: 2, transcript_character_count: 20, provider_display_name: 'FreshModel', model_id: 'fresh-2', prompt_summary: { todo: { version: 2 } }, estimated_calls_min: 2, estimated_calls_max: 3, blockers: [], preview_token: 'fresh-token' } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByText('OldModel · old-1')).toBeVisible()
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByText('正在读取本次重新分析范围…')).toBeVisible()
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeDisabled()
+  await expect(page.getByText('OldModel · old-1')).toHaveCount(0)
+  releaseFreshPreview()
+  await expect(page.getByText('FreshModel · fresh-2')).toBeVisible()
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeEnabled()
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByText('预览读取失败')).toBeVisible()
+  await expect(page.getByText('FreshModel · fresh-2')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeDisabled()
+})

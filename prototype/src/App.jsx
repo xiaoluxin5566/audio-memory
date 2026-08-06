@@ -260,7 +260,7 @@ export function App() {
       {route === 'prompts' && <PromptSettings state={state} refresh={refreshPrompts} scene={promptScene} setScene={(id) => { setPromptScene(id); setPromptDraft(state.prompts[id]?.current || ''); setPromptEditing(false); }} draft={promptDraft} setDraft={setPromptDraft} editing={promptEditing} setEditing={setPromptEditing} onToast={setToast} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={() => setReanalysisOpen(false)} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
-      {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
+      {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
