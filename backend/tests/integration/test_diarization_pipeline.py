@@ -16,6 +16,7 @@ from audio_memory.api.jobs import router
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.diarization.engine import SpeakerTurn
+from audio_memory.diarization.alignment import AlignedTranscriptSegment, Word
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.engine import (
@@ -27,6 +28,7 @@ from audio_memory.transcription.engine import (
     valid_chunk_segments,
 )
 from audio_memory.transcription.checkpoints import TranscriptionService
+from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 
 
 def test_installed_sherpa_runtime_imports() -> None:
@@ -257,7 +259,9 @@ async def test_selective_refiner_alone_requests_word_timestamps(
                 speaker_id="speaker_00",
                 start_ms=2_000,
                 end_ms=3_000,
-                text="默认文字",
+                text="",
+                risk_state="HIGH_RISK_PENDING",
+                is_reliable=False,
             )
         )
         await session.commit()
@@ -270,10 +274,10 @@ async def test_selective_refiner_alone_requests_word_timestamps(
             {
                 "start": 0.0,
                 "end": 1.0,
-                "text": "默认文字",
+                "text": "精转写结果",
                 "words": [
-                    {"word": "默认", "start": 0.1, "end": 0.4},
-                    {"word": "文字", "start": 0.4, "end": 0.9},
+                    {"word": "精转写", "start": 0.1, "end": 0.4},
+                    {"word": "结果", "start": 0.4, "end": 0.9},
                 ],
             }
         ]
@@ -288,7 +292,7 @@ async def test_selective_refiner_alone_requests_word_timestamps(
     refined = await refiner.refine(["file-1:0"])
 
     assert calls == [True]
-    assert refined[0].text == "默认文字"
+    assert refined[0].text == "精转写结果"
     assert [(item.start_ms, item.end_ms) for item in refined[0].words] == [
         (2_100, 2_400),
         (2_400, 2_900),
@@ -350,7 +354,7 @@ async def test_selective_refinement_failure_preserves_default_segment(
     refined = await refiner.refine(["file-1:0"])
 
     assert [(item.start_ms, item.end_ms, item.text, item.words) for item in refined] == [
-        (2_000, 3_000, "不能丢的原文", ()),
+        (2_000, 3_000, "", ()),
     ]
     assert "diagnostic=selective_refinement_failed" in caplog.text
     await database.dispose()
@@ -866,4 +870,205 @@ async def test_whisper_pipeline_continues_when_vad_fails(
     ]
     assert "diagnostic=vad_failed" in caplog.text
     await engine.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_risk_gate_refines_one_repeated_segment_replaces_text_and_never_requeues(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="f" * 64,
+                duration_ms=10_000,
+                speech_mapping_json=(
+                    '[{"compact_start_ms":0,"compact_end_ms":10000,'
+                    '"source_start_ms":0,"source_end_ms":10000}]'
+                ),
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="重复的转写文本",
+                    words_json="[]",
+                )
+                for index in range(3)
+            ]
+        )
+        await session.commit()
+
+    class SafeRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=4_000,
+                    end_ms=5_000,
+                    text="精转写后的不同文本",
+                    words=(Word("精转写后的不同文本", 4_000, 5_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    refiner = SafeRefiner()
+    gate = TranscriptionRiskGateService(database)
+
+    metrics = await gate.apply("job-1", refiner)
+    await gate.apply("job-1", refiner)
+
+    async with database.session() as session:
+        rows = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert refiner.calls == ["file-1:2"]
+    assert metrics.queued == 1
+    assert (rows[1].is_reliable, rows[1].reliability_weight) == (True, 0.6)
+    assert (rows[2].risk_state, rows[2].is_reliable, rows[2].text) == (
+        "POST_EDIT_PASSED",
+        True,
+        "精转写后的不同文本",
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_risk_gate_isolates_repeated_refinement_and_downgrades_queue_overflow(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-overflow.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="g" * 64,
+                duration_ms=30_000,
+                speech_mapping_json=(
+                    '[{"compact_start_ms":0,"compact_end_ms":30000,'
+                    '"source_start_ms":0,"source_end_ms":30000}]'
+                ),
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="仍然重复的转写文本",
+                    words_json="[]",
+                )
+                for index in range(13)
+            ]
+        )
+        await session.commit()
+
+    class RepeatingRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="仍然重复的转写文本",
+                    words=(
+                        Word(
+                            "仍然重复的转写文本",
+                            index * 2_000,
+                            index * 2_000 + 1_000,
+                        ),
+                    ),
+                    speaker_id=None,
+                )
+                for index, _ in enumerate(segment_uids, start=2)
+            ]
+
+    refiner = RepeatingRefiner()
+    metrics = await TranscriptionRiskGateService(database).apply("job-1", refiner)
+
+    async with database.session() as session:
+        rows = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert len(refiner.calls) == 10
+    assert metrics.overflowed == 1
+    assert all(item.risk_state == "POST_EDIT_FAILED" for item in rows[2:12])
+    assert all(item.is_reliable is False and item.text == "" for item in rows[2:12])
+    assert (rows[12].risk_state, rows[12].is_reliable, rows[12].reliability_weight) == (
+        None,
+        True,
+        0.6,
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_transcription_does_not_enter_analysis_when_risk_gate_fails(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-stage.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        await session.commit()
+
+    class EmptyEngine:
+        async def transcribe_file(self, _file, _resume_from):
+            if False:
+                yield None
+
+    class FailingRiskGate:
+        async def apply(self, _job_id, _refiner):
+            raise RuntimeError("risk gate unavailable")
+
+    service = TranscriptionService(
+        database,
+        risk_gate=FailingRiskGate(),
+        refiner=object(),
+    )
+    with pytest.raises(RuntimeError, match="risk gate unavailable"):
+        await service.run_job("job-1", EmptyEngine())
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, "job-1")
+    assert job is not None
+    assert job.stage == "interrupted"
     await database.dispose()

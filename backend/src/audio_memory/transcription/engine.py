@@ -28,6 +28,7 @@ from audio_memory.diarization.engine import OfflineDiarizationEngine, SpeakerTur
 from audio_memory.models import JobFile, TempFileManifest, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
 from audio_memory.transcription.eta import TranscriptionEtaTracker
+from audio_memory.transcription.risk_gate import EnergyInterval
 from audio_memory.uploads.cleanup import assert_staging_path
 
 
@@ -36,6 +37,8 @@ CHUNK_SEGMENT_STRIDE = 10_000
 DEFAULT_SPEECH_PADDING_MS = 500
 MAX_SPEECH_WINDOW_MS = 30 * 60 * 1000
 SPEECH_WINDOW_OVERLAP_MS = 30 * 1000
+ENERGY_BUCKET_MS = 1_000
+ENERGY_SIGNAL_THRESHOLD = 1e-5
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +137,7 @@ class VoiceActivityDetector:
 
     def __init__(self, model: Path) -> None:
         self.model = model
+        self.last_energy_intervals: list[EnergyInterval] = []
 
     def detect(self, path: Path) -> list[SpeechInterval]:
         if not self.model.is_file():
@@ -179,6 +183,28 @@ class VoiceActivityDetector:
             raise RuntimeError("Unable to open the VAD audio stream")
 
         intervals: list[SpeechInterval] = []
+        energy_sums: dict[int, float] = {}
+        energy_counts: dict[int, int] = {}
+        decoded_samples = 0
+        samples_per_bucket = self.SAMPLE_RATE * ENERGY_BUCKET_MS // 1000
+
+        def accumulate_energy(samples) -> None:
+            nonlocal decoded_samples
+            sample_index = 0
+            while sample_index < len(samples):
+                bucket = (decoded_samples + sample_index) // samples_per_bucket
+                bucket_end = (bucket + 1) * samples_per_bucket
+                take = min(
+                    len(samples) - sample_index,
+                    bucket_end - (decoded_samples + sample_index),
+                )
+                bucket_samples = samples[sample_index : sample_index + take]
+                energy_sums[bucket] = energy_sums.get(bucket, 0.0) + float(
+                    np.dot(bucket_samples, bucket_samples)
+                )
+                energy_counts[bucket] = energy_counts.get(bucket, 0) + take
+                sample_index += take
+            decoded_samples += len(samples)
 
         def drain_completed_segments() -> None:
             while not vad.empty():
@@ -204,6 +230,7 @@ class VoiceActivityDetector:
                 np.float32
             )
             samples /= 32768.0
+            accumulate_energy(samples)
             if sample_count < window_samples:
                 samples = np.pad(samples, (0, window_samples - sample_count))
             vad.accept_waveform(samples)
@@ -219,6 +246,23 @@ class VoiceActivityDetector:
 
         vad.flush()
         drain_completed_segments()
+        self.last_energy_intervals = [
+            EnergyInterval(
+                bucket * ENERGY_BUCKET_MS,
+                min(
+                    (bucket + 1) * ENERGY_BUCKET_MS,
+                    round(decoded_samples / self.SAMPLE_RATE * 1000),
+                ),
+                energy_sums[bucket] / energy_counts[bucket] >= ENERGY_SIGNAL_THRESHOLD,
+            )
+            for bucket in sorted(energy_sums)
+            if energy_counts[bucket] > 0
+            and min(
+                (bucket + 1) * ENERGY_BUCKET_MS,
+                round(decoded_samples / self.SAMPLE_RATE * 1000),
+            )
+            > bucket * ENERGY_BUCKET_MS
+        ]
         return intervals
 
 
@@ -631,11 +675,14 @@ class SelectiveRefiner:
                 words = self._source_words(transcript, raw_segments)
                 if not words:
                     raise RuntimeError("Selective refinement returned no word timestamps")
+                text = self._source_text(raw_segments, words)
+                if not text:
+                    raise RuntimeError("Selective refinement returned no text")
                 refined.append(
                     AlignedTranscriptSegment(
                         start_ms=transcript.start_ms,
                         end_ms=transcript.end_ms,
-                        text=transcript.text,
+                        text=text,
                         words=tuple(words),
                         speaker_id=transcript.speaker_id,
                     )
@@ -653,7 +700,7 @@ class SelectiveRefiner:
                     AlignedTranscriptSegment(
                         start_ms=transcript.start_ms,
                         end_ms=transcript.end_ms,
-                        text=transcript.text,
+                        text="",
                         words=(),
                         speaker_id=transcript.speaker_id,
                     )
@@ -699,6 +746,17 @@ class SelectiveRefiner:
                     )
                 )
         return words
+
+    @staticmethod
+    def _source_text(
+        raw_segments: list[dict[str, object]], words: list[Word]
+    ) -> str:
+        text = "".join(
+            str(raw_segment.get("text", "")).strip()
+            for raw_segment in raw_segments
+            if isinstance(raw_segment, dict)
+        ).strip()
+        return text or "".join(word.text for word in words).strip()
 
     @staticmethod
     async def _extract_segment(
@@ -908,6 +966,10 @@ class MLXWhisperEngine:
                     padding_ms=self.speech_padding_ms,
                 )
                 await self._persist_speech_mapping(file, mapping)
+                await self._persist_vad_energy(
+                    file,
+                    getattr(self.voice_activity_detector, "last_energy_intervals", []),
+                )
                 speech_intervals = build_processing_windows(canonical_intervals)
                 ownership_intervals = build_ownership_windows(speech_intervals)
                 chunks = await self._extract_speech_intervals(
@@ -919,6 +981,7 @@ class MLXWhisperEngine:
                 ]
             else:
                 await self._persist_speech_mapping(file, [])
+                await self._persist_vad_energy(file, [])
                 chunks = await self._normalize_to_chunks(source, chunk_dir)
                 source_offsets = [
                     index * WHISPER_CHUNK_SECONDS * 1000
@@ -969,7 +1032,11 @@ class MLXWhisperEngine:
                     continue
                 started = time.monotonic()
                 raw_segments = await loop.run_in_executor(
-                    self._executor, _transcribe_worker, str(chunk), self.model_id,
+                    self._executor,
+                    _transcribe_worker,
+                    str(chunk),
+                    self.model_id,
+                    False,
                 )
                 current_segments = [
                     segment
@@ -1148,6 +1215,23 @@ class MLXWhisperEngine:
             stored = await session.get(JobFile, file.id)
             if stored is not None:
                 stored.speech_mapping_json = serialized
+                await session.commit()
+
+    async def _persist_vad_energy(
+        self,
+        file: JobFile,
+        intervals: list[EnergyInterval],
+    ) -> None:
+        serialized = json.dumps(
+            [asdict(item) for item in intervals],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        file.vad_energy_json = serialized
+        async with self.database.session() as session:
+            stored = await session.get(JobFile, file.id)
+            if stored is not None:
+                stored.vad_energy_json = serialized
                 await session.commit()
 
     async def _existing_transcript_signatures(

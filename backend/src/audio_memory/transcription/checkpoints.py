@@ -13,6 +13,10 @@ from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
 from audio_memory.transcription.eta import TranscriptionEtaTracker
+from audio_memory.transcription.risk_service import (
+    SegmentRefiner,
+    TranscriptionRiskGateService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,10 +28,17 @@ class TranscriptionEngine(Protocol):
 
 class TranscriptionService:
     def __init__(
-        self, database: Database, *, eta_tracker: TranscriptionEtaTracker | None = None
+        self,
+        database: Database,
+        *,
+        eta_tracker: TranscriptionEtaTracker | None = None,
+        risk_gate: TranscriptionRiskGateService | None = None,
+        refiner: SegmentRefiner | None = None,
     ) -> None:
         self.database = database
         self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
+        self.risk_gate = risk_gate
+        self.refiner = refiner
 
     async def run_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         files = await self._files(job_id)
@@ -36,6 +47,10 @@ class TranscriptionService:
                 resume_from = await self._resume_index(file.id)
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
+            if self.risk_gate is not None:
+                if self.refiner is None:
+                    raise RuntimeError("Transcription risk gate requires a segment refiner")
+                await self.risk_gate.apply(job_id, self.refiner)
         except asyncio.CancelledError:
             self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
