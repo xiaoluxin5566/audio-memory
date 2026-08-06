@@ -78,11 +78,22 @@ def check_whisper(app_data: Path) -> bool:
         config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
         if not isinstance(config, dict) or config.get("model_type") != "whisper":
             return False
+        blob_root = snapshot.parent.parent / "blobs"
         for item in files:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 return False
-            path = (snapshot / item["path"]).resolve()
-            if snapshot not in path.parents or not _valid_file(path, item):
+            relative = Path(item["path"])
+            if relative.is_absolute() or ".." in relative.parts:
+                return False
+            path = snapshot / relative
+            resolved = path.resolve()
+            allowed = (
+                resolved == snapshot
+                or snapshot in resolved.parents
+                or resolved == blob_root
+                or blob_root in resolved.parents
+            )
+            if not allowed or not _valid_file(path, item):
                 return False
         return True
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
