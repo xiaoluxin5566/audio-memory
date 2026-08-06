@@ -11,10 +11,23 @@ export async function uploadFile(
   body.append('file', file, file.name)
   return new Promise((resolve, reject) => {
     let refreshed = false
+    let transportRetries = 0
+
+    function retryTransport(errorCode, message) {
+      if (transportRetries < 1) {
+        transportRetries += 1
+        send()
+        return
+      }
+      const error = new Error(message)
+      error.code = errorCode
+      reject(error)
+    }
 
     function send() {
       const request = new XMLHttpRequest()
       request.open('POST', `/api/jobs/${encodeURIComponent(jobId)}/files`)
+      request.timeout = 120_000
       for (const [name, value] of Object.entries(localHeaders)) {
         request.setRequestHeader(name, value)
       }
@@ -49,9 +62,10 @@ export async function uploadFile(
         reject(error)
       })
       request.addEventListener('error', () => {
-        const error = new Error('网络连接失败，请重新上传')
-        error.code = 'network_error'
-        reject(error)
+        retryTransport('network_error', '网络连接失败，请重新上传')
+      })
+      request.addEventListener('timeout', () => {
+        retryTransport('network_timeout', '上传超时，请重试')
       })
       request.send(body)
     }

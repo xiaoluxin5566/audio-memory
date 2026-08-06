@@ -64,7 +64,13 @@ export async function apiRequest(path, options = {}) {
       ...localHeaders,
     },
   })
-  let response = await send()
+  let response
+  try {
+    response = await send()
+  } catch (error) {
+    if (!isMutation) throw error
+    response = await send()
+  }
   if (isMutation && await isInvalidSession(response)) {
     localHeaders = await refreshLocalSessionHeaders(
       actionKey,

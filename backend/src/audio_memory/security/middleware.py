@@ -15,6 +15,7 @@ from python_multipart.multipart import MultipartParser
 from audio_memory.security.local_session import (
     IdempotencyClaim,
     LocalSessionSecurity,
+    SessionCapacityError,
     StoredResponse,
 )
 
@@ -44,7 +45,6 @@ class LocalWebSecurityMiddleware:
             f"localhost:{allowed_port}",
             f"[::1]:{allowed_port}",
         }
-        self.allowed_origins = {f"http://{host}" for host in self.allowed_hosts}
 
     async def __call__(self, scope: dict, receive, send) -> None:
         if scope["type"] != "http":
@@ -56,16 +56,26 @@ class LocalWebSecurityMiddleware:
             return
 
         headers = _headers(scope)
-        if not self._trusted_host(headers):
+        trusted_host = self._trusted_host(headers)
+        if trusted_host is None:
             await _send_error(send, 403, "untrusted_host", "Untrusted local Host")
             return
 
         method = scope["method"].upper()
         if path == "/api/session" and method == "GET":
-            if not self._trusted_optional_origin(headers):
+            if not self._trusted_optional_origin(headers, trusted_host):
                 await _send_error(send, 403, "untrusted_origin", "Untrusted Origin")
                 return
-            token = await asyncio.to_thread(self.security.issue_session)
+            try:
+                token = await asyncio.to_thread(self.security.issue_session)
+            except SessionCapacityError:
+                await _send_error(
+                    send,
+                    429,
+                    "session_capacity",
+                    "Local session capacity reached; retry after an existing session expires",
+                )
+                return
             body = json.dumps({"token": token}, separators=(",", ":")).encode()
             await send(
                 {
@@ -84,7 +94,7 @@ class LocalWebSecurityMiddleware:
         if method not in MUTATION_METHODS:
             await self.app(scope, receive, send)
             return
-        if not self._trusted_required_origin(headers):
+        if not self._trusted_required_origin(headers, trusted_host):
             await _send_error(send, 403, "untrusted_origin", "Trusted Origin required")
             return
 
@@ -107,7 +117,7 @@ class LocalWebSecurityMiddleware:
         idempotency_key = key_value.decode("ascii")
 
         body_file, body_hash = await _capture_body(receive, headers)
-        body_hash = _request_hash(scope, body_hash)
+        body_hash = _request_hash(scope, headers, body_hash)
         endpoint = _endpoint(scope)
         claim = await asyncio.to_thread(
             self.security.claim,
@@ -170,33 +180,43 @@ class LocalWebSecurityMiddleware:
         )
         await _send_stored(send, stored)
 
-    def _trusted_host(self, headers: list[tuple[bytes, bytes]]) -> bool:
+    def _trusted_host(self, headers: list[tuple[bytes, bytes]]) -> str | None:
         host = _single_header(headers, b"host")
         if host is None:
-            return False
+            return None
         try:
-            return host.decode("ascii").lower() in self.allowed_hosts
+            decoded = host.decode("ascii").lower()
         except UnicodeDecodeError:
-            return False
+            return None
+        return decoded if decoded in self.allowed_hosts else None
 
-    def _trusted_optional_origin(self, headers: list[tuple[bytes, bytes]]) -> bool:
+    def _trusted_optional_origin(
+        self, headers: list[tuple[bytes, bytes]], trusted_host: str
+    ) -> bool:
+        if any(
+            name == b"sec-fetch-site" and value.strip().lower() == b"cross-site"
+            for name, value in headers
+        ):
+            return False
         origins = [value for name, value in headers if name == b"origin"]
         if not origins:
             return True
-        return len(origins) == 1 and self._origin_allowed(origins[0])
+        return len(origins) == 1 and self._origin_allowed(origins[0], trusted_host)
 
-    def _trusted_required_origin(self, headers: list[tuple[bytes, bytes]]) -> bool:
+    def _trusted_required_origin(
+        self, headers: list[tuple[bytes, bytes]], trusted_host: str
+    ) -> bool:
         origins = [value for name, value in headers if name == b"origin"]
-        return len(origins) == 1 and self._origin_allowed(origins[0])
+        return len(origins) == 1 and self._origin_allowed(origins[0], trusted_host)
 
-    def _origin_allowed(self, raw_origin: bytes) -> bool:
+    def _origin_allowed(self, raw_origin: bytes, trusted_host: str) -> bool:
         try:
             origin = raw_origin.decode("ascii")
             parsed = urlsplit(origin)
         except (UnicodeDecodeError, ValueError):
             return False
         return (
-            origin.lower() in self.allowed_origins
+            origin.lower() == f"http://{trusted_host}"
             and parsed.scheme == "http"
             and parsed.username is None
             and parsed.password is None
@@ -249,13 +269,46 @@ def _endpoint(scope: dict) -> str:
     return f"{scope['method'].upper()} {scope.get('path', '')}"
 
 
-def _request_hash(scope: dict, body_hash: str) -> str:
+def _request_hash(
+    scope: dict, headers: list[tuple[bytes, bytes]], body_hash: str
+) -> str:
     digest = hashlib.sha256()
     digest.update(b"query\0")
     digest.update(scope.get("query_string", b""))
+    for name, value in headers:
+        if name == b"content-type":
+            normalized_value = _normalized_content_type(value)
+        elif name == b"x-configuration-session":
+            normalized_value = value
+        else:
+            continue
+        digest.update(b"\0header\0")
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(len(normalized_value).to_bytes(4, "big"))
+        digest.update(normalized_value)
     digest.update(b"\0body\0")
     digest.update(body_hash.encode("ascii"))
     return digest.hexdigest()
+
+
+def _normalized_content_type(value: bytes) -> bytes:
+    try:
+        decoded = value.decode("ascii")
+    except UnicodeDecodeError:
+        return value
+    message = Message()
+    message["content-type"] = decoded
+    media_type = message.get_content_type().lower()
+    parameters = sorted(
+        (name.lower(), str(parameter_value))
+        for name, parameter_value in (message.get_params(header="content-type") or [])[1:]
+        if name.lower() != "boundary"
+    )
+    normalized = media_type + "".join(
+        f";{name}={parameter_value}" for name, parameter_value in parameters
+    )
+    return normalized.encode("ascii")
 
 
 async def _capture_body(receive, headers: list[tuple[bytes, bytes]]):

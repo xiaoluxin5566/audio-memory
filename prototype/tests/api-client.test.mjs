@@ -133,6 +133,29 @@ test('an expired fetch session refreshes once and retries the same action key', 
 })
 
 
+test('response-lost fetch retries once with the original action key', async () => {
+  const client = await import(`../src/api/client.js?transport-fetch=${Date.now()}`)
+  const originalFetch = globalThis.fetch
+  const actions = []
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/session') return Response.json({ token: 'transport-token' })
+    actions.push(options.headers)
+    if (actions.length === 1) throw new TypeError('response lost after commit')
+    return Response.json({ ok: true }, { status: 201 })
+  }
+  try {
+    await client.apiRequest('/jobs', { method: 'POST' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(actions.length, 2)
+  assert.match(actions[0]['Idempotency-Key'], /^[0-9a-f-]{36}$/)
+  assert.equal(actions[0]['Idempotency-Key'], actions[1]['Idempotency-Key'])
+  assert.equal(actions[0]['X-Audio-Memory-Session'], actions[1]['X-Audio-Memory-Session'])
+})
+
+
 test('expired XHR upload session refreshes and retries the explicit action key', async () => {
   const originalFetch = globalThis.fetch
   const OriginalXHR = globalThis.XMLHttpRequest
@@ -195,4 +218,63 @@ test('expired XHR upload session refreshes and retries the explicit action key',
   assert.equal(requests[0].headers['Idempotency-Key'], 'upload-retry-key')
   assert.equal(requests[1].headers['X-Audio-Memory-Session'], 'fresh-upload-token')
   assert.equal(requests[1].headers['Idempotency-Key'], 'upload-retry-key')
+})
+
+
+test('network-timeout XHR upload retries once with the original action key', async () => {
+  const originalFetch = globalThis.fetch
+  const OriginalXHR = globalThis.XMLHttpRequest
+  const requests = []
+
+  class FakeXHR {
+    constructor() {
+      this.headers = {}
+      this.listeners = {}
+      this.upload = { addEventListener() {} }
+      requests.push(this)
+    }
+
+    open(method, url) {
+      this.method = method
+      this.url = url
+    }
+
+    setRequestHeader(name, value) {
+      this.headers[name] = value
+    }
+
+    addEventListener(name, listener) {
+      this.listeners[name] = listener
+    }
+
+    send(body) {
+      this.body = body
+      if (requests.length === 1) {
+        queueMicrotask(() => this.listeners.timeout())
+      } else {
+        this.status = 201
+        this.response = { id: 'file-after-replay' }
+        queueMicrotask(() => this.listeners.load())
+      }
+    }
+  }
+
+  globalThis.fetch = async () => Response.json({ token: 'xhr-transport-token' })
+  globalThis.XMLHttpRequest = FakeXHR
+  try {
+    const upload = await import(`../src/api/upload.js?xhr-transport=${Date.now()}`)
+    const file = new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' })
+    await upload.uploadFile('job-1', file, { idempotencyKey: 'xhr-response-lost' })
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.XMLHttpRequest = OriginalXHR
+  }
+
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].headers['Idempotency-Key'], 'xhr-response-lost')
+  assert.equal(requests[1].headers['Idempotency-Key'], 'xhr-response-lost')
+  assert.equal(
+    requests[0].headers['X-Audio-Memory-Session'],
+    requests[1].headers['X-Audio-Memory-Session'],
+  )
 })

@@ -14,6 +14,11 @@ from typing import Literal
 SESSION_TTL_SECONDS = 24 * 60 * 60
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 MAX_IDEMPOTENCY_RECORDS = 1000
+MAX_LIVE_SESSIONS = 1000
+
+
+class SessionCapacityError(RuntimeError):
+    """Raised when issuing another session would exceed the live-session cap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,11 +48,13 @@ class LocalSessionSecurity:
         session_ttl_seconds: int = SESSION_TTL_SECONDS,
         idempotency_ttl_seconds: int = IDEMPOTENCY_TTL_SECONDS,
         max_idempotency_records: int = MAX_IDEMPOTENCY_RECORDS,
+        max_live_sessions: int = MAX_LIVE_SESSIONS,
     ) -> None:
         self.storage = storage
         self.session_ttl_seconds = session_ttl_seconds
         self.idempotency_ttl_seconds = idempotency_ttl_seconds
         self.max_idempotency_records = max_idempotency_records
+        self.max_live_sessions = max_live_sessions
         self._initialized = False
         self._initialization_lock = threading.Lock()
 
@@ -76,6 +83,8 @@ class LocalSessionSecurity:
                     token_hash TEXT PRIMARY KEY,
                     expires_at REAL NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS ix_local_sessions_expires_at
+                ON local_sessions (expires_at);
                 CREATE TABLE IF NOT EXISTS idempotency_records (
                     session_hash TEXT NOT NULL,
                     endpoint TEXT NOT NULL,
@@ -103,7 +112,13 @@ class LocalSessionSecurity:
         token = secrets.token_urlsafe(32)
         now = time.time()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM local_sessions WHERE expires_at <= ?", (now,))
+            live_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM local_sessions"
+            ).fetchone()["count"]
+            if live_count >= self.max_live_sessions:
+                raise SessionCapacityError("live local-session capacity reached")
             connection.execute(
                 "INSERT INTO local_sessions (token_hash, expires_at) VALUES (?, ?)",
                 (self.token_hash(token), now + self.session_ttl_seconds),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,8 @@ def protected_app(
     gate: asyncio.Event | None = None,
     *,
     max_records: int = 1000,
+    max_sessions: int = 1000,
+    session_ttl_seconds: int = 24 * 60 * 60,
 ):
     try:
         from audio_memory.security.local_session import LocalSessionSecurity
@@ -30,7 +33,12 @@ def protected_app(
         pytest.fail("the local web security boundary has not been implemented")
 
     app = FastAPI()
-    security = LocalSessionSecurity(storage, max_idempotency_records=max_records)
+    security = LocalSessionSecurity(
+        storage,
+        max_idempotency_records=max_records,
+        max_live_sessions=max_sessions,
+        session_ttl_seconds=session_ttl_seconds,
+    )
     app.add_middleware(
         LocalWebSecurityMiddleware,
         security=security,
@@ -198,6 +206,76 @@ async def test_exact_ipv4_ipv6_and_localhost_origins_are_allowed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "cross_origin"),
+    [
+        ("http://127.0.0.1:8765", "http://localhost:8765"),
+        ("http://127.0.0.1:8765", "http://[::1]:8765"),
+        ("http://localhost:8765", "http://127.0.0.1:8765"),
+        ("http://localhost:8765", "http://[::1]:8765"),
+        ("http://[::1]:8765", "http://127.0.0.1:8765"),
+        ("http://[::1]:8765", "http://localhost:8765"),
+    ],
+)
+async def test_mutation_origin_must_match_the_validated_host(
+    tmp_path: Path, base_url: str, cross_origin: str
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
+        token = await issue_session(client, origin=base_url)
+        response = await client.post(
+            "/api/effect",
+            headers=mutation_headers(token, "cross-pair", origin=cross_origin),
+            json={"value": "must not run"},
+        )
+
+    assert response.status_code == 403
+    assert calls == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "cross_origin"),
+    [
+        ("http://127.0.0.1:8765", "http://localhost:8765"),
+        ("http://localhost:8765", "http://[::1]:8765"),
+        ("http://[::1]:8765", "http://127.0.0.1:8765"),
+    ],
+)
+async def test_session_origin_when_present_must_match_the_validated_host(
+    tmp_path: Path, base_url: str, cross_origin: str
+) -> None:
+    app = protected_app(tmp_path / "security.sqlite3", {})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
+        response = await client.get("/api/session", headers={"Origin": cross_origin})
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_cross_site_browser_session_request_without_origin_is_rejected(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / "security.sqlite3"
+    app = protected_app(storage, {})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        cross_site = await client.get(
+            "/api/session", headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        direct_client = await client.get("/api/session")
+
+    assert cross_site.status_code == 403
+    assert cross_site.json()["detail"]["code"] == "untrusted_origin"
+    assert direct_client.status_code == 200
+    with sqlite3.connect(storage) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM local_sessions").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
 async def test_dns_rebinding_and_lookalike_local_hosts_are_rejected(tmp_path: Path) -> None:
     calls: dict[str, int] = {}
     app = protected_app(tmp_path / "security.sqlite3", calls)
@@ -323,6 +401,70 @@ async def test_query_is_request_input_not_a_separate_idempotency_scope(
     assert first.status_code == 201
     assert changed_query.status_code == 409
     assert changed_query.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_configuration_session_header_is_part_of_request_fingerprint(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "configuration-action"),
+                "X-Configuration-Session": "window-a",
+            },
+            json={"value": "same"},
+        )
+        changed_header = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "configuration-action"),
+                "X-Configuration-Session": "window-b",
+            },
+            json={"value": "same"},
+        )
+
+    assert first.status_code == 201
+    assert changed_header.status_code == 409
+    assert changed_header.json()["detail"]["code"] == "idempotency_key_reused"
+    assert calls == {"effect": 1}
+
+
+@pytest.mark.asyncio
+async def test_semantic_content_type_is_part_of_request_fingerprint(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, int] = {}
+    app = protected_app(tmp_path / "security.sqlite3", calls)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        token = await issue_session(client)
+        first = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "content-type-action"),
+                "Content-Type": "application/json",
+            },
+            content=b'{"value":"same"}',
+        )
+        changed_header = await client.post(
+            "/api/effect",
+            headers={
+                **mutation_headers(token, "content-type-action"),
+                "Content-Type": "application/json; profile=changed",
+            },
+            content=b'{"value":"same"}',
+        )
+
+    assert first.status_code == 201
+    assert changed_header.status_code == 409
+    assert changed_header.json()["detail"]["code"] == "idempotency_key_reused"
     assert calls == {"effect": 1}
 
 
@@ -577,3 +719,61 @@ async def test_product_app_uses_the_configured_runtime_port(
         response = await client.get("/api/session")
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_session_cap_is_transactional_under_concurrent_issuance(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / "security.sqlite3"
+    app = protected_app(storage, {}, max_sessions=2)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        responses = await asyncio.gather(
+            *(client.get("/api/session") for _ in range(8))
+        )
+
+    assert [response.status_code for response in responses].count(200) == 2
+    assert [response.status_code for response in responses].count(429) == 6
+    assert all(
+        response.json()["detail"]["code"] == "session_capacity"
+        for response in responses
+        if response.status_code == 429
+    )
+    with sqlite3.connect(storage) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM local_sessions").fetchone()[0] == 2
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(local_sessions)")
+        }
+    assert "ix_local_sessions_expires_at" in indexes
+
+
+@pytest.mark.asyncio
+async def test_expired_sessions_are_removed_before_capacity_is_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from audio_memory.security import local_session
+
+    now = 100.0
+    monkeypatch.setattr(local_session.time, "time", lambda: now)
+    storage = tmp_path / "security.sqlite3"
+    app = protected_app(
+        storage,
+        {},
+        max_sessions=1,
+        session_ttl_seconds=10,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_BASE_URL) as client:
+        first = await client.get("/api/session")
+        at_capacity = await client.get("/api/session")
+        now = 111.0
+        after_expiry = await client.get("/api/session")
+
+    assert first.status_code == 200
+    assert at_capacity.status_code == 429
+    assert after_expiry.status_code == 200
+    with sqlite3.connect(storage) as connection:
+        rows = connection.execute("SELECT token_hash FROM local_sessions").fetchall()
+    assert len(rows) == 1
+    assert first.json()["token"] not in rows[0][0]
