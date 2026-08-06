@@ -28,6 +28,31 @@ def test_segment_rejects_unknown_risk_state() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("risk_state", "is_reliable"),
+    [
+        ("REJECTED", True),
+        ("HIGH_RISK_PENDING", True),
+        ("POST_EDIT_FAILED", True),
+        ("POST_EDIT_PASSED", False),
+    ],
+)
+def test_segment_rejects_risk_states_with_incompatible_reliability(
+    risk_state: str, is_reliable: bool
+) -> None:
+    with pytest.raises(ValueError, match="requires is_reliable"):
+        TranscriptSegment(
+            "file-1",
+            0,
+            0,
+            1000,
+            "风险状态不匹配",
+            [],
+            risk_state=risk_state,
+            is_reliable=is_reliable,
+        )
+
+
 def test_ordered_text_is_stable_across_files_and_segments() -> None:
     segments = [
         TranscriptSegment("b", 1, 100, 200, "第四", []),

@@ -160,6 +160,57 @@ def test_transcript_risk_state_migration_rejects_unknown_state(tmp_path: Path) -
             )
 
 
+@pytest.mark.parametrize(
+    ("risk_state", "is_reliable", "text"),
+    [
+        ("REJECTED", 1, "原文"),
+        ("HIGH_RISK_PENDING", 1, "原文"),
+        ("POST_EDIT_FAILED", 1, "原文"),
+        ("POST_EDIT_PASSED", 0, ""),
+    ],
+)
+def test_transcript_risk_state_migration_rejects_incompatible_reliability(
+    tmp_path: Path, risk_state: str, is_reliable: int, text: str
+) -> None:
+    database_path = tmp_path / "transcript-risk-reliability.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0001")
+    seed_v1_transcript(database_path)
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE transcripts "
+                "SET risk_state = ?, is_reliable = ?, text = ?, words_json = '[]' "
+                "WHERE id = 'transcript-1'",
+                (risk_state, is_reliable, text),
+            )
+
+
+@pytest.mark.parametrize(
+    ("text", "words_json"),
+    [("泄漏文本", "[]"), ("", '[{"word":"泄漏"}]')],
+)
+def test_transcript_migration_rejects_content_on_unreliable_row(
+    tmp_path: Path, text: str, words_json: str
+) -> None:
+    database_path = tmp_path / "unreliable-transcript-content.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0001")
+    seed_v1_transcript(database_path)
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE transcripts "
+                "SET is_reliable = 0, text = ?, words_json = ? "
+                "WHERE id = 'transcript-1'",
+                (text, words_json),
+            )
+
+
 def test_analysis_version_source_and_running_attempt_constraints(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
@@ -132,6 +133,45 @@ async def test_unreliable_segment_keeps_timing_and_reason_without_content(
     assert (stored.start_ms, stored.end_ms) == (100, 900)
     assert stored.text == ""
     assert stored.words_json == "[]"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_orm_rejects_content_on_an_unreliable_segment(tmp_path: Path) -> None:
+    database = Database(tmp_path / "unreliable-orm.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="test.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="d" * 64,
+                duration_ms=1000,
+                position=0,
+                temporary_path=str(tmp_path / "test.mp3"),
+            )
+        )
+        session.add(
+            Transcript(
+                id=str(uuid4()),
+                job_file_id=file_id,
+                segment_index=0,
+                start_ms=0,
+                end_ms=1000,
+                text="不得保存",
+                words_json="[]",
+                is_reliable=False,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
     await database.dispose()
 
 

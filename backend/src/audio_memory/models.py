@@ -103,6 +103,17 @@ class Transcript(Base):
             "'POST_EDIT_FAILED')",
             name="ck_transcripts_risk_state",
         ),
+        CheckConstraint(
+            "risk_state IS NULL OR "
+            "(risk_state IN ('REJECTED', 'HIGH_RISK_PENDING', "
+            "'POST_EDIT_FAILED') AND is_reliable = 0) OR "
+            "(risk_state = 'POST_EDIT_PASSED' AND is_reliable = 1)",
+            name="ck_transcripts_risk_reliability",
+        ),
+        CheckConstraint(
+            "is_reliable = 1 OR (text = '' AND words_json = '[]')",
+            name="ck_transcripts_unreliable_content",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

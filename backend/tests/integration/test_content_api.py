@@ -27,8 +27,7 @@ from audio_memory.models import (
 
 class FakeQuestionAnswerer:
     async def answer(self, **kwargs):
-        assert "会议原文" in kwargs["transcript"]
-        assert "不可信文本" not in kwargs["transcript"]
+        assert kwargs["transcript"] == "会议原文"
         return "本次会议决定先做 macOS。"
 
 
@@ -72,7 +71,7 @@ async def content_client(tmp_path: Path):
                 segment_index=1,
                 start_ms=1000,
                 end_ms=2000,
-                text="不可信文本",
+                text="",
                 words_json="[]",
                 risk_state="HIGH_RISK_PENDING",
                 is_reliable=False,

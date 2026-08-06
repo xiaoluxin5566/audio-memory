@@ -101,7 +101,8 @@ class TranscriptionService:
     async def _save_segment(self, segment: TranscriptSegment) -> None:
         discard_content = (
             not segment.is_reliable
-            or segment.risk_state in {"REJECTED", "POST_EDIT_FAILED"}
+            or segment.risk_state
+            in {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_FAILED"}
         )
         async with self.database.session() as session:
             session.add(

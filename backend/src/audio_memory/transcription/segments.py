@@ -6,6 +6,9 @@ from dataclasses import dataclass
 _VALID_RISK_STATES = frozenset(
     {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_PASSED", "POST_EDIT_FAILED"}
 )
+_UNRELIABLE_RISK_STATES = frozenset(
+    {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_FAILED"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,10 @@ class TranscriptSegment:
             raise ValueError("Segment text cannot be blank")
         if self.risk_state is not None and self.risk_state not in _VALID_RISK_STATES:
             raise ValueError("Unknown transcript risk state")
+        if self.risk_state in _UNRELIABLE_RISK_STATES and self.is_reliable:
+            raise ValueError(f"{self.risk_state} requires is_reliable=False")
+        if self.risk_state == "POST_EDIT_PASSED" and not self.is_reliable:
+            raise ValueError("POST_EDIT_PASSED requires is_reliable=True")
 
 
 def ordered_text(

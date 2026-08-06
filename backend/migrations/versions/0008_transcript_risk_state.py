@@ -54,10 +54,23 @@ def upgrade() -> None:
             "('REJECTED', 'HIGH_RISK_PENDING', 'POST_EDIT_PASSED', "
             "'POST_EDIT_FAILED')",
         )
+        batch_op.create_check_constraint(
+            "ck_transcripts_risk_reliability",
+            "risk_state IS NULL OR "
+            "(risk_state IN ('REJECTED', 'HIGH_RISK_PENDING', "
+            "'POST_EDIT_FAILED') AND is_reliable = 0) OR "
+            "(risk_state = 'POST_EDIT_PASSED' AND is_reliable = 1)",
+        )
+        batch_op.create_check_constraint(
+            "ck_transcripts_unreliable_content",
+            "is_reliable = 1 OR (text = '' AND words_json = '[]')",
+        )
 
 
 def downgrade() -> None:
     with op.batch_alter_table("transcripts", recreate="always") as batch_op:
+        batch_op.drop_constraint("ck_transcripts_unreliable_content", type_="check")
+        batch_op.drop_constraint("ck_transcripts_risk_reliability", type_="check")
         batch_op.drop_constraint("ck_transcripts_risk_state", type_="check")
     op.drop_column("transcripts", "risk_reason")
     op.drop_column("transcripts", "reliability_weight")
