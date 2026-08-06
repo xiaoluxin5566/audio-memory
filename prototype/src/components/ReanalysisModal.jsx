@@ -18,8 +18,9 @@ export function ReanalysisModal({ preview, loading, error, current, view, onClos
       <button className="secondary" onClick={onClose}>关闭</button>
       {view?.state === 'running' && <button className="danger-solid" onClick={onAction}>停止重新分析</button>}
       {view?.state === 'paused' && <button className="primary" onClick={onAction}>继续重新分析</button>}
+      {current?.status === 'stopped' && <button className="primary" onClick={onAction}>继续剩余项目</button>}
       {view?.actionLabel === '重试画像更新' && <button className="primary" onClick={onAction}>重试画像更新</button>}
-      {!current && <button className="primary" disabled={!preview?.previewToken || preview.blockers.length > 0} onClick={onConfirm}>确认重新分析</button>}
+      {!current || view?.state === 'finished' ? <button className="primary" disabled={!preview?.previewToken || preview.blockers.length > 0} onClick={onConfirm}>确认重新分析</button> : null}
     </div>
   </section></div>
 }

@@ -104,3 +104,33 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
   assert.equal(JSON.stringify(contentCard).includes('evidence_segment_ids'), false)
   assert.equal(JSON.stringify(contentCard).includes('generation_reason'), false)
 })
+
+
+test('strict scene cards preserve the server QA attached to their analysis item', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-06', cards: [{
+    id: 'analysis-meeting', batch_id: 'batch-1', scene_id: 'meeting', uploaded_at: '2026-08-06T10:00:00Z',
+    qa: [{ role: 'user', content: '旧会议的结论？' }, { role: 'assistant', content: '旧结论仍可查看。' }],
+    payload: { scene_id: 'meeting', cards: [{ card: { title: '会议 A', summary: '摘要' }, detail: { topic: '主题', background: '背景', participants: [], core_conclusions: [], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } }] },
+  }] }] })
+
+  const card = normalized.feed[0].cards[0]
+  assert.deepEqual(normalized.feed[0].qa[card.id], [{ q: '旧会议的结论？', a: '旧结论仍可查看。' }])
+})
+
+
+test('selected old detail snapshot keeps its QA while a reopened published card is empty', () => {
+  const detail = { topic: '主题', background: '背景', participants: [], core_conclusions: [], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] }
+  const oldState = normalizeFeed({ days: [{ date: '2026-08-06', cards: [{
+    id: 'old-version', batch_id: 'batch-1', scene_id: 'meeting', uploaded_at: '2026-08-06T10:00:00Z',
+    qa: [{ role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧回答' }],
+    payload: { scene_id: 'meeting', cards: [{ card: { title: '旧结果', summary: '旧摘要' }, detail }] },
+  }] }] })
+  const selectedCard = { card: oldState.feed[0].cards[0], batch: oldState.feed[0] }
+  const publishedState = normalizeFeed({ days: [{ date: '2026-08-06', cards: [{
+    id: 'new-version', batch_id: 'batch-1', scene_id: 'meeting', uploaded_at: '2026-08-06T10:00:00Z', qa: [],
+    payload: { scene_id: 'meeting', cards: [{ card: { title: '新结果', summary: '新摘要' }, detail }] },
+  }] }] })
+
+  assert.deepEqual(selectedCard.batch.qa[selectedCard.card.id], [{ q: '旧问题', a: '旧回答' }])
+  assert.deepEqual(publishedState.feed[0].qa[publishedState.feed[0].cards[0].id], [])
+})

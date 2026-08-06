@@ -13,7 +13,7 @@ import { useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
 import { useReanalysis } from './hooks/useReanalysis.js';
 import { ReanalysisModal } from './components/ReanalysisModal.jsx';
-import { getReanalysisView } from './api/state.js';
+import { getReanalysisView, isActiveReanalysis } from './api/state.js';
 import './styles.css';
 
 const ROUTES = { '/': 'feed', '/history': 'history', '/settings/prompts': 'prompts' };
@@ -122,7 +122,7 @@ export function App() {
 
   async function openReanalysis() {
     setReanalysisOpen(true);
-    if (!reanalysis.current) await reanalysis.loadPreview().catch(() => {});
+    if (!isActiveReanalysis(reanalysis.current)) await reanalysis.loadPreview().catch(() => {});
   }
   async function confirmReanalysis() {
     if (!reanalysis.preview?.previewToken) return;
@@ -133,6 +133,7 @@ export function App() {
     try {
       if (reanalysisView.state === 'running') await reanalysis.stop();
       else if (reanalysisView.state === 'paused') await reanalysis.resume();
+      else if (reanalysis.current?.status === 'stopped') await reanalysis.resume();
       else if (reanalysisView.actionLabel === '重试画像更新') await reanalysis.retryProfile();
     } catch (error) { setToast(error.message); }
   }

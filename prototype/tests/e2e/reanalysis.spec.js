@@ -35,3 +35,42 @@ test('history reanalysis previews, starts, shows progress and protects clearing'
   await expect(page.getByRole('button', { name: '重新分析中 0/1' })).toBeVisible()
   await expect(page.getByRole('button', { name: '清除所有历史' })).toBeDisabled()
 })
+
+test('a terminal batch exposes a fresh run and stopped work can continue', async ({ page }) => {
+  let previewReads = 0
+  let resumed = false
+  let created = false
+  const stopped = { id: 'stopped-1', status: 'stopped', total: 3, pending: 0, running: 0, succeeded: 1, failed: 0, stopped: 2 }
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { todos: [], days: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [{ date: '2026年8月6日', audio: [{ id: 'f1', original_name: '会议.mp3', duration_ms: 1000, uploaded_at: '2026-08-06T10:00:00Z' }] }] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ json: stopped })
+    if (pathname === '/api/history/reanalysis-batches/preview') {
+      previewReads += 1
+      return route.fulfill({ json: { source_batch_count: 1, audio_file_count: 1, transcript_character_count: 20, provider_display_name: 'Kimi', model_id: 'kimi-k2.5', prompt_summary: { todo: { version: 1 }, meeting: { version: 1 }, parenting: { version: 1 }, content: { version: 1 }, growth: { version: 1 }, inspiration: { version: 1 } }, estimated_calls_min: 6, estimated_calls_max: 6, blockers: [], preview_token: 'fresh-preview' } })
+    }
+    if (pathname === '/api/history/reanalysis-batches/stopped-1/resume') { resumed = true; return route.fulfill({ json: { ...stopped, status: 'running', stopped: 0, pending: 2, running: 1 } }) }
+    if (pathname === '/api/history/reanalysis-batches' && request.method() === 'POST') { created = true; return route.fulfill({ status: 201, json: { ...stopped, id: 'new-run', status: 'running', stopped: 0, pending: 1, running: 1 } }) }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/settings/prompts')
+  await expect(page.getByRole('button', { name: '清除所有历史' })).toBeEnabled()
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByRole('button', { name: '继续剩余项目' })).toBeVisible()
+  await page.getByRole('button', { name: '继续剩余项目' }).click()
+  expect(resumed).toBe(true)
+  await page.reload()
+  await expect(page.getByRole('button', { name: '清除所有历史' })).toBeEnabled()
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeVisible()
+  await page.getByRole('button', { name: '确认重新分析' }).click()
+  expect(previewReads).toBeGreaterThanOrEqual(2)
+  expect(created).toBe(true)
+})

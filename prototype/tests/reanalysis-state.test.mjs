@@ -42,6 +42,14 @@ test('active, paused, stopped and partial batches have actionable display state'
 
   const partial = getReanalysisView({ id: 'r1', status: 'completed_with_failures', total: 5, pending: 0, succeeded: 3, failed: 2, stopped: 0 })
   assert.match(partial.completionCopy, /已完成 3 次，2 次分析失败/)
+  assert.equal(partial.canClearHistory, true)
+
+  const allFailed = getReanalysisView({ id: 'r1', status: 'completed_with_failures', total: 5, pending: 0, succeeded: 0, failed: 5, stopped: 0 })
+  assert.equal(allFailed.completionCopy, '重新分析失败，历史结果未发生变化')
+
+  const stopped = getReanalysisView({ id: 'r1', status: 'stopped', total: 5, pending: 0, succeeded: 2, failed: 0, stopped: 3 })
+  assert.equal(stopped.actionLabel, '继续剩余项目')
+  assert.equal(stopped.canClearHistory, true)
 
   const profileFailed = getReanalysisView({ id: 'r1', status: 'content_completed_profile_failed', total: 5, pending: 0, succeeded: 5, failed: 0, stopped: 0 })
   assert.equal(profileFailed.actionLabel, '重试画像更新')

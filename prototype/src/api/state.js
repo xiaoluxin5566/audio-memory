@@ -92,10 +92,10 @@ function parentingBlocks(detail = {}) {
   const blocks = [detailBlock('整体观察', { content: detail.overall_observation })]
   for (const interaction of detail.interactions ?? []) {
     const items = [
-      ...(interaction.child_difficulties ?? []).map((item) => labelled('孩子的困难', item.content)),
-      ...(interaction.emotional_signals ?? []).map((item) => labelled('情绪信号', item.signal)),
-      ...(interaction.observed_parent_actions ?? []).map((item) => labelled('观察到的做法', item.content)),
-      ...(interaction.possible_issues ?? []).map((item) => labelled('可能的问题', item.content)),
+      ...(interaction.child_difficulties ?? []).flatMap((item) => [labelled('孩子的困难', item.content), item.basis && labelled('观察依据', item.basis)]),
+      ...(interaction.emotional_signals ?? []).flatMap((item) => [labelled('情绪信号', item.signal), item.possible_explanation && labelled('可能原因', item.possible_explanation)]),
+      ...(interaction.observed_parent_actions ?? []).flatMap((item) => [labelled('观察到的做法', item.content), item.effect && labelled('产生的效果', item.effect)]),
+      ...(interaction.possible_issues ?? []).flatMap((item) => [labelled('可能的问题', item.content), item.reasoning && labelled('判断依据', item.reasoning)]),
       ...(interaction.recommendations ?? []).flatMap((item) => [
         labelled('建议', item.title), item.why_it_helps, ...(item.steps ?? []), item.suggested_language,
       ]),
@@ -111,7 +111,9 @@ function contentBlocks(detail = {}) {
     blocks.push(detailBlock(item.display_title || '一段内容', {
       content: item.introduction,
       items: [
+        item.content_type && `内容类型：${item.content_type}`,
         item.platform && `平台：${item.platform}`,
+        item.source_title && `原始名称：${item.source_title}`,
         ...textList(item.key_points),
         ...textList(item.user_reactions),
       ],
@@ -138,7 +140,7 @@ function growthBlocks(detail = {}) {
     }
     const recommendation = direction.recommendation
     if (recommendation) blocks.push(detailBlock(`${direction.title || '成长方向'} · 建议`, { items: [recommendation.goal, recommendation.method, ...(recommendation.steps ?? []), recommendation.suggested_language, recommendation.practice_task, recommendation.success_signal] }))
-    if (direction.resources?.length) blocks.push(detailBlock(`${direction.title || '成长方向'} · 延伸资源`, { items: direction.resources.flatMap((item) => [[item.title, item.creator].filter(Boolean).join(' · '), item.reason, item.search_query && `搜索：${item.search_query}`]) }))
+    if (direction.resources?.length) blocks.push(detailBlock(`${direction.title || '成长方向'} · 延伸资源`, { items: direction.resources.flatMap((item) => [item.resource_type && `类型：${item.resource_type}`, [item.title, item.creator].filter(Boolean).join(' · '), item.reason, item.search_query && `搜索：${item.search_query}`]) }))
   }
   if (detail.strengths_to_keep?.length) blocks.push(detailBlock('值得保持的优势', { items: textList(detail.strengths_to_keep) }))
   return blocks.filter((block) => block.content || block.items.length)
@@ -232,7 +234,7 @@ export function normalizeFeed(payload) {
       const strictCards = normalizeStrictCards(item, batch)
       if (strictCards) {
         batch.cards.push(...strictCards)
-        for (const card of strictCards) batch.qa[card.id] = []
+        for (const card of strictCards) batch.qa[card.id] = normalizeConversation(item.qa)
       } else {
         const shell = item.payload?.card ?? {}
         batch.cards.push({
@@ -333,8 +335,8 @@ export function getReanalysisView(batch, preview) {
   if (batch.status === 'running' || batch.status === 'pending') return { ...base, state: 'running', buttonLabel: `重新分析中 ${counts.succeeded}/${counts.total}`, actionLabel: '停止重新分析', completionCopy: '' }
   if (batch.status === 'paused') return { ...base, state: 'paused', buttonLabel: '重新分析已暂停', actionLabel: '继续重新分析', completionCopy: '' }
   if (batch.status === 'stopping') return { ...base, state: 'stopping', buttonLabel: '正在停止重新分析', actionLabel: '', completionCopy: '' }
-  if (batch.status === 'completed_with_failures') return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '重新分析历史', completionCopy: `已完成 ${counts.succeeded} 次，${counts.failed} 次分析失败，失败项旧结果已保留` }
+  if (batch.status === 'completed_with_failures') return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '重新分析历史', completionCopy: counts.succeeded === 0 ? '重新分析失败，历史结果未发生变化' : `已完成 ${counts.succeeded} 次，${counts.failed} 次分析失败，失败项旧结果已保留` }
   if (batch.status === 'content_completed_profile_failed') return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '重试画像更新', completionCopy: '历史内容已更新，个性化画像更新失败，可重新尝试' }
-  if (batch.status === 'stopped') return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '重新分析历史', completionCopy: `已停止；已完成 ${counts.succeeded} 次，剩余 ${counts.pending + counts.stopped} 次未处理` }
+  if (batch.status === 'stopped') return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '继续剩余项目', completionCopy: `已停止；已完成 ${counts.succeeded} 次，剩余 ${counts.pending + counts.stopped} 次未处理` }
   return { ...base, state: 'finished', buttonLabel: '重新分析历史', actionLabel: '重新分析历史', completionCopy: `已用最新 Prompt 重新分析 ${counts.succeeded} 次历史上传` }
 }
