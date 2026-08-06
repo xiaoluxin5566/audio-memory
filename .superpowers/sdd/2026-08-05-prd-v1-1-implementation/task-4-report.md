@@ -212,3 +212,13 @@ transcript、event map 和 profile 均先 JSON 序列化，再放入明确的
 
 - 提交消息：`feat: freeze evidence-backed scene prompts`。
 - 提交哈希见承载本报告的 Git 提交；具体短哈希在任务交付消息中记录。
+- Fix round 1 提交：`89637ad fix: enforce prompt evidence boundaries`。
+
+## Fix round 1 scoped re-review
+
+- 复审范围：`bc9249b..89637ad`。
+- 9 组 Critical / Important 审查项逐项判定为 `ADDRESSED`。
+- 修复 diff 未引入新的 Critical / Important 问题，无范围外观察项。
+- 独立复审聚焦验证：EventMap、evidence integrity、scene schema 共
+  `117 passed`。
+- 结论：Task 4 审查闭环已清零，可进入 Task 5。
