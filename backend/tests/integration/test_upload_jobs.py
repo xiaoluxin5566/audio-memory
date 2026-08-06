@@ -185,13 +185,19 @@ async def test_abandoned_upload_is_cleaned_on_next_start(job_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_model_analysis_retries_with_active_provider_without_whisper(job_client):
+@pytest.mark.parametrize(
+    "error_code",
+    ["model_analysis_failed", "credential_changed", "fixed_rules_changed"],
+)
+async def test_failed_model_analysis_retries_with_active_provider_without_whisper(
+    job_client, error_code
+):
     client, _, database = job_client
     job_id = (await client.post("/api/jobs")).json()["id"]
     async with database.session() as session:
         job = await session.get(AnalysisJob, job_id)
         job.stage = JobStage.FAILED.value
-        job.error_code = "model_analysis_failed"
+        job.error_code = error_code
         await session.commit()
     task_coordinator = RetryTaskCoordinator()
     prompt_store = PromptStore(client._transport.app.state.upload_service.paths.prompts)
