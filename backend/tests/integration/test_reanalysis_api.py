@@ -47,6 +47,11 @@ class Provider:
         return type("Validation", (), {"ok": provider_id == "deepseek"})()
 
 
+class NoProvider:
+    async def snapshot_active_with_generation(self):
+        raise LookupError("No active provider")
+
+
 class Publisher:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -229,6 +234,32 @@ async def test_forged_preview_is_rejected_before_any_work_is_created(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "snapshot_changed"
     assert current.status_code == 204
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_provider_preview_create_returns_documented_conflict(
+    tmp_path: Path,
+) -> None:
+    app, database, _publisher = await build_app(tmp_path)
+    provider = NoProvider()
+    app.state.reanalysis_service.provider_coordinator = provider
+    app.state.reanalysis_service.preview_builder.provider_coordinator = provider
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        preview = (await client.get("/api/history/reanalysis-batches/preview")).json()
+        response = await client.post(
+            "/api/history/reanalysis-batches",
+            headers=await session_headers(client, "no-provider-create"),
+            json={"preview_token": preview["preview_token"]},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "reanalysis_blocked",
+        "message": "Reanalysis preview is blocked",
+        "blockers": ["no_active_provider"],
+    }
     await database.dispose()
 
 

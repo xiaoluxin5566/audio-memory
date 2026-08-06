@@ -36,10 +36,10 @@ Public batch states are exactly:
 
 Item states are exactly `pending | running | succeeded | failed | stopped`.
 
-Task 5 may leave durable compatibility markers `paused_credential_changed`, `paused_rules_changed`, or `paused_error`; the Task 8 API normalizes them to public `paused`. Resume behavior is deliberate:
+New writes persist only the exact public `paused` state. The reason remains durable on the owning item/version `error_code`, and resume derives its rule/credential/provider behavior from that reason. Migration 0007 normalizes legacy `paused_credential_changed`, `paused_rules_changed`, and `paused_error` rows; read paths retain compatibility while an old database is being upgraded. Resume behavior is deliberate:
 
-- `paused_credential_changed`: validate the original provider/model, adopt the new durable generation after explicit user resume, delete the unpublished old version/checkpoints, and return the item to `pending`;
-- `paused_rules_changed`: reject resume and require stop plus a fresh preview, because old fixed-rule bodies were never stored as replayable Prompt documents;
+- `credential_changed`: validate the original provider/model, adopt the new durable generation after explicit user resume, delete the unpublished old version/checkpoints, and return the item to `pending`;
+- `fixed_rules_changed`, `analysis_schema_changed`, or `transcript_changed`: reject resume and require stop plus a fresh preview;
 - account/auth/balance/Keychain/rate-limit conditions: keep the item pending and batch paused;
 - ordinary model/schema/content failure: mark only that item failed and continue later items.
 
@@ -50,11 +50,11 @@ Network/timeout and provider-5xx failures retain the existing provider client's 
 - Creation persists only `ReanalysisBatch` and newest-first `ReanalysisItem` rows. `ReanalysisWorker` feeds at most one item into `AnalysisTaskCoordinator` at a time.
 - History versions use priority 10; new-upload model work remains priority 0. The coordinator's unique active-source constraints and global worker lease/fence remain authoritative.
 - `stopping` is now a coordinator-excluded state. A stop request never interrupts the current provider request; it waits for that source item to become terminal, then marks every unstarted item/version stopped. No pending remote version from a stopped/stopping batch can be claimed.
-- Startup recovery runs while the single-instance lock is held and before the global coordinator starts. It returns reanalysis-owned running versions/items to pending without changing their frozen Prompt/profile/provider snapshot or version ID. Stale running items with missing/terminal versions are repaired to pending/succeeded/failed as appropriate.
+- Startup recovery runs while the single-instance lock is held and before the global coordinator starts. Production initialization explicitly reclaims every foreign predecessor lease, including unexpired ordinary-upload leases, because the instance lock proves that prior process is dead. The coordinator's default remains expiry-only so two live coordinators cannot steal each other's work. Reanalysis-owned running versions/items return to pending without changing their frozen snapshot or version ID; stale items with missing/terminal versions are repaired appropriately.
 - Before scheduling after startup, the saved provider must be available. Unavailable provider state persists the batch as paused.
-- A compatible EventMap is seeded only when the current source version persists and matches the exact system/event-map/common Prompt hashes, schema-version hash, actual EventMap/six-scene JSON-Schema hash, and versioned structured-transcript fingerprint. The fingerprint covers ordered file identity/position/recording metadata/speech mapping and every segment's UID, speaker, timing, text, and word JSON. The EventMap must also parse against the current strict Schema, match its stored content hash, and have assigned plus unassigned evidence IDs exactly equal the current structured-transcript segment IDs. Legacy versions without this metadata safely regenerate EventMap.
+- A compatible EventMap is seeded only when the current source version persists and matches the exact system/event-map/common Prompt hashes, schema-version hash, actual EventMap/six-scene JSON-Schema hash, frozen-profile canonical hash, and versioned structured-transcript fingerprint. The fingerprint covers ordered file identity/position/recording metadata/speech mapping and every segment's UID, speaker, timing, text, and word JSON. The EventMap must also parse against the current strict Schema, match its stored content hash, and have assigned plus unassigned evidence IDs exactly equal the current structured-transcript segment IDs. A profile mismatch merely regenerates EventMap; it does not pause. Legacy versions without compatibility metadata also safely regenerate.
 - Successful content publication remains Task 6's atomic current-version swap. Failed items leave the old current version untouched.
-- All scenes use the one frozen pre-batch profile JSON. After content items become terminal, the worker invokes one profile-only rebuild/swap. Failure leaves `content_completed_profile_failed`; `/retry-profile` calls only `VersionPublisher.retry_profile` and creates no AnalysisVersion/model work.
+- All scenes use the one frozen pre-batch profile JSON. Final content publication atomically checkpoints `content_completed_profile_failed` and never rebuilds profile inside `VersionPublisher.publish`. The worker observes that checkpoint and invokes the sole automatic profile rebuild/swap under the shared profile/maintenance guard. Failure keeps the checkpoint for explicit `/retry-profile`, which creates no AnalysisVersion/model work. A blocking race test proves clear-history cannot overlap the automatic rebuild.
 - Clear history and the global analysis coordinator share one maintenance fence. Queue insert/claim, profile-only rebuild, and history deletion cannot cross. Clear rejects any pending/running ordinary or history AnalysisVersion, every active/paused/stopping reanalysis batch, and any profile rebuild that overlaps the request; it holds the fence through both database and audio/staging filesystem cleanup.
 
 ## No-Whisper / no-duplication proof
@@ -83,15 +83,21 @@ Observed RED before each production slice:
 13. Persisted EventMap compatibility: same segment IDs with changed text and changed actual Schema hashes were initially reusable; both now pause safely before submission, and legacy metadata forces regeneration.
 14. Atomic confirmation: Prompt and ProfileFact mutations launched after the protected reread now block until the batch transaction commits.
 15. Clear coordination: ordinary pending/running versions were deleted and a profile-only retry could race cleanup; both cases were reproduced before the shared maintenance fence.
-16. Between-check submission race: changing the actual Schema hash after Worker validation initially inserted a version and left the batch running; the coordinator transaction now persists `paused_rules_changed` plus `analysis_schema_changed` and inserts zero versions.
+16. Between-check submission race: changing the actual Schema hash after Worker validation initially inserted a version and left the batch running; the coordinator transaction now persists `paused` plus item reason `analysis_schema_changed` and inserts zero versions.
+17. Automatic final profile rebuild: `VersionPublisher.publish` entered the rebuilder outside the shared guard; it now performs zero rebuild calls, checkpoints content completion, and the guarded Worker performs exactly one. A clear-history race waits and returns conflict.
+18. Identical-content Prompt save: version increment with unchanged SHA-256 initially accepted an old preview; signed canonical Prompt bindings now include both version and hash.
+19. Profile-sensitive EventMap: a prior EventMap built with a different frozen profile was initially reused; it now regenerates without pausing.
+20. Fast ordinary-upload restart: an unexpired foreign lease initially remained permanently running; instance-lock startup recovery now reclaims and claims it, while the default live-coordinator tests still fence it.
+21. Exact paused state: schema/rule pauses initially persisted `paused_rules_changed`; every writer now persists `paused`, reason-driven resume remains intact, and migration 0007 normalizes all three legacy values.
+22. No-provider create: confirmation of a blocked preview initially raised `AttributeError`; it now raises `PreviewBlockedError(["no_active_provider"])`, which the API maps to documented HTTP 409.
 
 Each RED was followed by a focused GREEN before the next behavior was implemented.
 
 ## Verification results
 
-- Focused Task 8 suite: `pytest tests/unit/reanalysis tests/integration/test_reanalysis_api.py tests/integration/test_reanalysis_worker.py -q` — 29 passed in 2.21s.
-- Coordinator/clear-history regression selection: 20 passed in 1.09s.
-- Full backend suite: 431 passed in 8.08s.
+- Required Task 8 suite (`tests/unit/reanalysis`, API, Worker): 33 passed in 3.58s.
+- Focused fix-round selection (reanalysis, publisher, EventMap, coordinator, migrations): 90 passed in 5.94s.
+- Full backend suite: 438 passed in 11.17s.
 - Python compile check for production and Task 8 tests: exit 0.
 - `git diff --check`: exit 0.
 - No real provider keys or external model calls were used.
@@ -102,4 +108,4 @@ Each RED was followed by a focused GREEN before the next behavior was implemente
 - Fixed-rule-changed batches cannot resume in place; users must stop and create from a fresh preview. This avoids silently reconstructing a snapshot from fixed-rule bodies that Task 5 did not persist.
 - Structured transcripts have no separate version column, so compatibility persists a canonical versioned content fingerprint rather than assuming immutability. Exact current evidence-segment coverage is an additional independent requirement.
 - Rate-limit cooldown expiry is durable but not autonomously polled while a batch is paused. The user can resume after cooldown; resume revalidates the saved provider before any further paid work. Worker exceptions are now logged with a normalized operation label instead of being silently suppressed.
-- No database migration was required: Task 5 already introduced all ReanalysisBatch/ReanalysisItem ownership and queue fields consumed here.
+- Migration 0007 is data-only: it normalizes legacy extended pause-status values without adding schema fields; pause reasons remain on existing error-code columns.

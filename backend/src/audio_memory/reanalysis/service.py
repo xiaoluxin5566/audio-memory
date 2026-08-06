@@ -85,6 +85,8 @@ class ReanalysisService:
             provider_id = supplied.get("provider_id")
             if not isinstance(provider_id, str):
                 raise SnapshotChangedError("Preview token has no provider binding")
+            if not provider_id:
+                raise PreviewBlockedError(["no_active_provider"])
             validation = await self.provider_coordinator.validate_saved(provider_id)
             if not bool(getattr(validation, "ok", False)):
                 raise PreviewBlockedError(["provider_validation_failed"])
@@ -105,6 +107,7 @@ class ReanalysisService:
                             persisted_prompts = dict(snapshot.prompt_snapshot)
                             persisted_prompts["_reanalysis"] = {
                                 "fixed_rule_hashes": snapshot.fixed_rule_hashes,
+                                "profile_hash": snapshot.profile_hash,
                                 "transcript_fingerprints": {
                                     source.batch_id: source.transcript_sha256
                                     for source in snapshot.sources
@@ -174,6 +177,7 @@ class ReanalysisService:
             "model_id": current.snapshot.model_id,
             "credential_generation": current.snapshot.credential_generation,
             "prompt_hashes": current.snapshot.prompt_hashes,
+            "prompt_bindings": current_payload["prompt_bindings"],
             "fixed_rule_hashes": current.snapshot.fixed_rule_hashes,
             "fixed_rules_hash": current.snapshot.fixed_rules_hash,
             "profile_hash": current.snapshot.profile_hash,
@@ -235,7 +239,20 @@ class ReanalysisService:
                     raise ReanalysisNotFoundError(
                         f"Unknown reanalysis batch: {batch_id}"
                     )
-                if batch.status == "paused_rules_changed":
+                pause_reason = await session.scalar(
+                    select(ReanalysisItem.error_code)
+                    .where(
+                        ReanalysisItem.reanalysis_batch_id == batch_id,
+                        ReanalysisItem.error_code.is_not(None),
+                    )
+                    .order_by(ReanalysisItem.position)
+                    .limit(1)
+                )
+                if batch.status == "paused_rules_changed" or pause_reason in {
+                    "fixed_rules_changed",
+                    "analysis_schema_changed",
+                    "transcript_changed",
+                }:
                     raise ReanalysisStateError(
                         "Fixed analysis rules changed; stop and obtain a fresh preview"
                     )

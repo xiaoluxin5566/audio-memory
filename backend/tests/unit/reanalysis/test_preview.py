@@ -360,6 +360,42 @@ async def test_batch_creation_persists_frozen_snapshot_and_newest_first_items(
 
 
 @pytest.mark.asyncio
+async def test_identical_prompt_content_with_new_version_rejects_old_preview(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import ReanalysisService, SnapshotChangedError
+
+    database = Database(tmp_path / "prompt-version.sqlite3")
+    await database.create_schema()
+    await seed_completed_history(database)
+    prompts = PromptStore(tmp_path / "version-prompts")
+    prompts.initialize()
+    provider = AvailableProvider()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"v" * 32),
+        ),
+        provider_coordinator=provider,
+    )
+    preview = await service.preview()
+    current = prompts.get("meeting")
+    prompts.save(
+        "meeting",
+        expected_version=current.version,
+        content=current.content,
+    )
+
+    with pytest.raises(SnapshotChangedError):
+        await service.create_batch(preview.preview_token)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_creation_fences_mutation_after_snapshot_read_until_commit(
     tmp_path: Path,
 ) -> None:
@@ -469,4 +505,35 @@ async def test_preview_keeps_history_counts_when_no_provider_is_active(
     assert preview.provider_id == ""
     assert preview.model_id == ""
     assert preview.blockers == ["no_active_provider"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_provider_preview_create_is_a_documented_blocker(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import PreviewBlockedError, ReanalysisService
+
+    database = Database(tmp_path / "no-provider-create.sqlite3")
+    await database.create_schema()
+    await seed_completed_history(database)
+    prompts = PromptStore(tmp_path / "no-provider-create-prompts")
+    prompts.initialize()
+    provider = NoActiveProvider()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"b" * 32),
+        ),
+        provider_coordinator=provider,
+    )
+    preview = await service.preview()
+
+    with pytest.raises(PreviewBlockedError) as blocked:
+        await service.create_batch(preview.preview_token)
+    assert blocked.value.blockers == ["no_active_provider"]
     await database.dispose()

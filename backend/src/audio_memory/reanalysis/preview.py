@@ -110,6 +110,7 @@ class PreviewSigner:
             "model_id": snapshot.model_id,
             "credential_generation": snapshot.credential_generation,
             "prompt_hashes": snapshot.prompt_hashes,
+            "prompt_bindings": snapshot_payload["prompt_bindings"],
             "fixed_rule_hashes": snapshot.fixed_rule_hashes,
             "fixed_rules_hash": snapshot.fixed_rules_hash,
             "profile_hash": snapshot.profile_hash,

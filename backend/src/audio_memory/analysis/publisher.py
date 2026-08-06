@@ -120,8 +120,6 @@ class VersionPublisher:
         destinations = self._move_first_publication_audio(
             version, batch_id, files
         )
-        rebuild_history_id: str | None = None
-        rebuild_profile = False
         todo_count = 0
         async with self.database.session() as session:
             async with session.begin():
@@ -184,13 +182,7 @@ class VersionPublisher:
                 job.stage = JobStage.COMPLETED.value
                 job.error_code = None
                 if version.reanalysis_batch_id is not None:
-                    rebuild_history_id = version.reanalysis_batch_id
-                    rebuild_profile = await self._complete_history_item(
-                        session, version, now
-                    )
-
-        if rebuild_profile:
-            await self._rebuild_profile(rebuild_history_id, now)
+                    await self._complete_history_item(session, version, now)
         return AnalysisOutcome(batch_id, len(visible), todo_count)
 
     @staticmethod

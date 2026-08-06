@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,10 @@ from sqlalchemy.exc import IntegrityError
 
 from audio_memory.analysis.publisher import VersionPublisher
 from audio_memory.analysis.profile import ProfileDelta
+from audio_memory.analysis.profile_rebuild import ProfileRebuilder
+from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
 from audio_memory.config import AppPaths
+from audio_memory.content.clear import HistoryBusyError, HistoryCleaner
 from audio_memory.content.service import ContentService
 from audio_memory.db import Database
 from audio_memory.models import (
@@ -58,6 +62,31 @@ class FailingProfileRebuilder:
 
     async def swap_active(self, facts) -> None:
         raise AssertionError("swap must not run after rebuild failure")
+
+
+class CountingProfileRebuilder:
+    def __init__(self, database: Database) -> None:
+        self.delegate = ProfileRebuilder(database)
+        self.calls = 0
+
+    async def rebuild(self, current_versions):
+        self.calls += 1
+        return await self.delegate.rebuild(current_versions)
+
+    async def swap_active(self, facts) -> None:
+        await self.delegate.swap_active(facts)
+
+
+class BlockingProfileRebuilder(CountingProfileRebuilder):
+    def __init__(self, database: Database) -> None:
+        super().__init__(database)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def rebuild(self, current_versions):
+        self.entered.set()
+        await self.release.wait()
+        return await super().rebuild(current_versions)
 
 
 def complete_results(*visible: str) -> list[PublicationResult]:
@@ -448,7 +477,9 @@ async def test_last_history_item_swaps_profile_after_content_publication(
     await seed_reanalysis(database, paths)
     await make_history_item_with_profile_candidate(database)
 
-    await VersionPublisher(database, paths).publish(
+    rebuilder = CountingProfileRebuilder(database)
+    publisher = VersionPublisher(database, paths, profile_rebuilder=rebuilder)
+    await publisher.publish(
         "version-new", complete_results(), []
     )
 
@@ -457,9 +488,26 @@ async def test_last_history_item_swaps_profile_after_content_publication(
         item = await session.get(ReanalysisItem, "history-item-1")
         batch = await session.get(Batch, "batch-versioned")
         facts = list(await session.scalars(select(ProfileFact)))
-    assert history is not None and history.status == "completed"
+    assert rebuilder.calls == 0
+    assert history is not None
+    assert history.status == "content_completed_profile_failed"
     assert item is not None and item.status == "succeeded"
     assert batch is not None and batch.current_analysis_version_id == "version-new"
+    assert [fact.id for fact in facts] == ["profile-old"]
+
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=publisher,
+    )
+    await worker.tick()
+    async with database.session() as session:
+        history = await session.get(ReanalysisBatch, "history-1")
+        facts = list(await session.scalars(select(ProfileFact)))
+    assert rebuilder.calls == 1
+    assert history is not None and history.status == "completed"
     assert [(fact.dimension, json.loads(fact.value_json)) for fact in facts] == [
         ("role", {"name": "new"})
     ]
@@ -491,6 +539,49 @@ async def test_profile_failure_keeps_old_profile_and_marks_content_completed(
     assert history.status == "content_completed_profile_failed"
     assert batch is not None and batch.current_analysis_version_id == "version-new"
     assert [fact.id for fact in facts] == ["profile-old"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_automatic_final_profile_rebuild_fences_clear_history(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    paths = AppPaths.from_home(tmp_path / "home")
+    paths.ensure_directories()
+    database = Database(paths.database)
+    await database.create_schema()
+    await seed_reanalysis(database, paths)
+    await make_history_item_with_profile_candidate(database)
+    rebuilder = BlockingProfileRebuilder(database)
+    publisher = VersionPublisher(database, paths, profile_rebuilder=rebuilder)
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=publisher,
+    )
+    await publisher.publish("version-new", complete_results(), [])
+
+    profile_task = asyncio.create_task(worker.tick())
+    await rebuilder.entered.wait()
+    cleaner = HistoryCleaner(
+        database,
+        paths.audio,
+        paths.staging,
+        task_coordinator=coordinator,
+    )
+    clear_task = asyncio.create_task(cleaner.clear(confirm=True))
+    await asyncio.sleep(0)
+    assert not clear_task.done()
+
+    rebuilder.release.set()
+    await profile_task
+    with pytest.raises(HistoryBusyError, match="profile rebuild"):
+        await clear_task
+    async with database.session() as session:
+        assert await session.get(ReanalysisBatch, "history-1") is not None
     await database.dispose()
 
 

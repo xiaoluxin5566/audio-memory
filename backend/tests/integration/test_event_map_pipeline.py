@@ -379,7 +379,7 @@ async def test_generation_change_discards_scenes_and_pauses_history(tmp_path) ->
     assert version.status == "credential_changed"
     assert version.error_code == "credential_changed"
     assert json.loads(version.staged_results_json) == {}
-    assert batch is not None and batch.status == "paused_credential_changed"
+    assert batch is not None and batch.status == "paused"
     async with database.session() as session:
         item = await session.get(ReanalysisItem, "history-item")
     assert item is not None and item.status == "pending"
@@ -459,14 +459,18 @@ async def test_invalid_profile_evidence_never_reaches_publisher(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None:
+    from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
     database = Database(tmp_path / "history-terminal.sqlite3")
     await database.create_schema()
     await seed_version(database, tmp_path, history_batch_id="history-1")
+    publisher = AnalysisPublisher(database)
     runner = AnalysisRunner(
         database=database,
         provider=RecordingProvider(),
         profile_extractor=EmptyProfileExtractor(),
-        publisher=AnalysisPublisher(database),
+        publisher=publisher,
         generation_source=StableGeneration(),
     )
 
@@ -477,6 +481,16 @@ async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None
         batch = await session.get(ReanalysisBatch, "history-1")
     assert item is not None and item.status == "succeeded"
     assert item.completed_at is not None
+    assert batch is not None
+    assert batch.status == "content_completed_profile_failed"
+
+    await ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=publisher,
+    ).tick()
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, "history-1")
     assert batch is not None and batch.status == "completed"
     assert batch.completed_at is not None
     await database.dispose()
@@ -571,7 +585,7 @@ async def test_generic_remote_output_failure_after_key_replacement_pauses_histor
     assert json.loads(version.staged_results_json) == {}
     assert item is not None and item.status == "pending"
     assert item.error_code == "credential_changed"
-    assert history is not None and history.status == "paused_credential_changed"
+    assert history is not None and history.status == "paused"
     await database.dispose()
 
 

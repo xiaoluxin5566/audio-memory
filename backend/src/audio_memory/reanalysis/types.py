@@ -62,6 +62,13 @@ class ReanalysisSnapshot:
             "model_id": self.model_id,
             "credential_generation": self.credential_generation,
             "prompt_hashes": self.prompt_hashes,
+            "prompt_bindings": {
+                scene_id: {
+                    "version": value["version"],
+                    "sha256": value["sha256"],
+                }
+                for scene_id, value in sorted(self.prompt_snapshot.items())
+            },
             "fixed_rule_hashes": self.fixed_rule_hashes,
             "fixed_rules_hash": self.fixed_rules_hash,
             "profile_hash": self.profile_hash,

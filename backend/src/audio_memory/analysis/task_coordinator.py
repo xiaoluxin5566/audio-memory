@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
@@ -71,7 +71,12 @@ class VersionRunner(Protocol):
 class AnalysisTaskCoordinator:
     """SQLite-backed authority for the single global remote-model worker."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        reclaim_foreign_on_initialize: bool = False,
+    ) -> None:
         self.database = database
         self.owner_id = str(uuid4())
         self._condition = asyncio.Condition()
@@ -81,6 +86,7 @@ class AnalysisTaskCoordinator:
         self._initialized = False
         self._worker: asyncio.Task[None] | None = None
         self._closed = False
+        self._reclaim_foreign_on_initialize = reclaim_foreign_on_initialize
 
     async def initialize(self) -> None:
         async with self._condition:
@@ -88,12 +94,17 @@ class AnalysisTaskCoordinator:
                 return
             async with self.database.session() as session:
                 now = datetime.now(UTC).isoformat()
+                reclaimable = AnalysisVersion.status == "running"
+                if not self._reclaim_foreign_on_initialize:
+                    reclaimable = and_(
+                        reclaimable,
+                        or_(
+                            AnalysisVersion.lease_expires_at.is_(None),
+                            AnalysisVersion.lease_expires_at < now,
+                        ),
+                    )
                 expired_versions = select(AnalysisVersion.id).where(
-                    AnalysisVersion.status == "running",
-                    or_(
-                        AnalysisVersion.lease_expires_at.is_(None),
-                        AnalysisVersion.lease_expires_at < now,
-                    ),
+                    reclaimable
                 )
                 await session.execute(
                     update(ReanalysisItem)
@@ -105,13 +116,7 @@ class AnalysisTaskCoordinator:
                 )
                 await session.execute(
                     update(AnalysisVersion)
-                    .where(
-                        AnalysisVersion.status == "running",
-                        or_(
-                            AnalysisVersion.lease_expires_at.is_(None),
-                            AnalysisVersion.lease_expires_at < now,
-                        ),
-                    )
+                    .where(reclaimable)
                     .values(
                         status="pending",
                         error_code=None,
@@ -265,7 +270,7 @@ class AnalysisTaskCoordinator:
                                 elif expected_transcript != current_transcript:
                                     compatibility_error = "transcript_changed"
                                 if compatibility_error is not None:
-                                    owning_run.status = "paused_rules_changed"
+                                    owning_run.status = "paused"
                                     reanalysis_item.error_code = compatibility_error
                                     await session.commit()
                                     raise ReanalysisSnapshotChangedError(

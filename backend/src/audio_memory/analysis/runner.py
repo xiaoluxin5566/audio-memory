@@ -362,7 +362,7 @@ class AnalysisRunner:
                         ReanalysisBatch, stored.reanalysis_batch_id
                     )
                     if history is not None:
-                        history.status = "paused_credential_changed"
+                        history.status = "paused"
                     item = await session.scalar(
                         select(ReanalysisItem).where(
                             ReanalysisItem.analysis_version_id == stored.id
@@ -417,7 +417,7 @@ class AnalysisRunner:
                         ReanalysisBatch, stored.reanalysis_batch_id
                     )
                     if history is not None:
-                        history.status = "paused_rules_changed"
+                        history.status = "paused"
                     item = await session.scalar(
                         select(ReanalysisItem).where(
                             ReanalysisItem.analysis_version_id == stored.id

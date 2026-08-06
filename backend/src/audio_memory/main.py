@@ -140,7 +140,10 @@ def create_app(
                 generation_source=coordinator,
             )
             await coordinator.initialize()
-            analysis_tasks = AnalysisTaskCoordinator(database)
+            analysis_tasks = AnalysisTaskCoordinator(
+                database,
+                reclaim_foreign_on_initialize=True,
+            )
             reanalysis_worker = ReanalysisWorker(
                 database=database,
                 task_coordinator=analysis_tasks,

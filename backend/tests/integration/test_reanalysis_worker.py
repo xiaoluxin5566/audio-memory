@@ -221,6 +221,7 @@ async def seed_history_run(
             )
         await session.commit()
     from audio_memory.reanalysis.preview import (
+        canonical_hash,
         current_fixed_rule_hashes,
         transcript_fingerprint,
     )
@@ -234,6 +235,9 @@ async def seed_history_run(
     metadata = {
         "fixed_rule_hashes": current_fixed_rule_hashes(),
         "transcript_fingerprints": fingerprints,
+        "profile_hash": canonical_hash(
+            [{"subject_id": "user", "dimension": "role"}]
+        ),
     }
     async with database.session() as session:
         history = await session.get(ReanalysisBatch, "history-1")
@@ -247,6 +251,7 @@ async def seed_history_run(
             version.prompt_snapshot_json = json.dumps(
                 {"_reanalysis": metadata}, sort_keys=True
             )
+            version.profile_snapshot_json = history.profile_snapshot_json
         await session.commit()
 
 
@@ -301,6 +306,47 @@ async def test_worker_enqueues_one_newest_item_reuses_valid_event_map_and_never_
     assert items[0].analysis_version_id == versions[0].id
     assert items[1].analysis_version_id is None
     assert (after_files, after_transcripts) == (before_files, before_transcripts)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_event_map_is_regenerated_when_frozen_profile_changed(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.preview import canonical_hash
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "profile-event-map.sqlite3")
+    await database.create_schema()
+    await seed_history_run(database, item_statuses=("pending",))
+    async with database.session() as session:
+        source_version = await session.get(AnalysisVersion, "old-version-0")
+        assert source_version is not None
+        source_version.profile_snapshot_json = "[]"
+        source_prompts = json.loads(source_version.prompt_snapshot_json)
+        source_prompts["_reanalysis"]["profile_hash"] = canonical_hash([])
+        source_version.prompt_snapshot_json = json.dumps(source_prompts, sort_keys=True)
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=ProfilePublisher(database),
+    )
+
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == "history-1"
+            )
+        )
+        batch = await session.get(ReanalysisBatch, "history-1")
+    assert generated is not None
+    assert generated.event_map_json is None
+    assert generated.event_map_hash is None
+    assert batch is not None and batch.status == "running"
     await database.dispose()
 
 
@@ -606,7 +652,7 @@ async def test_credential_resume_discards_unpublished_checkpoints_but_fixed_rule
     await database.create_schema()
     await seed_history_run(
         database,
-        batch_status="paused_credential_changed",
+        batch_status="paused",
         item_statuses=("pending",),
     )
     async with database.session() as session:
@@ -653,13 +699,14 @@ async def test_credential_resume_discards_unpublished_checkpoints_but_fixed_rule
         item = await session.get(ReanalysisItem, "item-0")
         batch = await session.get(ReanalysisBatch, "history-1")
         assert item is not None and batch is not None
-        batch.status = "paused_rules_changed"
+        assert item.analysis_version_id is None
+        assert item.error_code is None
+        batch.status = "paused"
+        item.error_code = "fixed_rules_changed"
         await session.commit()
     assert resumed.status == "running"
     assert resumed.credential_generation == 4
     assert stale is None
-    assert item.analysis_version_id is None
-    assert item.error_code is None
 
     with pytest.raises(ReanalysisStateError, match="fresh preview"):
         await service.resume("history-1")
@@ -889,7 +936,7 @@ async def test_worker_pauses_before_submission_when_persisted_compatibility_chan
             )
             or 0
         )
-    assert batch is not None and batch.status == "paused_rules_changed"
+    assert batch is not None and batch.status == "paused"
     assert item is not None and item.status == "pending"
     assert item.error_code == expected_error
     assert generated == 0
@@ -934,7 +981,7 @@ async def test_schema_change_between_worker_check_and_queue_insert_pauses_durabl
             )
             or 0
         )
-    assert batch is not None and batch.status == "paused_rules_changed"
+    assert batch is not None and batch.status == "paused"
     assert item is not None and item.status == "pending"
     assert item.error_code == "analysis_schema_changed"
     assert generated == 0

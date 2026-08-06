@@ -22,6 +22,39 @@ def migration_config(database_path: Path) -> Config:
     return config
 
 
+def test_0007_normalizes_legacy_reanalysis_pause_statuses(tmp_path: Path) -> None:
+    database_path = tmp_path / "pause-normalization.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0006")
+    with sqlite3.connect(database_path) as connection:
+        for position, status in enumerate(
+            ("paused_credential_changed", "paused_rules_changed", "paused_error")
+        ):
+            connection.execute(
+                "INSERT INTO reanalysis_batches "
+                "(id, status, provider_id, model_id, credential_generation, "
+                "prompt_snapshot_json, profile_snapshot_json, fixed_rules_hash, "
+                "snapshot_hash, created_at, updated_at) "
+                "VALUES (?, ?, 'kimi', 'model', 1, '{}', '[]', ?, ?, ?, ?)",
+                (
+                    f"history-{position}",
+                    status,
+                    "f" * 64,
+                    "s" * 64,
+                    "2026-08-06T00:00:00+00:00",
+                    "2026-08-06T00:00:00+00:00",
+                ),
+            )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT status FROM reanalysis_batches"
+        ).fetchall() == [("paused",)]
+
+
 def seed_version_0002_database(database_path: Path) -> Config:
     config = migration_config(database_path)
     command.upgrade(config, "0002")

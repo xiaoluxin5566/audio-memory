@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from pydantic import ValidationError
 from sqlalchemy import select, update
@@ -145,7 +146,12 @@ class ReanalysisWorker:
                     select(ReanalysisBatch)
                     .where(
                         ReanalysisBatch.status.in_(
-                            ("pending", "running", "stopping")
+                            (
+                                "pending",
+                                "running",
+                                "stopping",
+                                "content_completed_profile_failed",
+                            )
                         )
                     )
                     .order_by(ReanalysisBatch.created_at, ReanalysisBatch.id)
@@ -158,6 +164,9 @@ class ReanalysisWorker:
 
             if status == "stopping":
                 await self._finish_stop(batch_id)
+                return
+            if status == "content_completed_profile_failed":
+                await self._finish_content(batch_id)
                 return
             if self.provider_coordinator is not None:
                 provider_state = self.provider_coordinator.state(batch.provider_id)
@@ -210,6 +219,7 @@ class ReanalysisWorker:
                 batch.fixed_rules_hash,
                 fixed_rule_hashes,
                 expected_transcript_hash,
+                metadata.get("profile_hash"),
             )
             async with self.database.session() as session:
                 source = await session.get(Batch, item.source_batch_id)
@@ -292,10 +302,21 @@ class ReanalysisWorker:
                     if (
                         unfinished is not None
                         or batch is None
-                        or batch.status not in {"pending", "running"}
+                        or batch.status
+                        not in {
+                            "pending",
+                            "running",
+                            "content_completed_profile_failed",
+                        }
+                    ):
+                        return
+                    if (
+                        batch.status == "content_completed_profile_failed"
+                        and batch.completed_at is not None
                     ):
                         return
                     batch.status = "content_completed_profile_failed"
+                    batch.completed_at = datetime.now(UTC).isoformat()
                     await session.commit()
                 await self.publisher.retry_profile(batch_id)
         except Exception:
@@ -358,7 +379,7 @@ class ReanalysisWorker:
             batch = await session.get(ReanalysisBatch, batch_id)
             item = await session.get(ReanalysisItem, item_id)
             if batch is not None and batch.status in {"pending", "running"}:
-                batch.status = "paused_rules_changed"
+                batch.status = "paused"
             if item is not None and item.status == "pending":
                 item.error_code = error_code
             await session.commit()
@@ -369,6 +390,7 @@ class ReanalysisWorker:
         fixed_rules_hash: str,
         fixed_rule_hashes: dict[str, str],
         transcript_sha256: str,
+        profile_hash: str | None,
     ) -> tuple[str | None, str | None]:
         async with self.database.session() as session:
             source = await session.get(Batch, source_batch_id)
@@ -393,6 +415,7 @@ class ReanalysisWorker:
                 return None, None
             if (
                 source_metadata.get("fixed_rule_hashes") != fixed_rule_hashes
+                or source_metadata.get("profile_hash") != profile_hash
                 or source_metadata.get("transcript_fingerprints", {}).get(
                     source_batch_id
                 )

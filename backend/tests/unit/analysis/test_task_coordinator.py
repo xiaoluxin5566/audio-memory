@@ -182,6 +182,38 @@ async def test_restart_returns_linked_history_item_to_pending(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_instance_locked_fast_restart_reclaims_unexpired_foreign_run(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "fast-restart.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-fast-restart")
+    predecessor = AnalysisTaskCoordinator(database)
+    await predecessor.submit_new_upload(
+        request("job-fast-restart", batch_id=None, priority=0)
+    )
+    await predecessor.next_request()
+
+    successor = AnalysisTaskCoordinator(
+        database,
+        reclaim_foreign_on_initialize=True,
+    )
+    claimed = await successor.next_request()
+
+    assert claimed.source_job_id == "job-fast-restart"
+    async with database.session() as session:
+        version = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.source_job_id == "job-fast-restart"
+            )
+        )
+    assert version is not None
+    assert version.status == "running"
+    assert version.worker_owner_id == successor.owner_id
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_close_releases_linked_history_item_with_owned_claim(tmp_path) -> None:
     database = Database(tmp_path / "history-close.sqlite3")
     await database.create_schema()
@@ -209,7 +241,7 @@ async def test_close_releases_linked_history_item_with_owned_claim(tmp_path) -> 
 
 @pytest.mark.parametrize(
     "paused_status",
-    ("stopped", "paused_rules_changed", "paused_error"),
+    ("stopped", "paused", "paused_rules_changed"),
 )
 @pytest.mark.asyncio
 async def test_paused_history_batch_does_not_yield_a_new_item(
