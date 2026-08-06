@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Protocol
 
 from pydantic import (
     BaseModel,
@@ -24,6 +28,7 @@ from audio_memory.prompts.evidence import (
     validate_evidence_integrity,
 )
 from audio_memory.prompts.schemas import StrictSceneResult
+from audio_memory.prompts.store import PROMPT_SCENES
 
 
 _MEDIA_EVENT_TYPES = {
@@ -114,6 +119,7 @@ class _TodoState(_StrictEvaluationModel):
     source_event_id: str = PydanticField(pattern=r"^event_[A-Za-z0-9_]+$")
     status: Literal["open", "pending", "completed", "deleted"]
     overdue: bool
+    completion_source: Literal["user", "model"]
 
 
 class _EvaluationCase(_StrictEvaluationModel):
@@ -174,6 +180,35 @@ class _EvaluationFixture(_StrictEvaluationModel):
 
 
 @dataclass(slots=True)
+class EvaluationFailure:
+    code: str
+    scope: str
+
+
+@dataclass(slots=True)
+class ProviderCaseOutput:
+    event_map: EventMap
+    scene_results: list[StrictSceneResult]
+    model_id: str
+    prompt_versions: dict[str, int]
+    latency_ms: int
+    token_usage: dict[str, int] | None = None
+
+
+class ProviderEvaluationBackend(Protocol):
+    async def run_case(
+        self, provider_id: str, case: _EvaluationCase
+    ) -> ProviderCaseOutput: ...
+
+
+@dataclass(slots=True)
+class ProviderEvaluationResult:
+    report: EvaluationReport
+    report_path: Path
+    passed: bool
+
+
+@dataclass(slots=True)
 class EvaluationReport:
     schema_valid: int = 0
     schema_total: int = 0
@@ -186,6 +221,7 @@ class EvaluationReport:
     cases_evaluated: int = 0
     coverage: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    failures: list[EvaluationFailure] = field(default_factory=list)
 
     @property
     def schema_valid_rate(self) -> float:
@@ -199,6 +235,9 @@ class EvaluationReport:
 
     @property
     def passed(self) -> bool:
+        return self.passes_for(_REQUIRED_COVERAGE)
+
+    def passes_for(self, required_coverage: set[str]) -> bool:
         return (
             self.cases_evaluated > 0
             and self.schema_valid_rate == 1.0
@@ -208,8 +247,9 @@ class EvaluationReport:
             and self.whisper_calls_during_reanalysis == 0
             and self.overdue_auto_completions == 0
             and self.secret_leaks == 0
-            and not self.missing_coverage
+            and not (required_coverage - set(self.coverage))
             and not self.errors
+            and not self.failures
         )
 
     def merge(self, other: EvaluationReport) -> None:
@@ -227,6 +267,11 @@ class EvaluationReport:
             setattr(self, name, getattr(self, name) + getattr(other, name))
         self.coverage = sorted(set(self.coverage) | set(other.coverage))
         self.errors.extend(other.errors)
+        self.failures.extend(other.failures)
+
+    def fail(self, code: str, scope: str, message: str) -> None:
+        self.failures.append(EvaluationFailure(code=code, scope=scope))
+        self.errors.append(message)
 
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -246,9 +291,17 @@ def evaluate_fixtures(paths: Iterable[Path]) -> EvaluationReport:
     for path in paths:
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except UnicodeDecodeError:
             report.schema_total += 1
-            report.errors.append("fixture could not be loaded")
+            report.fail("fixture_not_utf8", "fixture", "fixture is not UTF-8")
+            continue
+        except OSError:
+            report.schema_total += 1
+            report.fail("fixture_unreadable", "fixture", "fixture could not be read")
+            continue
+        except json.JSONDecodeError:
+            report.schema_total += 1
+            report.fail("fixture_invalid_json", "fixture", "fixture is not valid JSON")
             continue
         report.merge(evaluate_fixture_data(payload))
     return report
@@ -260,7 +313,9 @@ def evaluate_fixture_data(payload: Any) -> EvaluationReport:
         fixture = _EvaluationFixture.model_validate(payload)
     except ValidationError:
         report.schema_total += 1
-        report.errors.append("unsupported fixture contract")
+        report.fail(
+            "fixture_contract_invalid", "fixture", "unsupported fixture contract"
+        )
         return report
 
     verified_coverage = {
@@ -270,12 +325,184 @@ def evaluate_fixture_data(payload: Any) -> EvaluationReport:
     }
     report.coverage = sorted(verified_coverage)
     if set(fixture.coverage) != verified_coverage:
-        report.errors.append("declared coverage does not match verified case behavior")
+        report.fail(
+            "coverage_mismatch",
+            "fixture",
+            "declared coverage does not match verified case behavior",
+        )
 
     for case in fixture.cases:
         report.cases_evaluated += 1
         _evaluate_case(case, report)
     return report
+
+
+async def run_provider_evaluation(
+    provider_id: str,
+    paths: Iterable[Path],
+    *,
+    backend: ProviderEvaluationBackend,
+    report_root: Path,
+) -> ProviderEvaluationResult:
+    """Evaluate live outputs while persisting aggregate metadata only.
+
+    The backend owns credential access. This boundary never accepts a raw secret and
+    the local artifact intentionally excludes transcripts and generated content.
+    """
+    aggregate = EvaluationReport()
+    model_ids: set[str] = set()
+    prompt_versions: dict[str, int] = {}
+    latency_ms = 0
+    token_usage: dict[str, int] = {}
+    declared_coverage: set[str] = set()
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            fixture = _EvaluationFixture.model_validate(payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError):
+            aggregate.schema_total += 1
+            aggregate.fail(
+                "provider_fixture_invalid", "fixture", "provider fixture is invalid"
+            )
+            continue
+        declared_coverage.update(fixture.coverage)
+        for case in fixture.cases:
+            try:
+                output = await backend.run_case(provider_id, case)
+                generated_case = _EvaluationCase.model_validate(
+                    {
+                        **case.model_dump(mode="python"),
+                        "event_map": output.event_map.model_dump(mode="python"),
+                        "scene_results": [
+                            result.model_dump(mode="python")
+                            for result in output.scene_results
+                        ],
+                    }
+                )
+            except Exception:
+                aggregate.schema_total += 1
+                aggregate.fail(
+                    "provider_case_failed",
+                    "provider",
+                    "provider case failed",
+                )
+                continue
+            model_ids.add(output.model_id)
+            prompt_versions.update(output.prompt_versions)
+            latency_ms += output.latency_ms
+            for key, value in (output.token_usage or {}).items():
+                token_usage[key] = token_usage.get(key, 0) + value
+            generated_payload = {
+                "fixture_version": 1,
+                "coverage": sorted(_derive_coverage(generated_case)),
+                "cases": [generated_case.model_dump(mode="python")],
+            }
+            aggregate.merge(evaluate_fixture_data(generated_payload))
+    aggregate.coverage = sorted(set(aggregate.coverage))
+    if set(aggregate.coverage) != declared_coverage:
+        aggregate.fail(
+            "provider_coverage_mismatch",
+            "provider",
+            "provider outputs do not satisfy declared coverage",
+        )
+    provider_passed = aggregate.passes_for(declared_coverage)
+
+    report_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    report_root.chmod(0o700)
+    run_root = report_root / datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    run_root.mkdir(mode=0o700)
+    report_path = run_root / "report.json"
+    payload = {
+        **aggregate.as_dict(),
+        "mode": "provider",
+        "provider": provider_id,
+        "model_id": (
+            next(iter(model_ids))
+            if len(model_ids) == 1
+            else "mixed" if model_ids else "unavailable"
+        ),
+        "prompt_versions": prompt_versions,
+        "latency_ms": latency_ms,
+        "token_usage": token_usage or None,
+        "missing_coverage": sorted(declared_coverage - set(aggregate.coverage)),
+        "passed": provider_passed,
+    }
+    payload.pop("errors", None)
+    temporary = run_root / ".report.json.tmp"
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+    temporary.chmod(0o600)
+    os.replace(temporary, report_path)
+    return ProviderEvaluationResult(aggregate, report_path, provider_passed)
+
+
+class _RealProviderBackend:
+    """Production prompt path with credentials constrained to KeychainRepository."""
+
+    def __init__(self, *, keychain: Any, client: Any, prompt_store: Any) -> None:
+        from audio_memory.analysis.provider import ProviderAnalysisClient, RemoteSceneAnalyzer
+        from audio_memory.prompts.composer import PromptComposer
+
+        self._client = ProviderAnalysisClient(keychain, client)
+        self._analyzer = RemoteSceneAnalyzer(self._client)
+        self._prompt_store = prompt_store
+        self._composer = PromptComposer()
+
+    async def run_case(
+        self, provider_id: str, case: _EvaluationCase
+    ) -> ProviderCaseOutput:
+        from audio_memory.analysis.runner import _SCENE_MODELS
+        from audio_memory.providers.types import PROVIDER_CONFIGS
+        from pydantic import TypeAdapter
+
+        config = PROVIDER_CONFIGS[provider_id]
+        snapshot = {"provider_id": provider_id, "model_id": config.model_id}
+        transcript = [
+            segment.model_dump(mode="json") for segment in case.transcript_segments
+        ]
+        started = time.perf_counter()
+        usage_before = dict(self._client.usage_totals)
+        event_request = self._composer.compose_event_map(
+            transcript=transcript,
+            profile=[],
+            schema=EventMap.model_json_schema(),
+        )
+        event_map = await self._analyzer.analyze_event_map(event_request, snapshot)
+        scene_results: list[StrictSceneResult] = []
+        versions: dict[str, int] = {}
+        for scene_id in PROMPT_SCENES:
+            prompt = self._prompt_store.get(scene_id)
+            versions[scene_id] = prompt.version
+            model = _SCENE_MODELS[scene_id]
+            request = self._composer.compose_scene(
+                scene_id,
+                transcript=transcript,
+                event_map=event_map,
+                profile=[],
+                prompt=prompt,
+                schema=model.model_json_schema(),
+            )
+            generated = await self._analyzer.analyze_scene(
+                scene_id, request, snapshot
+            )
+            scene_results.append(TypeAdapter(model).validate_python(generated))
+        usage_delta = {
+            key: value - usage_before.get(key, 0)
+            for key, value in self._client.usage_totals.items()
+        }
+        return ProviderCaseOutput(
+            event_map=EventMap.model_validate(event_map),
+            scene_results=scene_results,
+            model_id=config.model_id,
+            prompt_versions=versions,
+            latency_ms=round((time.perf_counter() - started) * 1000),
+            token_usage=(
+                usage_delta
+                if any(usage_delta.values())
+                else None
+            ),
+        )
 
 
 def _evaluate_case(case: _EvaluationCase, report: EvaluationReport) -> None:
@@ -293,14 +520,20 @@ def _evaluate_case(case: _EvaluationCase, report: EvaluationReport) -> None:
                 report.unknown_evidence_ids += 1
             elif "outside" in message:
                 report.cross_event_contamination += 1
-            report.errors.append(
-                f"{case.case_id}: {result.scene_id} evidence validation failed"
+            report.fail(
+                "evidence_invalid",
+                result.scene_id,
+                f"{case.case_id}: {result.scene_id} evidence validation failed",
             )
 
     raw_results = [result.model_dump(mode="python") for result in case.scene_results]
+    segment_speakers = {
+        segment.segment_id: segment.speaker_id for segment in case.transcript_segments
+    }
     report.false_user_todos += _count_false_user_todos(
         raw_results,
         case.event_map,
+        segment_speakers=segment_speakers,
         user_identity_consistent=user_identity_consistent,
         inconsistent_events=inconsistent_events,
     )
@@ -311,13 +544,19 @@ def _evaluate_case(case: _EvaluationCase, report: EvaluationReport) -> None:
     report.overdue_auto_completions += sum(
         1
         for state in case.todo_states
-        if state.overdue and state.status not in {"open", "pending"}
+        if state.overdue
+        and state.status == "completed"
+        and state.completion_source != "user"
     )
 
     report.secret_leaks += _count_secret_leaks(
         {
             "event_map": case.event_map.model_dump(mode="python"),
             "scene_results": raw_results,
+            "transcript_segments": [
+                segment.model_dump(mode="python")
+                for segment in case.transcript_segments
+            ],
         }
     )
 
@@ -325,36 +564,93 @@ def _evaluate_case(case: _EvaluationCase, report: EvaluationReport) -> None:
 def _derive_coverage(case: _EvaluationCase) -> set[str]:
     coverage: set[str] = set()
     results = {result.scene_id: result for result in case.scene_results}
+    events = {event.event_id: event for event in case.event_map.events}
+    segments = {
+        segment.segment_id: segment for segment in case.transcript_segments
+    }
+    user_speaker_id = case.event_map.user_speaker.speaker_id
     event_scenes: dict[str, set[str]] = {}
     todo_event_ids: set[str] = set()
     for result in case.scene_results:
         for todo in result.todos:
             todo_event_ids.add(todo.source_event_id)
-            event_scenes.setdefault(todo.source_event_id, set()).add(result.scene_id)
+            event = events.get(todo.source_event_id)
+            if event is not None and result.scene_id in event.candidate_scenes:
+                event_scenes.setdefault(todo.source_event_id, set()).add(
+                    result.scene_id
+                )
         for card in result.cards:
             for event_id in getattr(card, "event_ids", []):
+                event = events.get(event_id)
+                if event is None or result.scene_id not in event.candidate_scenes:
+                    continue
+                if result.scene_id == "inspiration":
+                    evidence_ids = {
+                        segment_id
+                        for idea in card.detail.ideas
+                        if idea.event_id == event_id
+                        for segment_id in idea.evidence_segment_ids
+                    }
+                    if not any(
+                        segments.get(segment_id) is not None
+                        and segments[segment_id].speaker_id == user_speaker_id
+                        for segment_id in evidence_ids
+                    ):
+                        continue
                 event_scenes.setdefault(event_id, set()).add(result.scene_id)
 
     meeting = results["meeting"]
-    if len(meeting.cards) >= 2:
+    meeting_event_ids = {
+        event_id
+        for card in meeting.cards
+        for event_id in getattr(card, "event_ids", [])
+        if (event := events.get(event_id)) is not None
+        and event.event_type in {"meeting", "work_meeting"}
+        and "meeting" in event.candidate_scenes
+    }
+    if len(meeting_event_ids) >= 2:
         coverage.add("two_meetings")
     if any(len(scene_ids) >= 2 for scene_ids in event_scenes.values()):
         coverage.add("one_event_multiple_scenes")
 
     content = results["content"]
-    if any(
-        len({item.event_id for item in card.detail.consumed_items}) >= 2
+    consumed_event_ids = {
+        item.event_id
         for card in content.cards
+        for item in card.detail.consumed_items
+        if (event := events.get(item.event_id)) is not None
+        and event.event_type in _MEDIA_EVENT_TYPES
+        and "content" in event.candidate_scenes
+    }
+    consumed_topics = [
+        set(events[event_id].topics) for event_id in consumed_event_ids
+    ]
+    if (
+        len(consumed_event_ids) >= 2
+        and all(consumed_topics)
+        and all(
+            left.isdisjoint(right)
+            for index, left in enumerate(consumed_topics)
+            for right in consumed_topics[index + 1 :]
+        )
     ):
         coverage.add("unrelated_content_events")
 
     parenting = results["parenting"]
-    if any(len(card.detail.interactions) >= 2 for card in parenting.cards):
+    parenting_event_ids = {
+        interaction.event_id
+        for card in parenting.cards
+        for interaction in card.detail.interactions
+        if (event := events.get(interaction.event_id)) is not None
+        and event.event_type in {"parenting", "family_interaction"}
+        and "parenting" in event.candidate_scenes
+    }
+    if len(parenting_event_ids) >= 2:
         coverage.add("parenting_interactions")
 
-    user_speaker_id = case.event_map.user_speaker.speaker_id
     if any(
-        "todo" in event.candidate_scenes
+        event.event_type in _TODO_CAPABLE_EVENT_TYPES
+        and "todo" in event.candidate_scenes
         and user_speaker_id not in event.speaker_ids
         and event.event_id not in todo_event_ids
         for event in case.event_map.events
@@ -364,8 +660,6 @@ def _derive_coverage(case: _EvaluationCase) -> set[str]:
     segment_text = {
         segment.segment_id: segment.text for segment in case.transcript_segments
     }
-    events = {event.event_id: event for event in case.event_map.events}
-
     def has_vague_title_evidence(item: Any) -> bool:
         event = events.get(item.event_id)
         if event is None or item.title_source != "unknown":
@@ -401,8 +695,23 @@ def _derive_coverage(case: _EvaluationCase) -> set[str]:
         and all(
             case_item.confidence >= 0.8
             and bool(case_item.counterparty_response)
+            and (event := events.get(case_item.event_id)) is not None
+            and event.event_type in {"meeting", "work_meeting"}
+            and "growth" in event.candidate_scenes
+            and user_speaker_id
+            in {
+                segments[segment_id].speaker_id
+                for segment_id in case_item.evidence_segment_ids
+                if segment_id in segments
+            }
+            and any(
+                segments[segment_id].speaker_id != user_speaker_id
+                for segment_id in case_item.evidence_segment_ids
+                if segment_id in segments
+            )
             for case_item in direction.cases
         )
+        and bool(direction.cases)
         for card in growth.cards
         for direction in card.detail.directions
     ):
@@ -410,19 +719,39 @@ def _derive_coverage(case: _EvaluationCase) -> set[str]:
 
     inspiration = results["inspiration"]
     if not inspiration.should_generate and any(
-        "不错" in segment.text for segment in case.transcript_segments
+        event.event_type == "casual_chat"
+        and "inspiration" in event.candidate_scenes
+        and any(
+            segment_id in segments
+            and segments[segment_id].speaker_id == user_speaker_id
+            and "不错" in segments[segment_id].text
+            for segment_id in event.evidence_segment_ids
+        )
+        for event in case.event_map.events
     ):
         coverage.add("lightweight_inspiration_phrase")
 
     if all(not result.should_generate for result in case.scene_results) and any(
-        "ignore previous" in segment.text.lower()
-        and "prompt" in segment.text.lower()
-        for segment in case.transcript_segments
+        any(
+            segment_id in segments
+            and "ignore previous" in segments[segment_id].text.lower()
+            and "prompt" in segments[segment_id].text.lower()
+            for segment_id in event.evidence_segment_ids
+        )
+        for event in case.event_map.events
     ):
         coverage.add("prompt_injection")
 
+    generated_todos = {
+        todo.source_event_id: todo
+        for result in case.scene_results
+        for todo in result.todos
+    }
     if any(
-        state.overdue and state.status in {"open", "pending"}
+        state.overdue
+        and state.status in {"open", "pending"}
+        and (todo := generated_todos.get(state.source_event_id)) is not None
+        and todo.due_at is not None
         for state in case.todo_states
     ):
         coverage.add("overdue_todo")
@@ -432,6 +761,17 @@ def _derive_coverage(case: _EvaluationCase) -> set[str]:
     ) >= 2:
         coverage.add("multi_file_batch")
     return coverage
+
+
+def _collect_evidence_ids(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        collected = set(value.get("evidence_segment_ids", []))
+        for item in value.values():
+            collected.update(_collect_evidence_ids(item))
+        return collected
+    if isinstance(value, list):
+        return {segment_id for item in value for segment_id in _collect_evidence_ids(item)}
+    return set()
 
 
 def _speaker_integrity(
@@ -448,7 +788,11 @@ def _speaker_integrity(
         for segment_id in user_speaker.evidence_segment_ids
     ):
         user_consistent = False
-        report.errors.append(f"{case.case_id}: user speaker evidence is inconsistent")
+        report.fail(
+            "user_speaker_evidence_invalid",
+            "user_speaker",
+            f"{case.case_id}: user speaker evidence is inconsistent",
+        )
 
     inconsistent_events: set[str] = set()
     for event in case.event_map.events:
@@ -460,7 +804,11 @@ def _speaker_integrity(
         if set(event.speaker_ids) != actual_speakers:
             inconsistent_events.add(event.event_id)
     if inconsistent_events:
-        report.errors.append(f"{case.case_id}: event speaker metadata is inconsistent")
+        report.fail(
+            "event_speaker_metadata_invalid",
+            "event_map",
+            f"{case.case_id}: event speaker metadata is inconsistent",
+        )
     return user_consistent, inconsistent_events
 
 
@@ -468,6 +816,7 @@ def _count_false_user_todos(
     raw_results: Any,
     event_map: EventMap,
     *,
+    segment_speakers: dict[str, str],
     user_identity_consistent: bool,
     inconsistent_events: set[str],
 ) -> int:
@@ -498,6 +847,10 @@ def _count_false_user_todos(
             if event is None:
                 continue
             event_type = event.event_type.strip().lower()
+            todo_evidence_speakers = {
+                segment_speakers.get(segment_id)
+                for segment_id in todo.get("evidence_segment_ids", [])
+            }
             if (
                 event_type in _MEDIA_EVENT_TYPES
                 or event_type not in _TODO_CAPABLE_EVENT_TYPES
@@ -505,6 +858,7 @@ def _count_false_user_todos(
                 or not user_identity_consistent
                 or event.event_id in inconsistent_events
                 or user_speaker_id not in event.speaker_ids
+                or user_speaker_id not in todo_evidence_speakers
             ):
                 false_count += 1
     return false_count
@@ -527,7 +881,7 @@ def _count_secret_leaks(value: Any, *, field_name: str | None = None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate saved Prompt examples without network or provider access."
+        description="Evaluate saved Prompt examples offline or with an explicit provider."
     )
     parser.add_argument(
         "--fixture",
@@ -538,16 +892,58 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        help=argparse.SUPPRESS,
+        choices=("kimi", "deepseek", "openai"),
+        help="Explicitly run stored cases through a provider using its Keychain credential.",
+    )
+    parser.add_argument(
+        "--report-root",
+        type=Path,
+        default=None,
+        help="Private directory for redacted provider-mode reports.",
     )
     return parser
+
+
+async def _run_provider_cli(
+    provider_id: str, fixture_paths: list[Path], report_root: Path | None
+) -> int:
+    import httpx
+
+    from audio_memory.config import AppPaths
+    from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
+    from audio_memory.prompts.store import PromptStore
+
+    paths = AppPaths.from_home(Path.home())
+    private_report_root = report_root or paths.root / "prompt-evaluations"
+    backend = _RealProviderBackend(
+        keychain=KeychainRepository(MacSecurityClient()),
+        client=httpx.AsyncClient(),
+        prompt_store=PromptStore(paths.prompts),
+    )
+    try:
+        result = await run_provider_evaluation(
+            provider_id,
+            fixture_paths,
+            backend=backend,
+            report_root=private_report_root,
+        )
+    finally:
+        await backend._client.client.aclose()
+    print(
+        json.dumps(
+            {"passed": result.passed, "report_run": result.report_path.parent.name}
+        )
+    )
+    return 0 if result.passed else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.provider is not None:
-        parser.error("offline-only evaluator does not execute provider requests")
+        return asyncio.run(
+            _run_provider_cli(args.provider, args.fixture, args.report_root)
+        )
     report = evaluate_fixtures(args.fixture)
     print(json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True))
     return 0 if report.passed else 1

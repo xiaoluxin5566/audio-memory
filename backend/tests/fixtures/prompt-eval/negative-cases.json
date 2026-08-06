@@ -44,7 +44,7 @@
         {"scene_id": "inspiration", "should_generate": false, "generation_reason": "轻量评价不构成新观点。", "confidence": 0.1, "cards": [], "todos": []}
       ],
       "runtime_trace": {"mode": "reanalysis", "whisper_calls": 0},
-      "todo_states": [{"source_event_id": "event_overdue", "status": "open", "overdue": true}]
+      "todo_states": [{"source_event_id": "event_overdue", "status": "open", "overdue": true, "completion_source": "model"}]
     }
   ]
 }

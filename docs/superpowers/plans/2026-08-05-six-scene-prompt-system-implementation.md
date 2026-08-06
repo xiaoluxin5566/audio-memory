@@ -446,7 +446,7 @@ Commit: `git commit -m "feat: render structured scene results"`
 
 ### Task 8: 评测集与安装验收（历史草案）
 
-> **历史说明：** 其中离线评测和安装门禁由 PRD V1.1 Task 10 收口。任何真实厂商调用均需当次用户明确授权；未授权时仅运行离线样例，不读取保存的 Key。
+> **历史说明：** 其中离线评测和安装门禁由 PRD V1.1 Task 10 收口。默认仍仅运行离线样例；后续授权的加固轮次增加了显式 provider 模式，凭据仅可来自 Keychain，报告不保存转写、原始生成内容或密钥。
 
 **Files:**
 - Create: `backend/tests/fixtures/prompt-eval/multi-scene.json`
@@ -459,8 +459,8 @@ Commit: `git commit -m "feat: render structured scene results"`
 - Modify: `prototype/README.md`
 
 **Interfaces:**
-- Produces: redacted offline evaluation report on stdout.
-- Consumes: repository fixtures only; does not read `KeychainRepository` or call a provider.
+- Produces: redacted offline evaluation report on stdout; optional provider mode writes a private aggregate report.
+- Consumes by default: repository fixtures only. Provider mode must be selected explicitly and receives credentials only through `KeychainRepository`.
 
 - [ ] **Step 1: Add deterministic contract fixtures and failing assertions**
 
@@ -481,7 +481,7 @@ Expected: FAIL because the evaluator and fixtures do not exist.
 
 - [ ] **Step 3: Implement the offline evaluation mode**
 
-Offline mode validates the complete stored-example contract, production Schemas and all cross-reference rules. It rejects provider execution flags and never reads Keychain, prints keys or sends fixture transcripts outside the process.
+Offline mode validates the complete stored-example contract, production Schemas and all cross-reference rules without reading Keychain or sending fixture transcripts outside the process. The later optional provider path is isolated behind an explicit flag and its report remains aggregate-only.
 
 - [ ] **Step 4: Extend doctor and documentation**
 
@@ -509,6 +509,6 @@ Expected: all backend, frontend, browser and installer tests PASS; doctor report
 
 Run: `cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --fixture tests/fixtures/prompt-eval/multi-scene.json --fixture tests/fixtures/prompt-eval/negative-cases.json --fixture tests/fixtures/prompt-eval/injection.json`
 
-Expected: stdout reports Schema valid rate 100%, required coverage derived from case behavior, and zero unknown evidence IDs, cross-event contamination, false user todos, reanalysis Whisper calls, overdue auto-completion and secret leakage. Real-provider comparison is not run and requires a separately authorized future task.
+Expected: stdout reports Schema valid rate 100%, required coverage derived from case behavior, and zero unknown evidence IDs, cross-event contamination, false user todos, reanalysis Whisper calls, overdue auto-completion and secret leakage. Provider capability tests use fakes; no real comparison is run as part of this gate.
 
 Commit: superseded by PRD V1.1 Task 10.

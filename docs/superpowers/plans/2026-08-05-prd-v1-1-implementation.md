@@ -642,7 +642,7 @@ Commit: `git commit -m "feat: add history reanalysis experience"`
 
 **Interfaces:**
 - Offline evaluator verifies Schema, evidence, event separation, user attribution, todo rules and zero secret leakage.
-- Task 10 is offline-only: the evaluator does not read Keychain, accept a provider execution mode, or call Kimi, DeepSeek or OpenAI.
+- The default Task 10 gate is offline-only. A later authorized hardening round added an explicit optional provider mode; it accepts no raw credential input and delegates credential lookup only to `KeychainRepository`.
 
 - [ ] **Step 1: Add contract fixtures and failing assertions**
 
@@ -666,7 +666,7 @@ Expected: FAIL because fixtures/evaluator are absent.
 
 - [ ] **Step 3: Implement the strict offline evaluator**
 
-Validate the complete fixture contract, production scene Schemas, evidence cross-references, event separation, speaker attribution, user todo rules, overdue state, reanalysis trace and secret patterns. Derive scenario coverage from fixture behavior rather than trusting declared labels. Reject `--provider` with an explicit offline-only error; do not import provider adapters or `KeychainRepository`.
+Validate the complete fixture contract, production scene Schemas, evidence cross-references, event separation, speaker attribution, user todo rules, overdue state, reanalysis trace and secret patterns. Derive scenario coverage from event type and evidence behavior rather than trusting declared labels. Offline mode does not import provider adapters or touch Keychain; explicit provider mode constructs the production Prompt path and a Keychain-only client, then writes a redacted local report.
 
 - [ ] **Step 4: Reconcile all downstream documentation**
 
@@ -696,7 +696,7 @@ Run without any saved provider configuration:
 
 `cd backend && UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py --fixture tests/fixtures/prompt-eval/multi-scene.json --fixture tests/fixtures/prompt-eval/negative-cases.json --fixture tests/fixtures/prompt-eval/injection.json`
 
-Expected: the stdout JSON report is redacted, reports all required coverage derived from case behavior, and exits 0 with every release metric at zero. Real-provider evaluation remains explicitly not run and requires a separately authorized future task.
+Expected: the stdout JSON report is redacted, reports all required coverage derived from case behavior, and exits 0 with every release metric at zero. The optional provider capability is verified with fakes; no real-provider evaluation, Keychain access or network call is part of this release run.
 
 Commit: `git commit -m "feat: add offline prompt evaluation gate"`
 

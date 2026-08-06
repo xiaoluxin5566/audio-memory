@@ -38,6 +38,7 @@ class ProviderAnalysisClient:
         self.keychain = keychain
         self.client = client
         self._remote_lock = asyncio.Lock()
+        self.usage_totals = {"input_tokens": 0, "output_tokens": 0}
         self.adapters = {
             "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
@@ -163,11 +164,28 @@ class ProviderAnalysisClient:
             )
         try:
             body = response.json()
-            return self.adapters[provider_id].extract_text(body)
+            text = self.adapters[provider_id].extract_text(body)
+            usage = body.get("usage", {}) if isinstance(body, dict) else {}
+            if isinstance(usage, dict):
+                self.usage_totals["input_tokens"] += self._usage_value(
+                    usage, "input_tokens", "prompt_tokens"
+                )
+                self.usage_totals["output_tokens"] += self._usage_value(
+                    usage, "output_tokens", "completion_tokens"
+                )
+            return text
         except (ValueError, TypeError) as exc:
             raise ProviderAnalysisError(
                 "Provider returned an invalid response", code="model_response_invalid"
             ) from exc
+
+    @staticmethod
+    def _usage_value(usage: dict[object, object], *names: str) -> int:
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return 0
 
 
 class RemoteSceneAnalyzer:

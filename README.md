@@ -42,7 +42,7 @@ UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py \
   --fixture tests/fixtures/prompt-eval/injection.json
 ```
 
-门禁验证 Schema、证据 ID、跨事件隔离、用户待办归属、过期状态、历史重分析零 Whisper 调用与零密钥泄漏。真实厂商 Prompt 对比未在该脚本中实现，也不是默认发布步骤；必须在用户明确授权后另行设计和执行。
+门禁验证 Schema、证据 ID、跨事件隔离、用户待办归属、过期状态、历史重分析零 Whisper 调用与零密钥泄漏。可选的 `--provider kimi|deepseek|openai` 模式只在显式选择后启动，凭据仅通过 macOS Keychain 读取；本地报告只保存模型、Prompt 版本、延迟、可用的 token 用量和聚合门禁指标，不保存转写、原始生成内容或密钥。该模式不是默认发布步骤，本次交付也未执行真实厂商请求。
 
 ## 完整验收
 

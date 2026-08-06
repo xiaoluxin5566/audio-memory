@@ -193,6 +193,32 @@ async def test_provider_client_allows_only_one_remote_model_request_globally() -
 
 
 @pytest.mark.asyncio
+async def test_provider_client_accumulates_normalized_usage_when_available() -> None:
+    responses = iter(
+        [
+            {
+                "choices": [{"message": {"content": "{}"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+            },
+            {
+                "choices": [{"message": {"content": "{}"}}],
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        ]
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(responses))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        await provider.generate("kimi", system="one", user="one")
+        await provider.generate("kimi", system="two", user="two")
+
+    assert provider.usage_totals == {"input_tokens": 14, "output_tokens": 5}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "injection",
     [
