@@ -83,9 +83,9 @@ legacy parser path are retired rather than kept alongside the strict path.
 ## Exact verification commands and results
 
 - `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest tests/unit/analysis/test_task_coordinator.py tests/integration/test_event_map_pipeline.py tests/integration/test_analysis_pipeline.py -q`
-  - `15 passed in 0.77s`
+  - `19 passed in 1.09s`
 - `cd backend && UV_CACHE_DIR=../.uv-cache uv run pytest -q`
-  - `299 passed in 4.14s`
+  - `303 passed in 4.95s`
 - `cd backend && UV_CACHE_DIR=../.uv-cache uv run python -m compileall -q src tests`
   - exit 0, no output
 - `git diff --check`
@@ -147,6 +147,29 @@ scratch.
   version; a key-generation change invalidates its unpublished scene state.
 - Profile candidate writes are idempotent per version and precede publication.
 - `docs/HANDOFF-2026-08-06.md` was not modified, staged, deleted, or committed.
+
+## Independent review closure
+
+An independent diff review of `7bb67b8..9d148d2` found four Important
+lifecycle issues. Each received a new failing behavior test before the fix:
+
+1. Cancellation RED marked a normally cancelled runner `failed`; GREEN now
+   re-raises `CancelledError` while leaving the version `running`, so startup
+   recovery returns it to `pending`.
+2. Profile evidence RED showed an unknown evidence ID was omitted from
+   `ProfileCandidate` but still reached the publisher; GREEN now derives the
+   publishable profile delta only from the evidence-verified candidate set.
+3. Cross-coordinator claim review found the selection/update was not an
+   explicit database compare-and-set. GREEN uses `UPDATE ... WHERE status =
+   'pending'` and accepts the claim only when exactly one row changed. The app's
+   existing `InstanceLock` prevents two backend processes; the conditional
+   claim additionally protects multiple coordinator instances.
+4. History terminal RED left `ReanalysisItem.status='running'`; GREEN completes
+   the item/batch on success, marks item/batch failure state on errors, and
+   returns the item to pending while pausing the batch on credential change.
+
+After these fixes the complete verification gate was rerun, producing the
+19/19 focused and 303/303 full-suite results above.
 
 ## Concerns / deferred boundary
 

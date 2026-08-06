@@ -197,3 +197,31 @@ async def test_fixed_rules_hash_is_independent_of_user_prompt_snapshot(tmp_path)
     assert hashes[0] == hashes[1]
     assert len(hashes[0]) == 64
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_coordinators_cannot_claim_the_same_pending_version(tmp_path) -> None:
+    database = Database(tmp_path / "atomic-claim.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-atomic")
+    first = AnalysisTaskCoordinator(database)
+    second = AnalysisTaskCoordinator(database)
+    await first.initialize()
+    await second.initialize()
+    item = request("job-atomic", batch_id=None, priority=0)
+    await first.submit_new_upload(item)
+
+    first_claim = asyncio.create_task(first.next_request())
+    second_claim = asyncio.create_task(second.next_request())
+    done, pending = await asyncio.wait(
+        {first_claim, second_claim}, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+    )
+    await asyncio.sleep(0.05)
+
+    assert len(done) == 1
+    assert next(iter(done)).result() == item
+    assert sum(task.done() for task in (first_claim, second_claim)) == 1
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    await database.dispose()

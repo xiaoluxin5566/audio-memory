@@ -189,7 +189,17 @@ class AnalysisTaskCoordinator:
                         .limit(1)
                     )
                     if row is not None:
-                        row.status = "running"
+                        claimed = await session.execute(
+                            update(AnalysisVersion)
+                            .where(
+                                AnalysisVersion.id == row.id,
+                                AnalysisVersion.status == "pending",
+                            )
+                            .values(status="running")
+                        )
+                        if int(claimed.rowcount) != 1:
+                            await session.rollback()
+                            continue
                         if row.reanalysis_batch_id is not None:
                             item = await session.scalar(
                                 select(ReanalysisItem).where(

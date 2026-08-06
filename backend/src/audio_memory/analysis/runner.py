@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -19,6 +20,7 @@ from audio_memory.models import (
     JobFile,
     ProfileCandidate,
     ReanalysisBatch,
+    ReanalysisItem,
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
@@ -143,15 +145,17 @@ class AnalysisRunner:
                 transcript, profile, provider_snapshot
             )
             await self._require_generation(version)
-            await self._save_profile_candidates(
+            verified_delta = await self._save_profile_candidates(
                 version.id, raw_delta, segment_ids
             )
-            delta = validate_profile_delta(raw_delta)
+            delta = validate_profile_delta(verified_delta)
             outcome = await self.publisher.publish(
                 version.source_job_id, results, delta
             )
             await self._mark_completed(version.id, outcome)
             return outcome
+        except asyncio.CancelledError:
+            raise
         except CredentialChangedError:
             raise
         except BaseException:
@@ -267,6 +271,14 @@ class AnalysisRunner:
                     )
                     if history is not None:
                         history.status = "paused_credential_changed"
+                    item = await session.scalar(
+                        select(ReanalysisItem).where(
+                            ReanalysisItem.analysis_version_id == stored.id
+                        )
+                    )
+                    if item is not None:
+                        item.status = "pending"
+                        item.error_code = "credential_changed"
                 else:
                     job = await session.get(AnalysisJob, stored.source_job_id)
                     if job is not None:
@@ -303,8 +315,9 @@ class AnalysisRunner:
         version_id: str,
         raw_candidates: list[dict[str, object]],
         segment_ids: set[str],
-    ) -> None:
+    ) -> list[dict[str, object]]:
         accepted: list[ProfileCandidate] = []
+        verified: list[dict[str, object]] = []
         for item in raw_candidates:
             if item.get("subject_id") != "user":
                 continue
@@ -339,6 +352,7 @@ class AnalysisRunner:
                     origin="explicit" if item.get("explicit") else "inferred",
                 )
             )
+            verified.append(item)
         async with self.database.session() as session:
             await session.execute(
                 delete(ProfileCandidate).where(
@@ -347,6 +361,7 @@ class AnalysisRunner:
             )
             session.add_all(accepted)
             await session.commit()
+        return verified
 
     async def _mark_failed(self, version_id: str) -> None:
         async with self.database.session() as session:
@@ -354,6 +369,20 @@ class AnalysisRunner:
             if version is not None and version.status == "running":
                 version.status = "failed"
                 version.error_code = "model_analysis_failed"
+                if version.reanalysis_batch_id is not None:
+                    item = await session.scalar(
+                        select(ReanalysisItem).where(
+                            ReanalysisItem.analysis_version_id == version.id
+                        )
+                    )
+                    if item is not None:
+                        item.status = "failed"
+                        item.error_code = "model_analysis_failed"
+                    history = await session.get(
+                        ReanalysisBatch, version.reanalysis_batch_id
+                    )
+                    if history is not None:
+                        history.status = "paused_error"
                 job = await session.get(AnalysisJob, version.source_job_id)
                 if job is not None and version.batch_id is None:
                     job.stage = "failed"
@@ -370,6 +399,34 @@ class AnalysisRunner:
             version.status = "completed"
             version.error_code = None
             version.completed_at = datetime.now(UTC).isoformat()
+            if version.reanalysis_batch_id is not None:
+                now = version.completed_at
+                item = await session.scalar(
+                    select(ReanalysisItem).where(
+                        ReanalysisItem.analysis_version_id == version.id
+                    )
+                )
+                if item is not None:
+                    item.status = "completed"
+                    item.error_code = None
+                    item.completed_at = now
+                remaining = await session.scalar(
+                    select(ReanalysisItem.id)
+                    .where(
+                        ReanalysisItem.reanalysis_batch_id
+                        == version.reanalysis_batch_id,
+                        ReanalysisItem.status.in_(("pending", "running")),
+                        ReanalysisItem.id != (item.id if item is not None else ""),
+                    )
+                    .limit(1)
+                )
+                if remaining is None:
+                    history = await session.get(
+                        ReanalysisBatch, version.reanalysis_batch_id
+                    )
+                    if history is not None:
+                        history.status = "completed"
+                        history.completed_at = now
             published_batch = await session.get(Batch, outcome.batch_id)
             if published_batch is not None:
                 version.batch_id = published_batch.id

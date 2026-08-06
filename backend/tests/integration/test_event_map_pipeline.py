@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -11,9 +12,11 @@ from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
     AnalysisVersion,
+    Batch,
     JobFile,
     ProfileCandidate,
     ReanalysisBatch,
+    ReanalysisItem,
     Transcript,
 )
 from audio_memory.prompts.event_schema import EventMap
@@ -92,9 +95,11 @@ class EvidenceProfileExtractor:
 class RecordingPublisher:
     def __init__(self) -> None:
         self.results = None
+        self.profile_delta = None
 
     async def publish(self, job_id, results, profile_delta):
         self.results = results
+        self.profile_delta = profile_delta
         return AnalysisOutcome("published-batch", 0, 0)
 
 
@@ -110,6 +115,30 @@ class ChangingGeneration:
     async def credential_generation(self, provider_id: str) -> int:
         self.calls += 1
         return 4 if self.calls == 1 else 5
+
+
+class BlockingProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def analyze_event_map(self, request, provider_snapshot):
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class InvalidEvidenceProfileExtractor:
+    async def extract(self, transcript, existing, provider_snapshot):
+        return [
+            {
+                "subject_id": "user",
+                "dimension": "role",
+                "value": {"name": "未经证实"},
+                "confidence": 0.9,
+                "explicit": True,
+                "evidence_segment_ids": ["seg_missing"],
+            }
+        ]
 
 
 async def seed_version(
@@ -153,6 +182,13 @@ async def seed_version(
         )
         if history_batch_id is not None:
             session.add(
+                Batch(
+                    id="source-batch",
+                    job_id="job-1",
+                    natural_date="2026-08-05",
+                )
+            )
+            session.add(
                 ReanalysisBatch(
                     id=history_batch_id,
                     status="running",
@@ -170,6 +206,7 @@ async def seed_version(
             AnalysisVersion(
                 id=version_id,
                 source_job_id="job-1",
+                batch_id="source-batch" if history_batch_id is not None else None,
                 provider_id="kimi",
                 model_id="kimi-k2.5",
                 credential_generation=4,
@@ -182,6 +219,18 @@ async def seed_version(
                 reanalysis_batch_id=history_batch_id,
             )
         )
+        await session.flush()
+        if history_batch_id is not None:
+            session.add(
+                ReanalysisItem(
+                    id="history-item",
+                    reanalysis_batch_id=history_batch_id,
+                    source_batch_id="source-batch",
+                    analysis_version_id=version_id,
+                    position=0,
+                    status="running",
+                )
+            )
         await session.commit()
 
 
@@ -254,6 +303,10 @@ async def test_generation_change_discards_scenes_and_pauses_history(tmp_path) ->
     assert version.error_code == "credential_changed"
     assert json.loads(version.staged_results_json) == {}
     assert batch is not None and batch.status == "paused_credential_changed"
+    async with database.session() as session:
+        item = await session.get(ReanalysisItem, "history-item")
+    assert item is not None and item.status == "pending"
+    assert item.error_code == "credential_changed"
     await database.dispose()
 
 
@@ -278,4 +331,75 @@ async def test_runner_persists_version_scoped_profile_candidates(tmp_path) -> No
     assert candidates[0].analysis_version_id == "version-1"
     assert candidates[0].evidence_segment_ids_json == '["seg_0_0"]'
     assert candidates[0].origin == "explicit"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_runner_leaves_version_running_for_restart_recovery(tmp_path) -> None:
+    database = Database(tmp_path / "cancelled-runner.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    provider = BlockingProvider()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+    task = asyncio.create_task(runner.run("version-1"))
+    await provider.started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.status == "running"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_profile_evidence_never_reaches_publisher(tmp_path) -> None:
+    database = Database(tmp_path / "profile-filter.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=InvalidEvidenceProfileExtractor(),
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    await runner.run("version-1")
+
+    assert publisher.profile_delta == []
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_successful_history_run_completes_item_and_batch(tmp_path) -> None:
+    database = Database(tmp_path / "history-terminal.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path, history_batch_id="history-1")
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    await runner.run("version-1")
+
+    async with database.session() as session:
+        item = await session.get(ReanalysisItem, "history-item")
+        batch = await session.get(ReanalysisBatch, "history-1")
+    assert item is not None and item.status == "completed"
+    assert item.completed_at is not None
+    assert batch is not None and batch.status == "completed"
+    assert batch.completed_at is not None
     await database.dispose()
