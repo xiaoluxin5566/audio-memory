@@ -239,20 +239,21 @@ class ReanalysisService:
                     raise ReanalysisNotFoundError(
                         f"Unknown reanalysis batch: {batch_id}"
                     )
-                pause_reason = await session.scalar(
-                    select(ReanalysisItem.error_code)
+                blocking_item = await session.scalar(
+                    select(ReanalysisItem.id)
                     .where(
                         ReanalysisItem.reanalysis_batch_id == batch_id,
-                        ReanalysisItem.error_code.is_not(None),
+                        ReanalysisItem.error_code.in_(
+                            (
+                                "fixed_rules_changed",
+                                "analysis_schema_changed",
+                                "transcript_changed",
+                            )
+                        ),
                     )
-                    .order_by(ReanalysisItem.position)
                     .limit(1)
                 )
-                if batch.status == "paused_rules_changed" or pause_reason in {
-                    "fixed_rules_changed",
-                    "analysis_schema_changed",
-                    "transcript_changed",
-                }:
+                if batch.status == "paused_rules_changed" or blocking_item is not None:
                     raise ReanalysisStateError(
                         "Fixed analysis rules changed; stop and obtain a fresh preview"
                     )

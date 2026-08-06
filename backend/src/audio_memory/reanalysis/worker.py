@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from audio_memory.analysis.task_coordinator import (
     AlreadyRunningError,
@@ -27,6 +27,7 @@ from audio_memory.models import (
 )
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.reanalysis.preview import (
+    canonical_hash,
     current_fixed_rule_hashes,
     transcript_fingerprint,
 )
@@ -145,13 +146,15 @@ class ReanalysisWorker:
                 batch = await session.scalar(
                     select(ReanalysisBatch)
                     .where(
-                        ReanalysisBatch.status.in_(
-                            (
-                                "pending",
-                                "running",
-                                "stopping",
-                                "content_completed_profile_failed",
-                            )
+                        or_(
+                            ReanalysisBatch.status.in_(
+                                ("pending", "running", "stopping")
+                            ),
+                            and_(
+                                ReanalysisBatch.status
+                                == "content_completed_profile_failed",
+                                ReanalysisBatch.completed_at.is_(None),
+                            ),
                         )
                     )
                     .order_by(ReanalysisBatch.created_at, ReanalysisBatch.id)
@@ -411,11 +414,14 @@ class ReanalysisWorker:
             try:
                 source_snapshot = json.loads(version.prompt_snapshot_json)
                 source_metadata = source_snapshot["_reanalysis"]
+                source_profile = json.loads(version.profile_snapshot_json)
             except (json.JSONDecodeError, KeyError, TypeError):
                 return None, None
             if (
                 source_metadata.get("fixed_rule_hashes") != fixed_rule_hashes
                 or source_metadata.get("profile_hash") != profile_hash
+                or canonical_hash(source_profile)
+                != source_metadata.get("profile_hash")
                 or source_metadata.get("transcript_fingerprints", {}).get(
                     source_batch_id
                 )

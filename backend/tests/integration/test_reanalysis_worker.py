@@ -351,6 +351,40 @@ async def test_event_map_is_regenerated_when_frozen_profile_changed(
 
 
 @pytest.mark.asyncio
+async def test_event_map_is_not_reused_when_profile_metadata_disagrees_with_version(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "profile-metadata-defense.sqlite3")
+    await database.create_schema()
+    await seed_history_run(database, item_statuses=("pending",))
+    async with database.session() as session:
+        source_version = await session.get(AnalysisVersion, "old-version-0")
+        assert source_version is not None
+        source_version.profile_snapshot_json = "[]"
+        await session.commit()
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=ProfilePublisher(database),
+    )
+
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == "history-1"
+            )
+        )
+    assert generated is not None
+    assert generated.event_map_json is None
+    assert generated.event_map_hash is None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_stop_fences_pending_remote_work_and_waits_for_running_item(
     tmp_path: Path,
 ) -> None:
@@ -546,6 +580,59 @@ async def test_ordinary_failure_continues_and_final_profile_rebuild_runs_once(
 
 
 @pytest.mark.asyncio
+async def test_old_attempted_profile_failure_does_not_starve_newer_batch(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "profile-starvation.sqlite3")
+    await database.create_schema()
+    await seed_history_run(database, item_statuses=("pending",))
+    async with database.session() as session:
+        current = await session.get(ReanalysisBatch, "history-1")
+        assert current is not None
+        current.created_at = "2026-08-06T01:00:00+00:00"
+        session.add(
+            ReanalysisBatch(
+                id="history-old-profile-failure",
+                status="content_completed_profile_failed",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+                snapshot_hash="o" * 64,
+                created_at="2026-08-05T01:00:00+00:00",
+                completed_at="2026-08-05T02:00:00+00:00",
+            )
+        )
+        await session.commit()
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=ProfilePublisher(database),
+    )
+
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = int(
+            await session.scalar(
+                select(func.count(AnalysisVersion.id)).where(
+                    AnalysisVersion.reanalysis_batch_id == "history-1"
+                )
+            )
+            or 0
+        )
+        old = await session.get(ReanalysisBatch, "history-old-profile-failure")
+    assert generated == 1
+    assert old is not None
+    assert old.status == "content_completed_profile_failed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_profile_retry_does_not_submit_scene_or_model_work(tmp_path: Path) -> None:
     from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
     from audio_memory.reanalysis.service import ReanalysisService
@@ -557,6 +644,11 @@ async def test_profile_retry_does_not_submit_scene_or_model_work(tmp_path: Path)
         batch_status="content_completed_profile_failed",
         item_statuses=("succeeded",),
     )
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, "history-1")
+        assert batch is not None
+        batch.completed_at = "2026-08-06T00:00:00+00:00"
+        await session.commit()
     publisher = ProfilePublisher(database)
     coordinator = AnalysisTaskCoordinator(database)
     provider = Provider()
@@ -710,6 +802,57 @@ async def test_credential_resume_discards_unpublished_checkpoints_but_fixed_rule
 
     with pytest.raises(ReanalysisStateError, match="fresh preview"):
         await service.resume("history-1")
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocking_reason", ["analysis_schema_changed", "transcript_changed"])
+async def test_resume_rejects_any_later_blocking_item_reason(
+    tmp_path: Path, blocking_reason: str
+) -> None:
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import ReanalysisService, ReanalysisStateError
+
+    database = Database(tmp_path / f"mixed-resume-{blocking_reason}.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        batch_status="paused",
+        item_statuses=("pending", "pending"),
+    )
+    async with database.session() as session:
+        first = await session.get(ReanalysisItem, "item-0")
+        second = await session.get(ReanalysisItem, "item-1")
+        assert first is not None and second is not None
+        first.error_code = "model_response_invalid"
+        second.error_code = blocking_reason
+        await session.commit()
+    provider = Provider(generation=3)
+    prompts = __import__(
+        "audio_memory.prompts.store", fromlist=["PromptStore"]
+    ).PromptStore(tmp_path / f"mixed-prompts-{blocking_reason}")
+    prompts.initialize()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"m" * 32),
+        ),
+        provider_coordinator=provider,
+    )
+
+    with pytest.raises(ReanalysisStateError, match="fresh preview"):
+        await service.resume("history-1")
+
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, "history-1")
+        first = await session.get(ReanalysisItem, "item-0")
+        second = await session.get(ReanalysisItem, "item-1")
+    assert batch is not None and batch.status == "paused"
+    assert first is not None and first.error_code == "model_response_invalid"
+    assert second is not None and second.error_code == blocking_reason
     await database.dispose()
 
 
