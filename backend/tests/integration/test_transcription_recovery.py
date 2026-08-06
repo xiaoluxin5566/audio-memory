@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
@@ -74,6 +75,62 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
     assert engine.calls == [(file_id, 0), (file_id, 1)]
     assert len(rows) == 3
     assert job.stage == JobStage.ANALYZING.value
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_edit_failed_segment_keeps_timing_and_reason_without_content(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-state.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="test.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="b" * 64,
+                duration_ms=1000,
+                position=0,
+                temporary_path=str(tmp_path / "test.mp3"),
+            )
+        )
+        await session.commit()
+
+    await TranscriptionService(database)._save_segment(
+        TranscriptSegment(
+            file_id=file_id,
+            index=0,
+            start_ms=100,
+            end_ms=900,
+            text="不得保留的原始转写",
+            words=[{"word": "不得保留"}],
+            risk_state="POST_EDIT_FAILED",
+            is_reliable=False,
+            reliability_weight=0.2,
+            risk_reason="精转写失败",
+        )
+    )
+
+    async with database.session() as session:
+        stored = await session.scalar(
+            select(Transcript).where(Transcript.job_file_id == file_id)
+        )
+
+    assert stored is not None
+    assert stored.risk_state == "POST_EDIT_FAILED"
+    assert stored.is_reliable is False
+    assert stored.reliability_weight == 0.2
+    assert stored.risk_reason == "精转写失败"
+    assert (stored.start_ms, stored.end_ms) == (100, 900)
+    assert stored.text == ""
+    assert stored.words_json == "[]"
     await database.dispose()
 
 

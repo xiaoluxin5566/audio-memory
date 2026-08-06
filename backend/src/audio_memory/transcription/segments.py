@@ -11,6 +11,10 @@ class TranscriptSegment:
     end_ms: int
     text: str
     words: list[dict[str, object]]
+    risk_state: str | None = None
+    is_reliable: bool = True
+    reliability_weight: float = 1.0
+    risk_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.index < 0:
@@ -36,4 +40,3 @@ def progress_percent(*, processed_ms: int, total_ms: int) -> int:
     if total_ms <= 0:
         return 0
     return min(100, max(0, round(processed_ms / total_ms * 100)))
-

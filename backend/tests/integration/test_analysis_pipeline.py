@@ -6,11 +6,14 @@ import asyncio
 import httpx
 import pytest
 
+from audio_memory.analysis.runner import AnalysisRunner
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
     RemoteProfileExtractor,
     RemoteSceneAnalyzer,
 )
+from audio_memory.db import Database
+from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.schemas import MeetingSceneResult
@@ -52,6 +55,78 @@ def empty_meeting_payload() -> dict[str, object]:
         "cards": [],
         "todos": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_weight(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "analysis-risk-state.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="analyzing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="meeting.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="c" * 64,
+                duration_ms=3000,
+                position=0,
+                temporary_path=str(tmp_path / "meeting.mp3"),
+            )
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id="trusted",
+                    job_file_id="file-1",
+                    segment_index=0,
+                    start_ms=0,
+                    end_ms=1000,
+                    text="可信文本",
+                    words_json="[]",
+                ),
+                Transcript(
+                    id="medium-risk",
+                    job_file_id="file-1",
+                    segment_index=1,
+                    start_ms=1000,
+                    end_ms=2000,
+                    text="中风险文本",
+                    words_json="[]",
+                    risk_state="LOW_CONFIDENCE",
+                    reliability_weight=0.6,
+                ),
+                Transcript(
+                    id="unreliable",
+                    job_file_id="file-1",
+                    segment_index=2,
+                    start_ms=2000,
+                    end_ms=3000,
+                    text="不可信文本",
+                    words_json="[]",
+                    risk_state="POST_EDIT_FAILED",
+                    is_reliable=False,
+                ),
+            ]
+        )
+        await session.commit()
+
+    runner = AnalysisRunner(
+        database=database,
+        provider=None,
+        profile_extractor=None,
+        publisher=None,
+        generation_source=None,
+    )
+    transcript = await runner._transcript("job-1")
+
+    assert [item["text"] for item in transcript] == ["可信文本", "中风险文本"]
+    assert transcript[1]["reliability_weight"] == 0.6
+    await database.dispose()
 
 
 @pytest.mark.asyncio

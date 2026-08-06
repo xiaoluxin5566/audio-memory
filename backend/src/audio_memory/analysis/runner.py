@@ -287,7 +287,10 @@ class AnalysisRunner:
                 await session.scalars(
                     select(Transcript)
                     .join(JobFile, JobFile.id == Transcript.job_file_id)
-                    .where(JobFile.job_id == job_id)
+                    .where(
+                        JobFile.job_id == job_id,
+                        Transcript.is_reliable.is_(True),
+                    )
                     .order_by(JobFile.position, Transcript.segment_index)
                 )
             )
@@ -317,6 +320,7 @@ class AnalysisRunner:
                     "end_ms": row.end_ms,
                     "speaker_id": row.speaker_id or "unknown",
                     "text": row.text,
+                    "reliability_weight": row.reliability_weight,
                 }
             )
         return structured
