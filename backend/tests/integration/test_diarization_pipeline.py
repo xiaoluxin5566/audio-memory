@@ -1897,3 +1897,175 @@ async def test_refinement_recheck_keeps_the_entire_crowded_thirty_second_window(
         "",
     )
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refinement_recheck_uses_oversized_rejections_as_repeat_evidence(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "post-edit-oversized-evidence.sqlite3")
+    await database.create_schema()
+    base = "".join(chr(0x3400 + index) for index in range(1_024))
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="l" * 64,
+                duration_ms=10_000,
+                vad_speech_json='[{"start_ms":0,"end_ms":10000}]',
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        texts = [
+            base + "甲",
+            base + "乙",
+            "old repeated candidate",
+            "old repeated candidate",
+            "old repeated candidate",
+        ]
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text=text,
+                    words_json="[]",
+                )
+                for index, text in enumerate(texts)
+            ]
+        )
+        await session.commit()
+
+    class OversizedEvidenceRefiner:
+        async def refine(self, segment_uids: list[str]):
+            assert segment_uids == ["file-1:4"]
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=8_000,
+                    end_ms=9_000,
+                    text=base,
+                    words=(Word(base, 8_000, 9_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    await TranscriptionRiskGateService(database).apply(
+        "job-1", OversizedEvidenceRefiner()
+    )
+    async with database.session() as session:
+        rows = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+
+    assert [row.risk_reason for row in rows[:2]] == [
+        "comparison_text_too_long",
+        "comparison_text_too_long",
+    ]
+    assert all(row.risk_state == "REJECTED" and row.text == "" for row in rows[:2])
+    assert (rows[4].risk_state, rows[4].is_reliable, rows[4].text) == (
+        "POST_EDIT_FAILED",
+        False,
+        "",
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refinement_recheck_uses_budget_rejection_after_old_candidates_expire(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "post-edit-budget-evidence.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="m" * 64,
+                duration_ms=31_000,
+                vad_speech_json='[{"start_ms":0,"end_ms":31000}]',
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        crowded = [
+            (
+                index,
+                index * 100,
+                chr(0x3400 + index) + chr(0x5000 + index) + "abcdefghij",
+            )
+            for index in range(257)
+        ]
+        crowded[2] = (2, 200, "aaabcdefghij")
+        entries = [
+            *crowded,
+            (257, 25_700, "ababcdefghij"),
+            (258, 28_000, "old repeated candidate"),
+            (259, 29_000, "old repeated candidate"),
+            (260, 30_101, "old repeated candidate"),
+        ]
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=start_ms,
+                    end_ms=start_ms + 90,
+                    text=text,
+                    words_json="[]",
+                )
+                for index, start_ms, text in entries
+            ]
+        )
+        await session.commit()
+
+    class BudgetEvidenceRefiner:
+        async def refine(self, segment_uids: list[str]):
+            assert segment_uids == ["file-1:260"]
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=30_101,
+                    end_ms=30_191,
+                    text="acabcdefghij",
+                    words=(Word("acabcdefghij", 30_101, 30_191),),
+                    speaker_id=None,
+                )
+            ]
+
+    await TranscriptionRiskGateService(database).apply(
+        "job-1", BudgetEvidenceRefiner()
+    )
+    async with database.session() as session:
+        rejected = await session.get(Transcript, "transcript-257")
+        target = await session.get(Transcript, "transcript-260")
+
+    assert rejected is not None and target is not None
+    assert (rejected.risk_state, rejected.risk_reason, rejected.text) == (
+        "REJECTED",
+        "similarity_comparison_budget_exhausted",
+        "",
+    )
+    assert (target.risk_state, target.is_reliable, target.text) == (
+        "POST_EDIT_FAILED",
+        False,
+        "",
+    )
+    await database.dispose()

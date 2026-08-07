@@ -17,6 +17,7 @@ from audio_memory.transcription.risk_gate import (
     EnergyInterval,
     MAX_COMPARISON_TEXT_CHARS,
     MAX_NEARBY_COMPARISONS,
+    REPEAT_EVIDENCE_REJECTION_REASONS,
     RiskDecision,
     TimeInterval,
     adjacent_phrase_repetitions,
@@ -262,6 +263,7 @@ class TranscriptionRiskGateService:
                         snapshot.segments, decisions, strict=True
                     )
                     if decision.state != "REJECTED"
+                    or decision.reason in REPEAT_EVIDENCE_REJECTION_REASONS
                 }
             )
             for segment, decision in zip(snapshot.segments, decisions, strict=True):

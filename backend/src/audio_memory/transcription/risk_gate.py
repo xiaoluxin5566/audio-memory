@@ -22,6 +22,9 @@ MAX_WORDS_PER_SECOND = 7
 MEDIUM_RISK_WEIGHT = 0.6
 MAX_COMPARISON_TEXT_CHARS = 1_024
 MAX_NEARBY_COMPARISONS = 256
+REPEAT_EVIDENCE_REJECTION_REASONS = frozenset(
+    {"comparison_text_too_long", "similarity_comparison_budget_exhausted"}
+)
 
 _CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _CHINESE_SMALL_UNITS = {"十": 10, "百": 100, "千": 1_000}
@@ -106,10 +109,16 @@ def classify_segments(
             continue
 
         normalized_text = normalize_transcript_text(segment.text)
+        prior_window = [
+            item
+            for item in prior_window
+            if segment.start_ms - item[0].start_ms <= NEARBY_REPEAT_WINDOW_MS
+        ]
         if len(normalized_text) > MAX_COMPARISON_TEXT_CHARS:
             decisions[original_position] = _rejected(
                 segment.index, "comparison_text_too_long"
             )
+            prior_window.append((segment, normalized_text))
             continue
         exact_starts = exact_history.setdefault(normalized_text, deque())
         while (
@@ -118,11 +127,6 @@ def classify_segments(
         ):
             exact_starts.popleft()
         exact_match_count = len(exact_starts)
-        prior_window = [
-            item
-            for item in prior_window
-            if segment.start_ms - item[0].start_ms <= NEARBY_REPEAT_WINDOW_MS
-        ]
         approximate_match_count = 0
         if exact_match_count < 2:
             approximate_candidates = [
@@ -137,6 +141,8 @@ def classify_segments(
                 decisions[original_position] = _rejected(
                     segment.index, "similarity_comparison_budget_exhausted"
                 )
+                prior_window.append((segment, normalized_text))
+                exact_starts.append(segment.start_ms)
                 continue
             approximate_match_count = sum(
                 normalized_texts_are_similar(

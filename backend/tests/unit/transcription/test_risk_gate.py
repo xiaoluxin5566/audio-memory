@@ -304,6 +304,56 @@ def test_text_beyond_safe_full_comparison_limit_is_rejected() -> None:
     assert decisions[0].reason == "comparison_text_too_long"
 
 
+def test_oversized_rejections_remain_repeat_evidence_for_a_safe_length_third() -> None:
+    base = "".join(chr(0x3400 + index) for index in range(1_024))
+
+    decisions = classify_segments(
+        [
+            segment(0, 0, 1_000, base + "甲"),
+            segment(1, 2_000, 3_000, base + "乙"),
+            segment(2, 4_000, 5_000, base),
+        ],
+        [TimeInterval(0, 5_000)],
+        [],
+    )
+
+    assert [(item.state, item.reason) for item in decisions] == [
+        ("REJECTED", "comparison_text_too_long"),
+        ("REJECTED", "comparison_text_too_long"),
+        ("HIGH_RISK_PENDING", "repeated_nearby"),
+    ]
+
+
+def test_budget_rejection_remains_repeat_evidence_after_old_candidates_expire() -> None:
+    items = [
+        segment(
+            index,
+            index * 100,
+            index * 100 + 90,
+            chr(0x3400 + index) + chr(0x5000 + index) + "abcdefghij",
+        )
+        for index in range(257)
+    ]
+    items[2] = segment(2, 200, 290, "aaabcdefghij")
+    items.append(segment(257, 25_700, 25_790, "ababcdefghij"))
+    items.append(segment(258, 30_101, 30_191, "acabcdefghij"))
+
+    decisions = classify_segments(
+        items,
+        [TimeInterval(0, 30_191)],
+        [],
+    )
+
+    assert (decisions[257].state, decisions[257].reason) == (
+        "REJECTED",
+        "similarity_comparison_budget_exhausted",
+    )
+    assert (decisions[258].state, decisions[258].reason) == (
+        "HIGH_RISK_PENDING",
+        "repeated_nearby",
+    )
+
+
 def test_marks_repeat_after_confirmed_noninitial_silence_high_risk() -> None:
     decisions = classify_segments(
         [segment(0, 0, 1_000, "请继续"), segment(1, 12_000, 13_000, "请继续")],
