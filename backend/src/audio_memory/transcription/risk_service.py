@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import math
 import time
 from typing import Protocol
@@ -19,18 +20,14 @@ from audio_memory.transcription.risk_gate import (
     normalized_similarity,
     normalize_transcript_text,
 )
+from audio_memory.transcription.risk_metrics import (
+    RefinementWallClockBudget,
+    RiskGateMetrics,
+)
 from audio_memory.transcription.segments import TranscriptSegment
 
 
-@dataclass(frozen=True, slots=True)
-class RiskGateMetrics:
-    total_segments: int
-    rejected: int
-    queued: int
-    overflowed: int
-    passed: int
-    failed: int
-    elapsed_seconds: float
+logger = logging.getLogger(__name__)
 
 
 class SegmentRefiner(Protocol):
@@ -58,7 +55,11 @@ class TranscriptionRiskGateService:
         self.database = database
 
     async def apply(
-        self, job_id: str, refiner: SegmentRefiner
+        self,
+        job_id: str,
+        refiner: SegmentRefiner,
+        *,
+        bulk_elapsed_seconds: float | None = None,
     ) -> RiskGateMetrics:
         started = time.monotonic()
         async with self.database.session() as session:
@@ -170,12 +171,26 @@ class TranscriptionRiskGateService:
         overflowed = ordered[available_queue_slots:]
         for candidate in overflowed:
             await self._store_medium_risk(candidate.transcript_id, candidate.reason)
-        for candidate in queued:
-            await self._store_pending(candidate)
-
         passed = 0
         failed = 0
-        for candidate in queued:
+        queued_started = time.monotonic()
+        admitted = 0
+        budget = (
+            RefinementWallClockBudget(bulk_elapsed_seconds)
+            if bulk_elapsed_seconds is not None
+            else None
+        )
+        for position, candidate in enumerate(queued):
+            if budget is not None and not budget.allows_next(
+                queued_elapsed_seconds=time.monotonic() - queued_started
+            ):
+                budget_overflow = queued[position:]
+                for overflow in budget_overflow:
+                    await self._store_medium_risk(overflow.transcript_id, overflow.reason)
+                overflowed.extend(budget_overflow)
+                break
+            await self._store_pending(candidate)
+            admitted += 1
             refined = await refiner.refine([candidate.segment_uid])
             result = refined[0] if len(refined) == 1 else None
             context = text_contexts[candidate.file_id]
@@ -203,15 +218,17 @@ class TranscriptionRiskGateService:
                 )
                 failed += 1
 
-        return RiskGateMetrics(
+        metrics = RiskGateMetrics(
             total_segments=total_segments,
             rejected=rejected,
-            queued=len(queued),
+            queued=admitted,
             overflowed=len(overflowed),
             passed=passed,
             failed=failed + interrupted,
             elapsed_seconds=time.monotonic() - started,
         )
+        metrics.log(logger)
+        return metrics
 
     async def _store_decision(self, transcript_id: str, decision: RiskDecision) -> None:
         async with self.database.session() as session:
