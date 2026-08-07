@@ -7,12 +7,11 @@ import logging
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import select
 
 from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.models import ProfileFact
 from audio_memory.prompts.store import PROMPT_SCENES
+from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
 
 
@@ -107,11 +106,7 @@ async def snapshot_analysis_request(
     }
     database = request.app.state.database
     async with database.session() as session:
-        facts = list(
-            await session.scalars(
-                select(ProfileFact).where(ProfileFact.status == "active")
-            )
-        )
+        facts = await safe_active_profile_facts(session)
     profile = [
         {
             "subject_id": fact.subject_id,

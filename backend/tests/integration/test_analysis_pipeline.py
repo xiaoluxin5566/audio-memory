@@ -88,6 +88,7 @@ async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_wei
                     end_ms=1000,
                     text="可信文本",
                     words_json="[]",
+                    risk_classified=True,
                 ),
                 Transcript(
                     id="medium-risk",
@@ -97,6 +98,7 @@ async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_wei
                     end_ms=2000,
                     text="中风险文本",
                     words_json="[]",
+                    risk_classified=True,
                     reliability_weight=0.6,
                 ),
                 Transcript(
@@ -108,6 +110,7 @@ async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_wei
                     text="",
                     words_json="[]",
                     risk_state="HIGH_RISK_PENDING",
+                    risk_classified=True,
                     is_reliable=False,
                 ),
             ]
@@ -125,6 +128,66 @@ async def test_transcript_excludes_unreliable_segments_and_keeps_medium_risk_wei
 
     assert [item["text"] for item in transcript] == ["可信文本", "中风险文本"]
     assert transcript[1]["reliability_weight"] == 0.6
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_analysis_blocks_job_while_any_reliable_transcript_is_unclassified(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "analysis-unclassified-risk.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="completed"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="meeting.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="d" * 64,
+                duration_ms=2_000,
+                position=0,
+                temporary_path=str(tmp_path / "meeting.mp3"),
+            )
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id="classified",
+                    job_file_id="file-1",
+                    segment_index=0,
+                    start_ms=0,
+                    end_ms=1_000,
+                    text="already reviewed",
+                    words_json="[]",
+                    risk_classified=True,
+                ),
+                Transcript(
+                    id="legacy-unreviewed",
+                    job_file_id="file-1",
+                    segment_index=1,
+                    start_ms=1_000,
+                    end_ms=2_000,
+                    text="must never reach analysis",
+                    words_json="[]",
+                    risk_classified=False,
+                    is_reliable=True,
+                ),
+            ]
+        )
+        await session.commit()
+
+    runner = AnalysisRunner(
+        database=database,
+        provider=None,
+        profile_extractor=None,
+        publisher=None,
+        generation_source=None,
+    )
+    with pytest.raises(ValueError, match="completed transcript"):
+        await runner._transcript("job-1")
     await database.dispose()
 
 

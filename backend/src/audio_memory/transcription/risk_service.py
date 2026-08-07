@@ -19,8 +19,10 @@ from audio_memory.transcription.risk_gate import (
     MAX_NEARBY_COMPARISONS,
     RiskDecision,
     TimeInterval,
+    adjacent_phrase_repetitions,
     classify_segments,
-    normalized_similarity,
+    normalized_lengths_can_be_similar,
+    normalized_texts_are_similar,
     normalize_transcript_text,
 )
 from audio_memory.transcription.risk_metrics import (
@@ -103,7 +105,7 @@ class _TextContext:
             sorted((start_ms, uid) for uid, (start_ms, _, _) in entries.items())
         )
         normalized_by_uid = {
-            uid: normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
+            uid: normalize_transcript_text(text)
             for uid, (_, _, text) in entries.items()
         }
         exact: dict[str, list[tuple[int, str]]] = {}
@@ -125,7 +127,7 @@ class _TextContext:
         old_exact.pop(bisect_left(old_exact, old_item))
         if not old_exact:
             self.exact.pop(old_normalized)
-        new_normalized = normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
+        new_normalized = normalize_transcript_text(text)
         self.entries[uid] = (start_ms, end_ms, text)
         self.normalized_by_uid[uid] = new_normalized
         insort(self.exact.setdefault(new_normalized, []), old_item)
@@ -148,33 +150,18 @@ class _TextContext:
                 break
         return count
 
-    def nearby_texts(
+    def nearby_normalized_texts(
         self,
         target_start_ms: int,
         excluded_uid: str,
     ) -> list[str]:
         lower = bisect_left(self.starts, target_start_ms - 30_000)
         upper = bisect_right(self.starts, target_start_ms + 30_000)
-        left = bisect_left(self.starts, target_start_ms, lower, upper) - 1
-        right = left + 1
-        texts: list[str] = []
-        while len(texts) < MAX_NEARBY_COMPARISONS and (
-            left >= lower or right < upper
-        ):
-            take_left = right >= upper or (
-                left >= lower
-                and target_start_ms - self.ordered[left][0]
-                <= self.ordered[right][0] - target_start_ms
-            )
-            index = left if take_left else right
-            if take_left:
-                left -= 1
-            else:
-                right += 1
-            _, uid = self.ordered[index]
-            if uid != excluded_uid:
-                texts.append(self.entries[uid][2])
-        return texts
+        return [
+            self.normalized_by_uid[uid]
+            for _, uid in self.ordered[lower:upper]
+            if uid != excluded_uid
+        ]
 
 
 class TranscriptionRiskGateService:
@@ -615,33 +602,31 @@ def _text_is_repeated(
     target_start_ms: int,
     context: _TextContext,
 ) -> bool:
-    normalized = normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
+    normalized = normalize_transcript_text(text)
     if not normalized:
         return True
-    if _repeated_phrase(normalized):
+    if len(normalized) > MAX_COMPARISON_TEXT_CHARS:
+        return True
+    if adjacent_phrase_repetitions(normalized) >= 3:
         return True
     nearby = 1 + context.exact_nearby_count(
         normalized, target_start_ms, segment_uid
     )
     if nearby >= 3:
         return True
-    for candidate_text in context.nearby_texts(target_start_ms, segment_uid):
-        candidate_normalized = normalize_transcript_text(candidate_text)[
-            :MAX_COMPARISON_TEXT_CHARS
-        ]
-        if candidate_normalized == normalized:
-            continue
-        if normalized_similarity(normalized, candidate_normalized) >= 0.90:
+    approximate_candidates = [
+        candidate_normalized
+        for candidate_normalized in context.nearby_normalized_texts(
+            target_start_ms, segment_uid
+        )
+        if candidate_normalized != normalized
+        and normalized_lengths_can_be_similar(normalized, candidate_normalized)
+    ]
+    if len(approximate_candidates) > MAX_NEARBY_COMPARISONS:
+        return True
+    for candidate_normalized in approximate_candidates:
+        if normalized_texts_are_similar(normalized, candidate_normalized):
             nearby += 1
             if nearby >= 3:
                 return True
     return nearby >= 3
-
-
-def _repeated_phrase(text: str) -> bool:
-    for start in range(len(text)):
-        for length in range(8, (len(text) - start) // 3 + 1):
-            phrase = text[start : start + length]
-            if text.startswith(phrase * 3, start):
-                return True
-    return False

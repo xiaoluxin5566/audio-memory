@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 
 from audio_memory.db import Database
 from audio_memory.models import AnalysisVersion, ProfileCandidate, ProfileFact
+from audio_memory.transcript_safety import safe_active_profile_facts
 
 
 class ProfileRebuilder:
@@ -32,11 +33,7 @@ class ProfileRebuilder:
                     .order_by(ProfileCandidate.id)
                 )
             )
-            active_facts = list(
-                await session.scalars(
-                    select(ProfileFact).where(ProfileFact.status == "active")
-                )
-            )
+            active_facts = await safe_active_profile_facts(session)
 
         candidate_version_ids = {
             candidate.analysis_version_id for candidate in candidates

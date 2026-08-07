@@ -15,6 +15,7 @@ from audio_memory.models import (
     AnalysisVersion,
     Batch,
     JobFile,
+    ProfileFact,
     ReanalysisBatch,
     ReanalysisItem,
     Transcript,
@@ -99,6 +100,7 @@ async def seed_source(database: Database) -> None:
                 end_ms=1000,
                 text="hello",
                 words_json="[]",
+                risk_classified=True,
             )
         )
         await session.flush()
@@ -210,6 +212,45 @@ async def test_preview_create_replay_and_current_api_contract(tmp_path: Path) ->
     assert current.json()["status"] == "pending"
     assert current.json()["total"] == 1
     assert current.json()["pending"] == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_preview_excludes_completed_source_with_unclassified_transcript(
+    tmp_path: Path,
+) -> None:
+    app, database, _publisher = await build_app(tmp_path)
+    async with database.session() as session:
+        transcript = await session.get(Transcript, "transcript-1")
+        assert transcript is not None
+        transcript.risk_classified = False
+        session.add(
+            ProfileFact(
+                id="unsafe-profile",
+                subject_id="user",
+                dimension="role",
+                value_json='{"name":"unsafe"}',
+                confidence=0.9,
+                source_audio_json='["job-1"]',
+                first_seen_at="2026-08-05T00:00:00+00:00",
+                last_seen_at="2026-08-05T00:00:00+00:00",
+                evidence_count=1,
+                origin="inferred",
+                status="active",
+            )
+        )
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        preview = await client.get("/api/history/reanalysis-batches/preview")
+
+    assert preview.status_code == 200
+    assert preview.json()["source_batch_count"] == 0
+    assert preview.json()["transcript_character_count"] == 0
+    assert "no_completed_history" in preview.json()["blockers"]
+    snapshot = await app.state.reanalysis_service.preview_builder.build()
+    assert snapshot.snapshot.profile_snapshot == ()
     await database.dispose()
 
 

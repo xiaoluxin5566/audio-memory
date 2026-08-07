@@ -210,6 +210,50 @@ def test_exact_repeat_detection_survives_the_bounded_approximate_comparison_cap(
     assert decisions[259].reason == "repeated_nearby"
 
 
+def test_approximate_repeat_detection_keeps_the_entire_thirty_second_window() -> None:
+    items = [
+        segment(0, 0, 90, "approximate repeated anchor aa"),
+        segment(1, 100, 190, "approximate repeated anchor ab"),
+    ]
+    items.extend(
+        segment(index, index * 100, index * 100 + 90, chr(0x3400 + index))
+        for index in range(2, 259)
+    )
+    items.append(
+        segment(259, 25_900, 25_990, "approximate repeated anchor ac")
+    )
+
+    decisions = classify_segments(
+        items,
+        [TimeInterval(0, 26_000)],
+        [],
+    )
+
+    assert decisions[259].state == "HIGH_RISK_PENDING"
+    assert decisions[259].reason == "repeated_nearby"
+
+
+def test_unprovable_crowded_similarity_window_is_rejected() -> None:
+    items = [
+        segment(
+            index,
+            index * 100,
+            index * 100 + 90,
+            chr(0x3400 + index) + chr(0x5000 + index) + "abcdefghij",
+        )
+        for index in range(258)
+    ]
+
+    decisions = classify_segments(
+        items,
+        [TimeInterval(0, 26_000)],
+        [],
+    )
+
+    assert decisions[257].state == "REJECTED"
+    assert decisions[257].reason == "similarity_comparison_budget_exhausted"
+
+
 def test_marks_two_similar_segments_as_medium_risk_only() -> None:
     decisions = classify_segments(
         [segment(0, 0, 1_000, "会议三点"), segment(1, 5_000, 6_000, "会议 3 点")],
@@ -232,6 +276,32 @@ def test_marks_three_adjacent_long_phrase_repetitions_high_risk() -> None:
 
     assert decisions[0].state == "HIGH_RISK_PENDING"
     assert decisions[0].reason == "repeated_phrase"
+
+
+def test_phrase_repetition_after_the_first_512_characters_is_high_risk() -> None:
+    prefix = "".join(chr(0x3400 + index) for index in range(520))
+    phrase = "风险后缀需要隔离"
+    decisions = classify_segments(
+        [segment(0, 0, 2_000, prefix + phrase * 3)],
+        [TimeInterval(0, 2_000)],
+        [],
+    )
+
+    assert decisions[0].state == "HIGH_RISK_PENDING"
+    assert decisions[0].reason == "repeated_phrase"
+
+
+def test_text_beyond_safe_full_comparison_limit_is_rejected() -> None:
+    oversized = "".join(chr(0x3400 + index) for index in range(2_000))
+
+    decisions = classify_segments(
+        [segment(0, 0, 2_000, oversized)],
+        [TimeInterval(0, 2_000)],
+        [],
+    )
+
+    assert decisions[0].state == "REJECTED"
+    assert decisions[0].reason == "comparison_text_too_long"
 
 
 def test_marks_repeat_after_confirmed_noninitial_silence_high_risk() -> None:

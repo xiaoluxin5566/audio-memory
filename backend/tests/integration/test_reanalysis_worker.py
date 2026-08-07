@@ -165,6 +165,7 @@ async def seed_history_run(
                     end_ms=1000,
                     text=f"text-{position}",
                     words_json="[]",
+                    risk_classified=True,
                 )
             )
         await session.flush()

@@ -1752,3 +1752,148 @@ async def test_refinement_result_cannot_shift_to_the_next_queued_segment(
         "second queued result",
     )
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refinement_recheck_rejects_phrase_repetition_after_512_characters(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "post-edit-suffix-repeat.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="j" * 64,
+                duration_ms=6_000,
+                vad_speech_json='[{"start_ms":0,"end_ms":6000}]',
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="old repeated candidate",
+                    words_json="[]",
+                )
+                for index in range(3)
+            ]
+        )
+        await session.commit()
+
+    prefix = "".join(chr(0x3400 + index) for index in range(520))
+    repeated_result = prefix + "风险后缀需要隔离" * 3
+
+    class SuffixRepeatingRefiner:
+        async def refine(self, segment_uids: list[str]):
+            assert segment_uids == ["file-1:2"]
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=4_000,
+                    end_ms=5_000,
+                    text=repeated_result,
+                    words=(Word(repeated_result, 4_000, 5_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    await TranscriptionRiskGateService(database).apply(
+        "job-1", SuffixRepeatingRefiner()
+    )
+    async with database.session() as session:
+        target = await session.get(Transcript, "transcript-2")
+
+    assert target is not None
+    assert (target.risk_state, target.is_reliable, target.text) == (
+        "POST_EDIT_FAILED",
+        False,
+        "",
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refinement_recheck_keeps_the_entire_crowded_thirty_second_window(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "post-edit-crowded-window.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        session.add(
+            JobFile(
+                id="file-1",
+                job_id="job-1",
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="k" * 64,
+                duration_ms=26_000,
+                vad_speech_json='[{"start_ms":0,"end_ms":26000}]',
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        texts = [
+            "approximate repeated anchor aa",
+            "approximate repeated anchor ab",
+            *[chr(0x3400 + index) for index in range(2, 257)],
+            "old repeated candidate",
+            "old repeated candidate",
+            "old repeated candidate",
+        ]
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 100,
+                    end_ms=index * 100 + 90,
+                    text=text,
+                    words_json="[]",
+                )
+                for index, text in enumerate(texts)
+            ]
+        )
+        await session.commit()
+
+    class CrowdedWindowRefiner:
+        async def refine(self, segment_uids: list[str]):
+            assert segment_uids == ["file-1:259"]
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=25_900,
+                    end_ms=25_990,
+                    text="approximate repeated anchor ac",
+                    words=(Word("approximate repeated anchor ac", 25_900, 25_990),),
+                    speaker_id=None,
+                )
+            ]
+
+    await TranscriptionRiskGateService(database).apply(
+        "job-1", CrowdedWindowRefiner()
+    )
+    async with database.session() as session:
+        target = await session.get(Transcript, "transcript-259")
+
+    assert target is not None
+    assert (target.risk_state, target.is_reliable, target.text) == (
+        "POST_EDIT_FAILED",
+        False,
+        "",
+    )
+    await database.dispose()

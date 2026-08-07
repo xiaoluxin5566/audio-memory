@@ -20,7 +20,7 @@ MIN_SPEECH_DURATION_MS = 1_500
 MAX_CHARS_PER_SECOND = 14
 MAX_WORDS_PER_SECOND = 7
 MEDIUM_RISK_WEIGHT = 0.6
-MAX_COMPARISON_TEXT_CHARS = 512
+MAX_COMPARISON_TEXT_CHARS = 1_024
 MAX_NEARBY_COMPARISONS = 256
 
 _CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -105,9 +105,12 @@ def classify_segments(
             decisions[original_position] = _rejected(segment.index, invalid_reason)
             continue
 
-        normalized_text = normalize_transcript_text(segment.text)[
-            :MAX_COMPARISON_TEXT_CHARS
-        ]
+        normalized_text = normalize_transcript_text(segment.text)
+        if len(normalized_text) > MAX_COMPARISON_TEXT_CHARS:
+            decisions[original_position] = _rejected(
+                segment.index, "comparison_text_too_long"
+            )
+            continue
         exact_starts = exact_history.setdefault(normalized_text, deque())
         while (
             exact_starts
@@ -119,16 +122,30 @@ def classify_segments(
             item
             for item in prior_window
             if segment.start_ms - item[0].start_ms <= NEARBY_REPEAT_WINDOW_MS
-        ][-MAX_NEARBY_COMPARISONS:]
-        approximate_match_count = sum(
-            1
-            for _candidate, candidate_normalized in prior_window
-            if candidate_normalized != normalized_text
-            if _normalized_similarity_values(normalized_text, candidate_normalized)
-            >= SIMILARITY_THRESHOLD
-        )
+        ]
+        approximate_match_count = 0
+        if exact_match_count < 2:
+            approximate_candidates = [
+                candidate_normalized
+                for _candidate, candidate_normalized in prior_window
+                if candidate_normalized != normalized_text
+                and normalized_lengths_can_be_similar(
+                    normalized_text, candidate_normalized
+                )
+            ]
+            if len(approximate_candidates) > MAX_NEARBY_COMPARISONS:
+                decisions[original_position] = _rejected(
+                    segment.index, "similarity_comparison_budget_exhausted"
+                )
+                continue
+            approximate_match_count = sum(
+                normalized_texts_are_similar(
+                    normalized_text, candidate_normalized
+                )
+                for candidate_normalized in approximate_candidates
+            )
         nearby_match_count = exact_match_count + approximate_match_count
-        phrase_repetitions = _adjacent_phrase_repetitions(normalized_text)
+        phrase_repetitions = adjacent_phrase_repetitions(normalized_text)
         light_repetition = nearby_match_count > 0 or phrase_repetitions >= 2
 
         if nearby_match_count >= 2:
@@ -223,6 +240,65 @@ def _normalized_similarity_values(first: str, second: str) -> float:
     return 1 - _levenshtein_distance(first, second) / max(len(first), len(second))
 
 
+def normalized_lengths_can_be_similar(first: str, second: str) -> bool:
+    if not first or not second:
+        return False
+    maximum_length = max(len(first), len(second))
+    maximum_distance = int(
+        (1.0 - SIMILARITY_THRESHOLD) * maximum_length + 1e-9
+    )
+    return abs(len(first) - len(second)) <= maximum_distance
+
+
+def normalized_texts_are_similar(first: str, second: str) -> bool:
+    """Apply the 0.90 threshold with a length band and early exit."""
+    if not normalized_lengths_can_be_similar(first, second):
+        return False
+    maximum_length = max(len(first), len(second))
+    maximum_distance = int(
+        (1.0 - SIMILARITY_THRESHOLD) * maximum_length + 1e-9
+    )
+    return _levenshtein_within_distance(first, second, maximum_distance)
+
+
+def _levenshtein_within_distance(
+    first: str, second: str, maximum_distance: int
+) -> bool:
+    if first == second:
+        return True
+    if abs(len(first) - len(second)) > maximum_distance:
+        return False
+    if len(first) < len(second):
+        first, second = second, first
+
+    unreachable = maximum_distance + 1
+    previous = [unreachable] * (len(second) + 1)
+    for index in range(min(len(second), maximum_distance) + 1):
+        previous[index] = index
+
+    for first_index, first_character in enumerate(first, start=1):
+        lower = max(1, first_index - maximum_distance)
+        upper = min(len(second), first_index + maximum_distance)
+        if lower > upper:
+            return False
+        current = [unreachable] * (len(second) + 1)
+        if first_index <= maximum_distance:
+            current[0] = first_index
+        row_minimum = unreachable
+        for second_index in range(lower, upper + 1):
+            current[second_index] = min(
+                previous[second_index] + 1,
+                current[second_index - 1] + 1,
+                previous[second_index - 1]
+                + (first_character != second[second_index - 1]),
+            )
+            row_minimum = min(row_minimum, current[second_index])
+        if row_minimum > maximum_distance:
+            return False
+        previous = current
+    return previous[len(second)] <= maximum_distance
+
+
 def _conflicting_segment_positions(
     ordered: Sequence[tuple[int, TranscriptSegment]],
     owning_window: TimeInterval | None,
@@ -298,8 +374,10 @@ def _is_post_silence_repeat(
     gap_end = segment.start_ms
     if (
         gap_end - gap_start <= SILENCE_GAP_MS
-        or _bounded_normalized_similarity(segment.text, previous.text)
-        < SIMILARITY_THRESHOLD
+        or not normalized_texts_are_similar(
+            normalize_transcript_text(segment.text),
+            normalize_transcript_text(previous.text),
+        )
     ):
         return False
     silent_intervals = [
@@ -342,22 +420,17 @@ def _speech_units(text: str) -> tuple[int, int]:
     return (len(compact) if has_cjk else 0, words)
 
 
-def _bounded_normalized_similarity(first: str, second: str) -> float:
-    return _normalized_similarity_values(
-        normalize_transcript_text(first)[:MAX_COMPARISON_TEXT_CHARS],
-        normalize_transcript_text(second)[:MAX_COMPARISON_TEXT_CHARS],
-    )
-
-
-def _adjacent_phrase_repetitions(text: str) -> int:
-    maximum = 0
+def adjacent_phrase_repetitions(text: str) -> int:
+    """Return the repetition count capped at three for the complete safe text."""
+    maximum = 1 if text else 0
     for start in range(len(text)):
         for length in range(8, (len(text) - start) // 2 + 1):
             phrase = text[start : start + length]
-            repeats = 1
-            while text.startswith(phrase, start + repeats * length):
-                repeats += 1
-            maximum = max(maximum, repeats)
+            if not text.startswith(phrase, start + length):
+                continue
+            maximum = 2
+            if text.startswith(phrase, start + 2 * length):
+                return 3
     return maximum
 
 

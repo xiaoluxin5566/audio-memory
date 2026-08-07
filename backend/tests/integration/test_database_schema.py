@@ -201,9 +201,6 @@ def test_source_signal_migration_rechecks_legacy_reliable_rows_and_isolates_old_
 
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "UPDATE transcripts SET risk_classified = 1 WHERE id = 'transcript-1'"
-        )
-        connection.execute(
             "INSERT INTO transcripts "
             "(id, job_file_id, segment_index, segment_uid, start_ms, end_ms, "
             "text, words_json, risk_state, risk_classified, is_reliable, "
@@ -224,7 +221,15 @@ def test_source_signal_migration_rechecks_legacy_reliable_rows_and_isolates_old_
             "SELECT vad_available FROM job_files WHERE id = 'file-1'"
         ).fetchone()
     assert rows == [
-        ("transcript-1", None, 0, 1, 1.0, "你好", None),
+        (
+            "transcript-1",
+            None,
+            0,
+            0,
+            0.0,
+            "",
+            "legacy_risk_context_unavailable",
+        ),
         (
             "transcript-2",
             "POST_EDIT_FAILED",

@@ -25,6 +25,7 @@ from audio_memory.models import (
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.evidence import validate_evidence_integrity
 from audio_memory.prompts.event_schema import EventMap
+from audio_memory.transcript_safety import pending_risk_review_exists
 from audio_memory.prompts.schemas import (
     ContentSceneResult,
     GrowthSceneResult,
@@ -283,12 +284,18 @@ class AnalysisRunner:
 
     async def _transcript(self, job_id: str) -> list[dict[str, object]]:
         async with self.database.session() as session:
+            review_pending = bool(
+                await session.scalar(select(pending_risk_review_exists(job_id)))
+            )
+            if review_pending:
+                raise ValueError("Analysis requires a completed transcript")
             rows = list(
                 await session.scalars(
                     select(Transcript)
                     .join(JobFile, JobFile.id == Transcript.job_file_id)
                     .where(
                         JobFile.job_id == job_id,
+                        Transcript.risk_classified.is_(True),
                         Transcript.is_reliable.is_(True),
                     )
                     .order_by(JobFile.position, Transcript.segment_index)

@@ -45,9 +45,10 @@ def upgrade() -> None:
         "WHERE risk_classified = 1 AND risk_state = 'POST_EDIT_PASSED'"
     )
     op.execute(
-        "UPDATE transcripts SET risk_classified = 0, reliability_weight = 1.0, "
-        "risk_reason = NULL WHERE risk_classified = 1 AND risk_state IS NULL "
-        "AND is_reliable = 1"
+        "UPDATE transcripts SET risk_classified = 0, is_reliable = 0, "
+        "reliability_weight = 0.0, text = '', words_json = '[]', "
+        "risk_reason = 'legacy_risk_context_unavailable' "
+        "WHERE risk_state IS NULL AND is_reliable = 1"
     )
 
 

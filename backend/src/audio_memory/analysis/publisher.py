@@ -15,6 +15,7 @@ from audio_memory.analysis.profile import ProfileDelta
 from audio_memory.analysis.profile_rebuild import ProfileRebuilder
 from audio_memory.analysis.todos import reconcile_todos
 from audio_memory.analysis.versions import require_card_version
+from audio_memory.transcript_safety import pending_risk_review_exists
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
@@ -479,6 +480,7 @@ class VersionPublisher:
                             Batch,
                             Batch.current_analysis_version_id == AnalysisVersion.id,
                         )
+                        .where(~pending_risk_review_exists(Batch.job_id))
                         .order_by(AnalysisVersion.id)
                     )
                 )
