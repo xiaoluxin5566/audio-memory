@@ -70,9 +70,11 @@ class TranscriptionRiskGateService:
                         .where(JobFile.job_id == job_id)
                         .order_by(
                             JobFile.position,
+                            JobFile.id,
                             Transcript.start_ms,
                             Transcript.end_ms,
                             Transcript.segment_index,
+                            Transcript.id,
                         )
                     )
                 ).all()
@@ -82,6 +84,12 @@ class TranscriptionRiskGateService:
         rejected = 0
         interrupted = 0
         total_segments = len(rows)
+        queue_limit = max(10, math.ceil(total_segments * 0.05))
+        reserved_queue_slots = sum(
+            transcript.risk_state
+            in {"HIGH_RISK_PENDING", "POST_EDIT_PASSED", "POST_EDIT_FAILED"}
+            for transcript, _ in rows
+        )
         grouped: dict[str, list[tuple[Transcript, JobFile]]] = {}
         text_contexts: dict[str, dict[str, tuple[int, int, str]]] = {}
         for transcript, file in rows:
@@ -97,7 +105,7 @@ class TranscriptionRiskGateService:
             eligible = [
                 transcript
                 for transcript, _ in file_rows
-                if transcript.risk_state is None
+                if not transcript.risk_classified
             ]
             if not eligible:
                 continue
@@ -128,6 +136,7 @@ class TranscriptionRiskGateService:
             for transcript, decision in zip(eligible, decisions, strict=True):
                 if decision.state == "REJECTED":
                     await self._store_decision(transcript.id, decision)
+                    text_contexts[file.id].pop(transcript.segment_uid, None)
                     rejected += 1
                 elif decision.state == "HIGH_RISK_PENDING":
                     candidates.append(
@@ -145,28 +154,30 @@ class TranscriptionRiskGateService:
                 else:
                     await self._store_decision(transcript.id, decision)
 
-        queue_limit = max(10, math.ceil(total_segments * 0.05))
+        available_queue_slots = max(0, queue_limit - reserved_queue_slots)
         ordered = sorted(
             candidates,
             key=lambda item: (
                 item.file_position,
+                item.file_id,
                 item.start_ms,
                 item.end_ms,
                 item.segment_index,
+                item.transcript_id,
             ),
         )
-        queued = ordered[:queue_limit]
-        overflowed = ordered[queue_limit:]
+        queued = ordered[:available_queue_slots]
+        overflowed = ordered[available_queue_slots:]
         for candidate in overflowed:
             await self._store_medium_risk(candidate.transcript_id, candidate.reason)
         for candidate in queued:
             await self._store_pending(candidate)
 
-        refined = await refiner.refine([item.segment_uid for item in queued])
         passed = 0
         failed = 0
-        for offset, candidate in enumerate(queued):
-            result = refined[offset] if offset < len(refined) else None
+        for candidate in queued:
+            refined = await refiner.refine([candidate.segment_uid])
+            result = refined[0] if len(refined) == 1 else None
             context = text_contexts[candidate.file_id]
             if (
                 result is not None
@@ -205,9 +216,10 @@ class TranscriptionRiskGateService:
     async def _store_decision(self, transcript_id: str, decision: RiskDecision) -> None:
         async with self.database.session() as session:
             transcript = await session.get(Transcript, transcript_id)
-            if transcript is None or transcript.risk_state is not None:
+            if transcript is None or transcript.risk_classified:
                 return
             transcript.risk_state = decision.state
+            transcript.risk_classified = True
             transcript.is_reliable = decision.is_reliable
             transcript.reliability_weight = decision.reliability_weight
             transcript.risk_reason = decision.reason
@@ -219,9 +231,10 @@ class TranscriptionRiskGateService:
     async def _store_medium_risk(self, transcript_id: str, reason: str | None) -> None:
         async with self.database.session() as session:
             transcript = await session.get(Transcript, transcript_id)
-            if transcript is None or transcript.risk_state is not None:
+            if transcript is None or transcript.risk_classified:
                 return
             transcript.risk_state = None
+            transcript.risk_classified = True
             transcript.is_reliable = True
             transcript.reliability_weight = 0.6
             transcript.risk_reason = reason
@@ -230,9 +243,10 @@ class TranscriptionRiskGateService:
     async def _store_pending(self, candidate: _RiskCandidate) -> None:
         async with self.database.session() as session:
             transcript = await session.get(Transcript, candidate.transcript_id)
-            if transcript is None or transcript.risk_state is not None:
+            if transcript is None or transcript.risk_classified:
                 return
             transcript.risk_state = "HIGH_RISK_PENDING"
+            transcript.risk_classified = True
             transcript.is_reliable = False
             transcript.reliability_weight = 0.0
             transcript.risk_reason = candidate.reason

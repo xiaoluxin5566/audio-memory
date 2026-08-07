@@ -47,10 +47,11 @@ class TranscriptionService:
                 resume_from = await self._resume_index(file.id)
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
-            if self.risk_gate is not None:
-                if self.refiner is None:
-                    raise RuntimeError("Transcription risk gate requires a segment refiner")
-                await self.risk_gate.apply(job_id, self.refiner)
+            if self.risk_gate is None or self.refiner is None:
+                raise RuntimeError(
+                    "Transcription risk gate and segment refiner are required"
+                )
+            await self.risk_gate.apply(job_id, self.refiner)
         except asyncio.CancelledError:
             self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
@@ -135,6 +136,7 @@ class TranscriptionService:
                     ),
                     speaker_id=getattr(segment, "speaker_id", None),
                     risk_state=segment.risk_state,
+                    risk_classified=False,
                     is_reliable=segment.is_reliable,
                     reliability_weight=segment.reliability_weight,
                     risk_reason=segment.risk_reason,

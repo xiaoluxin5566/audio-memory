@@ -160,6 +160,31 @@ def test_transcript_risk_state_migration_rejects_unknown_state(tmp_path: Path) -
             )
 
 
+def test_risk_classification_migration_marks_legacy_risk_results_complete(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "risk-classification.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0001")
+    seed_v1_transcript(database_path)
+    command.upgrade(config, "0008")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE transcripts SET reliability_weight = 0.6 "
+            "WHERE id = 'transcript-1'"
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT risk_classified FROM transcripts WHERE id = 'transcript-1'"
+        ).fetchone()
+    assert row == (1,)
+
+
 @pytest.mark.parametrize(
     ("risk_state", "is_reliable", "text"),
     [

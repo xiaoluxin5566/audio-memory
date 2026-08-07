@@ -130,6 +130,9 @@ class Transcript(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     words_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     risk_state: Mapped[str | None] = mapped_column(String(40))
+    risk_classified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     is_reliable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     reliability_weight: Mapped[float] = mapped_column(
         Float, nullable=False, default=1.0

@@ -11,8 +11,9 @@ from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.checkpoints import TranscriptionService
-from audio_memory.transcription.engine import MLXWhisperEngine
+from audio_memory.transcription.engine import MLXWhisperEngine, SelectiveRefiner
 from audio_memory.transcription.eta import TranscriptionEtaTracker
+from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 from audio_memory.transcription.segments import TranscriptSegment
 
 
@@ -59,7 +60,11 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
             )
         )
         await session.commit()
-    service = TranscriptionService(database)
+    service = TranscriptionService(
+        database,
+        risk_gate=TranscriptionRiskGateService(database),
+        refiner=SelectiveRefiner(database),
+    )
     engine = InterruptOnceEngine()
 
     with pytest.raises(RuntimeError):
@@ -209,7 +214,12 @@ async def test_resume_clears_stale_eta_samples(tmp_path: Path) -> None:
         await session.commit()
     tracker = TranscriptionEtaTracker()
     tracker.record(job_id, 300_000, 30)
-    service = TranscriptionService(database, eta_tracker=tracker)
+    service = TranscriptionService(
+        database,
+        eta_tracker=tracker,
+        risk_gate=TranscriptionRiskGateService(database),
+        refiner=SelectiveRefiner(database),
+    )
 
     await service.resume_job(job_id, InterruptOnceEngine())
 

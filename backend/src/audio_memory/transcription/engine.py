@@ -751,12 +751,15 @@ class SelectiveRefiner:
     def _source_text(
         raw_segments: list[dict[str, object]], words: list[Word]
     ) -> str:
-        text = "".join(
+        text = " ".join(
             str(raw_segment.get("text", "")).strip()
             for raw_segment in raw_segments
             if isinstance(raw_segment, dict)
+            and str(raw_segment.get("text", "")).strip()
         ).strip()
-        return text or "".join(word.text for word in words).strip()
+        return text or " ".join(
+            word.text.strip() for word in words if word.text.strip()
+        ).strip()
 
     @staticmethod
     async def _extract_segment(
