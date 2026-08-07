@@ -61,10 +61,10 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
             error = completed.exception()
             if error is not None:
                 logger.error(
-                    "Analysis pipeline failed for job %s: %s",
+                    "Analysis pipeline failed job_id=%s "
+                    "diagnostic=pipeline_failed error_type=%s",
                     job_id,
-                    error,
-                    exc_info=(type(error), error, error.__traceback__),
+                    type(error).__name__,
                 )
 
     task.add_done_callback(finish)

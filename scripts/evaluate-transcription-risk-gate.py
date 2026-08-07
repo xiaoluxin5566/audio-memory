@@ -68,7 +68,7 @@ def _schema_error() -> InputSchemaError:
     return InputSchemaError("input schema violation")
 
 
-def _load_record(value: object) -> LabeledFeatures:
+def _load_record(value: object) -> tuple[str, LabeledFeatures]:
     if not isinstance(value, Mapping) or set(value) != _ALLOWED_RECORD_FIELDS:
         raise _schema_error()
 
@@ -98,10 +98,13 @@ def _load_record(value: object) -> LabeledFeatures:
     ):
         raise _schema_error()
 
-    return LabeledFeatures(
-        expected_risk=expected_risk == "risk",
-        similarity=float(similarity),
-        characters_per_second=float(characters_per_second),
+    return (
+        segment_id,
+        LabeledFeatures(
+            expected_risk=expected_risk == "risk",
+            similarity=float(similarity),
+            characters_per_second=float(characters_per_second),
+        ),
     )
 
 
@@ -113,11 +116,16 @@ def load_labeled_features(path: Path) -> list[LabeledFeatures]:
         raise _schema_error() from error
 
     records: list[LabeledFeatures] = []
+    seen_segment_ids: set[str] = set()
     for line in lines:
         if not line.strip():
             continue
         try:
-            records.append(_load_record(json.loads(line)))
+            segment_id, record = _load_record(json.loads(line))
+            if segment_id in seen_segment_ids:
+                raise _schema_error()
+            seen_segment_ids.add(segment_id)
+            records.append(record)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise _schema_error() from error
     if not records:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -9,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
+from audio_memory.api.jobs import track_transcription
 from audio_memory.diarization.alignment import AlignedTranscriptSegment, Word
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
@@ -38,6 +41,118 @@ class InterruptOnceEngine:
                 f"segment-{index}",
                 [],
             )
+
+
+@pytest.mark.asyncio
+async def test_database_persistence_failure_never_logs_or_echoes_fast_transcript(
+    tmp_path: Path, caplog
+) -> None:
+    # Formatting the SQLAlchemy exception at either orchestration boundary would
+    # expose the bound fast-transcript parameter before it has passed the gate.
+    secret = "FAST-TRANSCRIPT-SECRET-MUST-NEVER-LEAK"
+    database = Database(tmp_path / "transcription-log-redaction.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="test.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="z" * 64,
+                duration_ms=2_000,
+                position=0,
+                temporary_path=str(tmp_path / "test.mp3"),
+            )
+        )
+        await session.commit()
+
+    class DuplicateIndexEngine:
+        async def transcribe_file(self, file: JobFile, _resume_from: int):
+            for _ in range(2):
+                yield TranscriptSegment(
+                    file.id,
+                    0,
+                    0,
+                    1_000,
+                    secret,
+                    [{"word": secret, "start_ms": 0, "end_ms": 1_000}],
+                )
+
+    service = TranscriptionService(
+        database,
+        risk_gate=TranscriptionRiskGateService(database),
+        refiner=SelectiveRefiner(database),
+    )
+    state = SimpleNamespace(transcription_tasks={})
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger("audio_memory.transcription.checkpoints").disabled = False
+    logging.getLogger("uvicorn.error").disabled = False
+    track_transcription(request, job_id, service.run_job(job_id, DuplicateIndexEngine()))
+    task = state.transcription_tasks[job_id]
+
+    with pytest.raises(IntegrityError) as caught:
+        await task
+    await asyncio.sleep(0)
+
+    assert secret not in str(caught.value)
+    assert secret not in caplog.text
+    assert "diagnostic=transcription_failed" in caplog.text
+    assert "diagnostic=pipeline_failed" in caplog.text
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_available_model_probability_signals_are_persisted_for_calibration(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "transcript-probability-signals.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="test.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="y" * 64,
+                duration_ms=1_000,
+                position=0,
+                temporary_path=str(tmp_path / "test.mp3"),
+            )
+        )
+        await session.commit()
+
+    await TranscriptionService(database)._save_segment(
+        TranscriptSegment(
+            file_id=file_id,
+            index=0,
+            start_ms=0,
+            end_ms=1_000,
+            text="probability calibration candidate",
+            words=[],
+            no_speech_prob=0.87,
+            avg_logprob=-0.42,
+        )
+    )
+
+    async with database.session() as session:
+        stored = await session.scalar(
+            select(Transcript).where(Transcript.job_file_id == file_id)
+        )
+    assert stored is not None
+    assert stored.no_speech_prob == 0.87
+    assert stored.avg_logprob == -0.42
+    await database.dispose()
 
 
 @pytest.mark.asyncio
@@ -120,6 +235,7 @@ async def test_transcription_passes_bulk_wall_clock_to_risk_gate_and_bounds_refi
                     '[{"compact_start_ms":0,"compact_end_ms":30000,'
                     '"source_start_ms":0,"source_end_ms":30000}]'
                 ),
+                vad_speech_json='[{"start_ms":0,"end_ms":30000}]',
                 position=0,
                 temporary_path=str(tmp_path / "source.mp3"),
             )

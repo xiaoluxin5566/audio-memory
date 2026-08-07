@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import shutil
@@ -832,7 +833,21 @@ def chunk_segment(*, file_id: str, chunk_index: int, chunk_seconds: int,
         end_ms=round((offset_seconds + float(raw.get("end", 0))) * 1000),
         text=str(raw.get("text", "")),
         words=shifted_words,
+        no_speech_prob=_finite_probability(raw.get("no_speech_prob")),
+        avg_logprob=_finite_number(raw.get("avg_logprob")),
     )
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
+def _finite_probability(value: object) -> float | None:
+    numeric = _finite_number(value)
+    return numeric if numeric is not None and 0.0 <= numeric <= 1.0 else None
 
 
 def valid_chunk_segments(*, file_id: str, chunk_index: int, chunk_seconds: int,
@@ -871,6 +886,8 @@ def valid_chunk_segments(*, file_id: str, chunk_index: int, chunk_seconds: int,
                     text=segment.text,
                     words=segment.words,
                     speaker_id=speaker_id,
+                    no_speech_prob=segment.no_speech_prob,
+                    avg_logprob=segment.avg_logprob,
                 )
                 continue
             words = [
@@ -899,6 +916,10 @@ def valid_chunk_segments(*, file_id: str, chunk_index: int, chunk_seconds: int,
                         for word in item.words
                     ],
                     speaker_id=item.speaker_id,
+                    no_speech_prob=(
+                        segment.no_speech_prob if len(aligned) == 1 else None
+                    ),
+                    avg_logprob=(segment.avg_logprob if len(aligned) == 1 else None),
                 )
             extra_segments += max(0, len(aligned) - 1)
         except (TypeError, ValueError):
@@ -968,6 +989,7 @@ class MLXWhisperEngine:
                     duration_ms=duration_ms,
                     padding_ms=self.speech_padding_ms,
                 )
+                await self._persist_vad_speech(file, detected, available=True)
                 await self._persist_speech_mapping(file, mapping)
                 await self._persist_vad_energy(
                     file,
@@ -983,6 +1005,7 @@ class MLXWhisperEngine:
                     item.end_ms - item.start_ms for item in speech_intervals
                 ]
             else:
+                await self._persist_vad_speech(file, [], available=False)
                 await self._persist_speech_mapping(file, [])
                 await self._persist_vad_energy(file, [])
                 chunks = await self._normalize_to_chunks(source, chunk_dir)
@@ -1218,6 +1241,27 @@ class MLXWhisperEngine:
             stored = await session.get(JobFile, file.id)
             if stored is not None:
                 stored.speech_mapping_json = serialized
+                await session.commit()
+
+    async def _persist_vad_speech(
+        self,
+        file: JobFile,
+        intervals: list[SpeechInterval],
+        *,
+        available: bool,
+    ) -> None:
+        serialized = json.dumps(
+            [asdict(item) for item in intervals],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        file.vad_speech_json = serialized
+        file.vad_available = available
+        async with self.database.session() as session:
+            stored = await session.get(JobFile, file.id)
+            if stored is not None:
+                stored.vad_speech_json = serialized
+                stored.vad_available = available
                 await session.commit()
 
     async def _persist_vad_energy(

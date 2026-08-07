@@ -63,9 +63,14 @@ class TranscriptionService:
             self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
             raise
-        except Exception:
+        except Exception as error:
             self.eta_tracker.clear(job_id)
-            logger.exception("Local transcription failed for job %s", job_id)
+            logger.error(
+                "Local transcription failed job_id=%s "
+                "diagnostic=transcription_failed error_type=%s",
+                job_id,
+                type(error).__name__,
+            )
             await self._set_stage(
                 job_id, JobStage.INTERRUPTED, error_code="transcription_failed"
             )
@@ -141,6 +146,8 @@ class TranscriptionService:
                         if discard_content
                         else json.dumps(segment.words, ensure_ascii=False)
                     ),
+                    no_speech_prob=segment.no_speech_prob,
+                    avg_logprob=segment.avg_logprob,
                     speaker_id=getattr(segment, "speaker_id", None),
                     risk_state=segment.risk_state,
                     risk_classified=False,

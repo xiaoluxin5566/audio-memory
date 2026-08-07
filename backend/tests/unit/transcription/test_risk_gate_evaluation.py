@@ -127,3 +127,24 @@ def test_evaluator_rejects_non_finite_feature_values_without_echoing_input(
     assert "input schema violation" in completed.stderr
     assert secret not in completed.stdout
     assert secret not in completed.stderr
+
+
+def test_evaluator_rejects_duplicate_anonymous_segment_ids_without_echoing_them(
+    tmp_path: Path,
+) -> None:
+    # Counting one labeled segment twice would inflate the sample-stability gate.
+    secret_id = "duplicate-id-must-not-be-echoed"
+    input_path = tmp_path / "duplicate-features.jsonl"
+    record = {
+        "segment_id": secret_id,
+        "expected_risk": "risk",
+        "features": {"similarity": 0.95, "characters_per_second": 16},
+    }
+    _write_jsonl(input_path, [record, record])
+
+    completed = _run_evaluator(input_path)
+
+    assert completed.returncode != 0
+    assert "input schema violation" in completed.stderr
+    assert secret_id not in completed.stdout
+    assert secret_id not in completed.stderr

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from alembic import command
@@ -17,6 +18,11 @@ from sqlalchemy.ext.asyncio import (
 from audio_memory.models import Base
 
 
+# aiosqlite DEBUG records include raw execute parameters before SQLAlchemy can
+# apply hide_parameters. Keep that driver boundary above content-bearing levels.
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -24,6 +30,7 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(
             f"sqlite+aiosqlite:///{path}",
             connect_args={"check_same_thread": False},
+            hide_parameters=True,
         )
         event.listen(self.engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -53,4 +60,3 @@ def run_migrations(database_path: Path) -> None:
     config.set_main_option("script_location", str(backend_root / "migrations"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
     command.upgrade(config, "head")
-

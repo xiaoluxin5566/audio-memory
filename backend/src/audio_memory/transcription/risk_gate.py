@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Sequence
 import re
@@ -19,6 +20,8 @@ MIN_SPEECH_DURATION_MS = 1_500
 MAX_CHARS_PER_SECOND = 14
 MAX_WORDS_PER_SECOND = 7
 MEDIUM_RISK_WEIGHT = 0.6
+MAX_COMPARISON_TEXT_CHARS = 512
+MAX_NEARBY_COMPARISONS = 256
 
 _CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _CHINESE_SMALL_UNITS = {"十": 10, "百": 100, "千": 1_000}
@@ -78,30 +81,57 @@ def classify_segments(
     segments: Sequence[TranscriptSegment],
     speech_intervals: Sequence[TimeInterval],
     energy_intervals: Sequence[EnergyInterval],
+    *,
+    owning_window: TimeInterval | None = None,
+    vad_available: bool = True,
 ) -> list[RiskDecision]:
     """Classify transcript candidates without retaining their text in decisions."""
     decisions: list[RiskDecision | None] = [None] * len(segments)
     ordered = sorted(enumerate(segments), key=lambda item: (item[1].start_ms, item[1].end_ms, item[0]))
-    prior: list[TranscriptSegment] = []
+    conflicting_positions = _conflicting_segment_positions(ordered, owning_window)
+    prior_window: list[tuple[TranscriptSegment, str]] = []
+    exact_history: dict[str, deque[int]] = {}
+    previous: TranscriptSegment | None = None
 
     for original_position, segment in ordered:
-        invalid_reason = _hard_rejection_reason(segment, speech_intervals)
+        invalid_reason = _hard_rejection_reason(
+            segment,
+            speech_intervals,
+            owning_window=owning_window,
+            has_time_conflict=original_position in conflicting_positions,
+            vad_available=vad_available,
+        )
         if invalid_reason is not None:
             decisions[original_position] = _rejected(segment.index, invalid_reason)
             continue
 
-        normalized_text = normalize_transcript_text(segment.text)
-        nearby_matches = [
-            candidate
-            for candidate in prior
-            if segment.start_ms - candidate.start_ms <= NEARBY_REPEAT_WINDOW_MS
-            and normalized_similarity(segment.text, candidate.text) >= SIMILARITY_THRESHOLD
+        normalized_text = normalize_transcript_text(segment.text)[
+            :MAX_COMPARISON_TEXT_CHARS
         ]
+        exact_starts = exact_history.setdefault(normalized_text, deque())
+        while (
+            exact_starts
+            and segment.start_ms - exact_starts[0] > NEARBY_REPEAT_WINDOW_MS
+        ):
+            exact_starts.popleft()
+        exact_match_count = len(exact_starts)
+        prior_window = [
+            item
+            for item in prior_window
+            if segment.start_ms - item[0].start_ms <= NEARBY_REPEAT_WINDOW_MS
+        ][-MAX_NEARBY_COMPARISONS:]
+        approximate_match_count = sum(
+            1
+            for _candidate, candidate_normalized in prior_window
+            if candidate_normalized != normalized_text
+            if _normalized_similarity_values(normalized_text, candidate_normalized)
+            >= SIMILARITY_THRESHOLD
+        )
+        nearby_match_count = exact_match_count + approximate_match_count
         phrase_repetitions = _adjacent_phrase_repetitions(normalized_text)
-        previous = prior[-1] if prior else None
-        light_repetition = bool(nearby_matches) or phrase_repetitions >= 2
+        light_repetition = nearby_match_count > 0 or phrase_repetitions >= 2
 
-        if len(nearby_matches) >= 2:
+        if nearby_match_count >= 2:
             decisions[original_position] = _high_risk(segment.index, "repeated_nearby")
         elif phrase_repetitions >= 3:
             decisions[original_position] = _high_risk(segment.index, "repeated_phrase")
@@ -111,10 +141,14 @@ def classify_segments(
             decisions[original_position] = _high_risk(segment.index, "implausible_speech_rate")
         elif light_repetition:
             decisions[original_position] = _medium_risk(segment.index, "light_repetition")
+        elif not vad_available:
+            decisions[original_position] = _medium_risk(segment.index, "vad_unavailable")
         else:
             decisions[original_position] = _normal(segment.index)
 
-        prior.append(segment)
+        prior_window.append((segment, normalized_text))
+        exact_starts.append(segment.start_ms)
+        previous = segment
 
     return [decision for decision in decisions if decision is not None]
 
@@ -183,13 +217,64 @@ def _levenshtein_distance(first: str, second: str) -> int:
     return previous[-1]
 
 
+def _normalized_similarity_values(first: str, second: str) -> float:
+    if not first and not second:
+        return 0.0
+    return 1 - _levenshtein_distance(first, second) / max(len(first), len(second))
+
+
+def _conflicting_segment_positions(
+    ordered: Sequence[tuple[int, TranscriptSegment]],
+    owning_window: TimeInterval | None,
+) -> set[int]:
+    """Identify every well-formed segment participating in a remaining overlap."""
+    conflicts: set[int] = set()
+    furthest_end = -1
+    furthest_position: int | None = None
+    for original_position, segment in ordered:
+        if (
+            segment.start_ms < 0
+            or segment.end_ms <= segment.start_ms
+            or not segment.text.strip()
+            or (
+                owning_window is not None
+                and (
+                    segment.start_ms < owning_window.start_ms
+                    or segment.end_ms > owning_window.end_ms
+                )
+            )
+        ):
+            continue
+        if furthest_position is not None and segment.start_ms < furthest_end:
+            conflicts.add(furthest_position)
+            conflicts.add(original_position)
+        if segment.end_ms > furthest_end:
+            furthest_end = segment.end_ms
+            furthest_position = original_position
+    return conflicts
+
+
 def _hard_rejection_reason(
-    segment: TranscriptSegment, speech_intervals: Sequence[TimeInterval]
+    segment: TranscriptSegment,
+    speech_intervals: Sequence[TimeInterval],
+    *,
+    owning_window: TimeInterval | None,
+    has_time_conflict: bool,
+    vad_available: bool,
 ) -> str | None:
+    if owning_window is not None and (
+        segment.start_ms < owning_window.start_ms
+        or segment.end_ms > owning_window.end_ms
+    ):
+        return "outside_file_window"
     if segment.start_ms < 0 or segment.end_ms <= segment.start_ms:
         return "invalid_timing"
     if not segment.text.strip():
         return "blank_text"
+    if has_time_conflict:
+        return "timestamp_conflict"
+    if not vad_available:
+        return None
 
     duration = segment.end_ms - segment.start_ms
     expanded = [
@@ -213,7 +298,8 @@ def _is_post_silence_repeat(
     gap_end = segment.start_ms
     if (
         gap_end - gap_start <= SILENCE_GAP_MS
-        or normalized_similarity(segment.text, previous.text) < SIMILARITY_THRESHOLD
+        or _bounded_normalized_similarity(segment.text, previous.text)
+        < SIMILARITY_THRESHOLD
     ):
         return False
     silent_intervals = [
@@ -254,6 +340,13 @@ def _speech_units(text: str) -> tuple[int, int]:
     compact = "".join(without_punctuation.split())
     has_cjk = any("\u4e00" <= character <= "\u9fff" for character in compact)
     return (len(compact) if has_cjk else 0, words)
+
+
+def _bounded_normalized_similarity(first: str, second: str) -> float:
+    return _normalized_similarity_values(
+        normalize_transcript_text(first)[:MAX_COMPARISON_TEXT_CHARS],
+        normalize_transcript_text(second)[:MAX_COMPARISON_TEXT_CHARS],
+    )
 
 
 def _adjacent_phrase_repetitions(text: str) -> int:

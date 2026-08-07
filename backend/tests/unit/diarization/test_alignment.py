@@ -38,6 +38,31 @@ def boundary_segment(index: int, start_ms: int, end_ms: int, text: str):
     )
 
 
+def test_fast_segment_preserves_available_finite_model_probability_signals() -> None:
+    # Dropping these fields at the Whisper boundary would make later de-identified
+    # calibration impossible even when the local model supplies stable values.
+    segments = list(
+        valid_chunk_segments(
+            file_id="file-1",
+            chunk_index=0,
+            chunk_seconds=300,
+            raw_segments=[
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "calibration candidate",
+                    "no_speech_prob": 0.87,
+                    "avg_logprob": -0.42,
+                }
+            ],
+        )
+    )
+
+    assert len(segments) == 1
+    assert segments[0].no_speech_prob == 0.87
+    assert segments[0].avg_logprob == -0.42
+
+
 def test_reverse_boundary_drift_keeps_one_sentence() -> None:
     finalized, remaining = reconcile_boundary_segments(
         [boundary_segment(0, 1_784_500, 1_786_500, "边界句子")],

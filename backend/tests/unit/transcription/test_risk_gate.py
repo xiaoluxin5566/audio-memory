@@ -37,6 +37,8 @@ def invalid_segment(start_ms: int, end_ms: int, text: str) -> TranscriptSegment:
         "is_reliable": True,
         "reliability_weight": 1.0,
         "risk_reason": None,
+        "no_speech_prob": None,
+        "avg_logprob": None,
     }
     for field in fields(TranscriptSegment):
         object.__setattr__(value, field.name, values[field.name])
@@ -71,6 +73,26 @@ def test_rejects_segment_without_sufficient_vad_support_after_grace() -> None:
     assert decisions[0].reliability_weight == 0.0
 
 
+def test_unavailable_vad_downgrades_valid_text_but_keeps_hard_checks_active() -> None:
+    decisions = classify_segments(
+        [
+            segment(0, 0, 1_000, "valid fallback transcript"),
+            invalid_segment(500, 500, "invalid fallback timing"),
+        ],
+        [],
+        [],
+        owning_window=TimeInterval(0, 1_000),
+        vad_available=False,
+    )
+
+    assert (decisions[0].state, decisions[0].reason) == (None, "vad_unavailable")
+    assert decisions[0].reliability_weight == 0.6
+    assert (decisions[1].state, decisions[1].reason) == (
+        "REJECTED",
+        "invalid_timing",
+    )
+
+
 def test_rejects_blank_and_invalid_timing_segments_from_corrupt_input() -> None:
     decisions = classify_segments(
         [invalid_segment(100, 100, "文本"), invalid_segment(0, 1_000, "   ")],
@@ -80,6 +102,48 @@ def test_rejects_blank_and_invalid_timing_segments_from_corrupt_input() -> None:
 
     assert [decision.reason for decision in decisions] == ["invalid_timing", "blank_text"]
     assert all(decision.state == "REJECTED" for decision in decisions)
+
+
+def test_rejects_segments_outside_their_owning_file_window() -> None:
+    # Dropping the owning-window check would let otherwise VAD-supported corrupt
+    # timestamps cross the file boundary and enter downstream analysis.
+    decisions = classify_segments(
+        [
+            invalid_segment(-100, 500, "head overflow"),
+            invalid_segment(800, 1_100, "tail overflow"),
+        ],
+        [TimeInterval(0, 1_100)],
+        [],
+        owning_window=TimeInterval(0, 1_000),
+    )
+
+    assert [decision.reason for decision in decisions] == [
+        "outside_file_window",
+        "outside_file_window",
+    ]
+    assert all(decision.state == "REJECTED" for decision in decisions)
+
+
+def test_rejects_every_segment_in_an_unresolved_cross_segment_time_conflict() -> None:
+    # Removing the cross-segment pass would trust both sides of a boundary merge
+    # conflict merely because each segment is individually well formed.
+    decisions = classify_segments(
+        [
+            segment(0, 0, 1_500, "first boundary result"),
+            segment(1, 1_000, 2_000, "conflicting boundary result"),
+            segment(2, 2_000, 3_000, "clean result"),
+        ],
+        [TimeInterval(0, 3_000)],
+        [],
+        owning_window=TimeInterval(0, 3_000),
+    )
+
+    assert [decision.reason for decision in decisions] == [
+        "timestamp_conflict",
+        "timestamp_conflict",
+        None,
+    ]
+    assert [decision.state for decision in decisions] == ["REJECTED", "REJECTED", None]
 
 
 def test_vad_grace_keeps_segment_when_coverage_reaches_thirty_percent() -> None:
@@ -119,6 +183,31 @@ def test_marks_third_similar_segment_within_thirty_seconds_high_risk() -> None:
     assert decisions[2].state == "HIGH_RISK_PENDING"
     assert decisions[2].reason == "repeated_nearby"
     assert decisions[2].is_reliable is False
+
+
+def test_exact_repeat_detection_survives_the_bounded_approximate_comparison_cap() -> None:
+    # Removing the linear exact-text index would let a crowded 30-second window
+    # push the first occurrence outside the bounded edit-distance comparison set.
+    items = [
+        segment(index, index * 100, index * 100 + 100, f"unique token {index}")
+        for index in range(260)
+    ]
+    for index in (0, 257, 259):
+        items[index] = segment(
+            index,
+            index * 100,
+            index * 100 + 100,
+            "exact repeated anchor",
+        )
+
+    decisions = classify_segments(
+        items,
+        [TimeInterval(0, 26_000)],
+        [],
+    )
+
+    assert decisions[259].state == "HIGH_RISK_PENDING"
+    assert decisions[259].reason == "repeated_nearby"
 
 
 def test_marks_two_similar_segments_as_medium_risk_only() -> None:

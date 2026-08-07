@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass
 import json
 import logging
@@ -14,6 +15,8 @@ from audio_memory.diarization.alignment import AlignedTranscriptSegment
 from audio_memory.models import JobFile, Transcript
 from audio_memory.transcription.risk_gate import (
     EnergyInterval,
+    MAX_COMPARISON_TEXT_CHARS,
+    MAX_NEARBY_COMPARISONS,
     RiskDecision,
     TimeInterval,
     classify_segments,
@@ -24,9 +27,6 @@ from audio_memory.transcription.risk_metrics import (
     RefinementWallClockBudget,
     RiskGateMetrics,
 )
-from audio_memory.transcription.segments import TranscriptSegment
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +46,135 @@ class _RiskCandidate:
     end_ms: int
     segment_index: int
     reason: str | None
+    text: str
+    words_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapshotSegment:
+    """Immutable copy of one persisted fast transcript used for classification."""
+
+    transcript_id: str
+    segment_uid: str
+    file_id: str
+    index: int
+    start_ms: int
+    end_ms: int
+    text: str
+    words_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FileRiskSnapshot:
+    file_id: str
+    file_position: int
+    owning_window: TimeInterval | None
+    speech_intervals: tuple[TimeInterval, ...]
+    energy_intervals: tuple[EnergyInterval, ...]
+    vad_available: bool
+    segments: tuple[_SnapshotSegment, ...]
+    context_complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedDecision:
+    transcript_id: str
+    state: str | None
+    reason: str | None
+    is_reliable: bool
+    reliability_weight: float
+    text: str
+    words_json: str
+
+
+@dataclass(slots=True)
+class _TextContext:
+    entries: dict[str, tuple[int, int, str]]
+    ordered: tuple[tuple[int, str], ...]
+    starts: tuple[int, ...]
+    normalized_by_uid: dict[str, str]
+    exact: dict[str, list[tuple[int, str]]]
+
+    @classmethod
+    def from_entries(
+        cls, entries: dict[str, tuple[int, int, str]]
+    ) -> _TextContext:
+        ordered = tuple(
+            sorted((start_ms, uid) for uid, (start_ms, _, _) in entries.items())
+        )
+        normalized_by_uid = {
+            uid: normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
+            for uid, (_, _, text) in entries.items()
+        }
+        exact: dict[str, list[tuple[int, str]]] = {}
+        for start_ms, uid in ordered:
+            exact.setdefault(normalized_by_uid[uid], []).append((start_ms, uid))
+        return cls(
+            entries,
+            ordered,
+            tuple(item[0] for item in ordered),
+            normalized_by_uid,
+            exact,
+        )
+
+    def replace(self, uid: str, text: str) -> None:
+        start_ms, end_ms, _ = self.entries[uid]
+        old_normalized = self.normalized_by_uid[uid]
+        old_item = (start_ms, uid)
+        old_exact = self.exact[old_normalized]
+        old_exact.pop(bisect_left(old_exact, old_item))
+        if not old_exact:
+            self.exact.pop(old_normalized)
+        new_normalized = normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
+        self.entries[uid] = (start_ms, end_ms, text)
+        self.normalized_by_uid[uid] = new_normalized
+        insort(self.exact.setdefault(new_normalized, []), old_item)
+
+    def exact_nearby_count(
+        self,
+        normalized: str,
+        target_start_ms: int,
+        excluded_uid: str,
+    ) -> int:
+        matches = self.exact.get(normalized, [])
+        lower = bisect_left(matches, (target_start_ms - 30_000, ""))
+        upper = bisect_right(matches, (target_start_ms + 30_000, "\U0010ffff"))
+        count = 0
+        for index in range(lower, upper):
+            if matches[index][1] == excluded_uid:
+                continue
+            count += 1
+            if count >= 2:
+                break
+        return count
+
+    def nearby_texts(
+        self,
+        target_start_ms: int,
+        excluded_uid: str,
+    ) -> list[str]:
+        lower = bisect_left(self.starts, target_start_ms - 30_000)
+        upper = bisect_right(self.starts, target_start_ms + 30_000)
+        left = bisect_left(self.starts, target_start_ms, lower, upper) - 1
+        right = left + 1
+        texts: list[str] = []
+        while len(texts) < MAX_NEARBY_COMPARISONS and (
+            left >= lower or right < upper
+        ):
+            take_left = right >= upper or (
+                left >= lower
+                and target_start_ms - self.ordered[left][0]
+                <= self.ordered[right][0] - target_start_ms
+            )
+            index = left if take_left else right
+            if take_left:
+                left -= 1
+            else:
+                right += 1
+            _, uid = self.ordered[index]
+            if uid != excluded_uid:
+                texts.append(self.entries[uid][2])
+        return texts
 
 
 class TranscriptionRiskGateService:
@@ -81,9 +210,7 @@ class TranscriptionRiskGateService:
                 ).all()
             )
 
-        candidates: list[_RiskCandidate] = []
         rejected = 0
-        interrupted = 0
         total_segments = len(rows)
         queue_limit = max(10, math.ceil(total_segments * 0.05))
         reserved_queue_slots = sum(
@@ -91,69 +218,83 @@ class TranscriptionRiskGateService:
             in {"HIGH_RISK_PENDING", "POST_EDIT_PASSED", "POST_EDIT_FAILED"}
             for transcript, _ in rows
         )
+        interrupted_ids = [
+            transcript.id
+            for transcript, _ in rows
+            if transcript.risk_state == "HIGH_RISK_PENDING"
+        ]
+        if interrupted_ids:
+            await self._store_interrupted_failures(interrupted_ids)
+        interrupted = len(interrupted_ids)
+
         grouped: dict[str, list[tuple[Transcript, JobFile]]] = {}
-        text_contexts: dict[str, dict[str, tuple[int, int, str]]] = {}
         for transcript, file in rows:
             grouped.setdefault(file.id, []).append((transcript, file))
-            if transcript.risk_state == "HIGH_RISK_PENDING":
-                await self._store_refinement_failed(
-                    transcript.id, "post_edit_interrupted"
-                )
-                interrupted += 1
 
-        for file_rows in grouped.values():
-            file = file_rows[0][1]
-            eligible = [
-                transcript
-                for transcript, _ in file_rows
-                if not transcript.risk_classified
-            ]
-            if not eligible:
-                continue
-            text_contexts[file.id] = {
-                transcript.segment_uid: (
-                    transcript.start_ms,
-                    transcript.end_ms,
-                    transcript.text,
+        snapshots = [
+            snapshot
+            for file_rows in grouped.values()
+            if (snapshot := _file_snapshot(file_rows)) is not None
+        ]
+        classified: dict[
+            str, tuple[_FileRiskSnapshot, tuple[RiskDecision, ...]]
+        ] = {}
+        candidates: list[_RiskCandidate] = []
+        text_contexts: dict[str, _TextContext] = {}
+        for snapshot in snapshots:
+            if snapshot.context_complete:
+                decisions = tuple(
+                    classify_segments(
+                        snapshot.segments,
+                        snapshot.speech_intervals,
+                        snapshot.energy_intervals,
+                        owning_window=snapshot.owning_window,
+                        vad_available=snapshot.vad_available,
+                    )
                 )
-                for transcript in eligible
-            }
-            segments = [
-                TranscriptSegment(
-                    file_id=transcript.job_file_id,
-                    index=transcript.segment_index,
-                    start_ms=transcript.start_ms,
-                    end_ms=transcript.end_ms,
-                    text=transcript.text,
-                    words=[],
+            else:
+                decisions = tuple(
+                    RiskDecision(
+                        segment.index,
+                        "REJECTED",
+                        "classification_context_incomplete",
+                        False,
+                        0.0,
+                    )
+                    for segment in snapshot.segments
                 )
-                for transcript in eligible
-            ]
-            decisions = classify_segments(
-                segments,
-                _speech_intervals(file),
-                _energy_intervals(file),
+            classified[snapshot.file_id] = (snapshot, decisions)
+            text_contexts[snapshot.file_id] = _TextContext.from_entries(
+                {
+                    segment.segment_uid: (
+                        segment.start_ms,
+                        segment.end_ms,
+                        segment.text,
+                    )
+                    for segment, decision in zip(
+                        snapshot.segments, decisions, strict=True
+                    )
+                    if decision.state != "REJECTED"
+                }
             )
-            for transcript, decision in zip(eligible, decisions, strict=True):
+            for segment, decision in zip(snapshot.segments, decisions, strict=True):
                 if decision.state == "REJECTED":
-                    await self._store_decision(transcript.id, decision)
-                    text_contexts[file.id].pop(transcript.segment_uid, None)
                     rejected += 1
                 elif decision.state == "HIGH_RISK_PENDING":
                     candidates.append(
                         _RiskCandidate(
-                            transcript.id,
-                            transcript.segment_uid,
-                            file.id,
-                            file.position,
-                            transcript.start_ms,
-                            transcript.end_ms,
-                            transcript.segment_index,
+                            segment.transcript_id,
+                            segment.segment_uid,
+                            snapshot.file_id,
+                            snapshot.file_position,
+                            segment.start_ms,
+                            segment.end_ms,
+                            segment.index,
                             decision.reason,
+                            segment.text,
+                            segment.words_json,
                         )
                     )
-                else:
-                    await self._store_decision(transcript.id, decision)
 
         available_queue_slots = max(0, queue_limit - reserved_queue_slots)
         ordered = sorted(
@@ -169,27 +310,42 @@ class TranscriptionRiskGateService:
         )
         queued = ordered[:available_queue_slots]
         overflowed = ordered[available_queue_slots:]
-        for candidate in overflowed:
-            await self._store_medium_risk(candidate.transcript_id, candidate.reason)
-        passed = 0
-        failed = 0
-        queued_started = time.monotonic()
-        admitted = 0
         budget = (
             RefinementWallClockBudget(bulk_elapsed_seconds)
             if bulk_elapsed_seconds is not None
             else None
         )
+        if budget is not None and not budget.allows_next(
+            queued_elapsed_seconds=time.monotonic() - started
+        ):
+            overflowed.extend(queued)
+            queued = []
+
+        queued_ids = {candidate.transcript_id for candidate in queued}
+        for snapshot, decisions in classified.values():
+            plans = tuple(
+                _planned_decision(
+                    segment,
+                    decision,
+                    admitted=segment.transcript_id in queued_ids,
+                )
+                for segment, decision in zip(
+                    snapshot.segments, decisions, strict=True
+                )
+            )
+            await self._store_file_classification(snapshot.file_id, plans)
+
+        passed = 0
+        failed = 0
+        admitted = 0
         for position, candidate in enumerate(queued):
             if budget is not None and not budget.allows_next(
-                queued_elapsed_seconds=time.monotonic() - queued_started
+                queued_elapsed_seconds=time.monotonic() - started
             ):
                 budget_overflow = queued[position:]
-                for overflow in budget_overflow:
-                    await self._store_medium_risk(overflow.transcript_id, overflow.reason)
+                await self._downgrade_pending(budget_overflow)
                 overflowed.extend(budget_overflow)
                 break
-            await self._store_pending(candidate)
             admitted += 1
             refined = await refiner.refine([candidate.segment_uid])
             result = refined[0] if len(refined) == 1 else None
@@ -198,24 +354,21 @@ class TranscriptionRiskGateService:
                 result is not None
                 and result.words
                 and result.text.strip()
-                and not _text_is_repeated(result.text, candidate.segment_uid, context)
+                and not _text_is_repeated(
+                    result.text,
+                    candidate.segment_uid,
+                    candidate.start_ms,
+                    context,
+                )
             ):
                 await self._store_refinement_passed(candidate.transcript_id, result)
-                context[candidate.segment_uid] = (
-                    result.start_ms,
-                    result.end_ms,
-                    result.text,
-                )
+                context.replace(candidate.segment_uid, result.text)
                 passed += 1
             else:
                 await self._store_refinement_failed(
                     candidate.transcript_id, candidate.reason
                 )
-                context[candidate.segment_uid] = (
-                    candidate.start_ms,
-                    candidate.end_ms,
-                    "",
-                )
+                context.replace(candidate.segment_uid, "")
                 failed += 1
 
         metrics = RiskGateMetrics(
@@ -230,45 +383,87 @@ class TranscriptionRiskGateService:
         metrics.log(logger)
         return metrics
 
-    async def _store_decision(self, transcript_id: str, decision: RiskDecision) -> None:
+    async def _store_interrupted_failures(
+        self, transcript_ids: list[str]
+    ) -> None:
         async with self.database.session() as session:
-            transcript = await session.get(Transcript, transcript_id)
-            if transcript is None or transcript.risk_classified:
-                return
-            transcript.risk_state = decision.state
-            transcript.risk_classified = True
-            transcript.is_reliable = decision.is_reliable
-            transcript.reliability_weight = decision.reliability_weight
-            transcript.risk_reason = decision.reason
-            if not decision.is_reliable:
+            transcripts = list(
+                await session.scalars(
+                    select(Transcript).where(Transcript.id.in_(transcript_ids))
+                )
+            )
+            for transcript in transcripts:
+                if transcript.risk_state != "HIGH_RISK_PENDING":
+                    continue
+                transcript.risk_state = "POST_EDIT_FAILED"
+                transcript.is_reliable = False
+                transcript.reliability_weight = 0.0
+                transcript.risk_reason = "post_edit_interrupted"
                 transcript.text = ""
                 transcript.words_json = "[]"
             await session.commit()
 
-    async def _store_medium_risk(self, transcript_id: str, reason: str | None) -> None:
+    async def _store_file_classification(
+        self,
+        file_id: str,
+        plans: tuple[_PlannedDecision, ...],
+    ) -> None:
+        """Persist one immutable file snapshot in a single transaction."""
+        if not plans:
+            return
         async with self.database.session() as session:
-            transcript = await session.get(Transcript, transcript_id)
-            if transcript is None or transcript.risk_classified:
-                return
-            transcript.risk_state = None
-            transcript.risk_classified = True
-            transcript.is_reliable = True
-            transcript.reliability_weight = 0.6
-            transcript.risk_reason = reason
+            transcripts = list(
+                await session.scalars(
+                    select(Transcript)
+                    .where(
+                        Transcript.job_file_id == file_id,
+                        Transcript.id.in_([plan.transcript_id for plan in plans]),
+                    )
+                    .order_by(Transcript.id)
+                )
+            )
+            by_id = {transcript.id: transcript for transcript in transcripts}
+            if len(by_id) != len(plans) or any(
+                by_id[plan.transcript_id].risk_classified for plan in plans
+            ):
+                raise RuntimeError("Risk classification snapshot changed")
+            for plan in plans:
+                transcript = by_id[plan.transcript_id]
+                transcript.risk_state = plan.state
+                transcript.risk_classified = True
+                transcript.is_reliable = plan.is_reliable
+                transcript.reliability_weight = plan.reliability_weight
+                transcript.risk_reason = plan.reason
+                transcript.text = plan.text
+                transcript.words_json = plan.words_json
             await session.commit()
 
-    async def _store_pending(self, candidate: _RiskCandidate) -> None:
+    async def _downgrade_pending(
+        self, candidates: list[_RiskCandidate]
+    ) -> None:
+        if not candidates:
+            return
         async with self.database.session() as session:
-            transcript = await session.get(Transcript, candidate.transcript_id)
-            if transcript is None or transcript.risk_classified:
-                return
-            transcript.risk_state = "HIGH_RISK_PENDING"
-            transcript.risk_classified = True
-            transcript.is_reliable = False
-            transcript.reliability_weight = 0.0
-            transcript.risk_reason = candidate.reason
-            transcript.text = ""
-            transcript.words_json = "[]"
+            transcripts = list(
+                await session.scalars(
+                    select(Transcript).where(
+                        Transcript.id.in_(
+                            [candidate.transcript_id for candidate in candidates]
+                        )
+                    )
+                )
+            )
+            by_id = {transcript.id: transcript for transcript in transcripts}
+            for candidate in candidates:
+                transcript = by_id.get(candidate.transcript_id)
+                if transcript is None or transcript.risk_state != "HIGH_RISK_PENDING":
+                    continue
+                transcript.risk_state = None
+                transcript.is_reliable = True
+                transcript.reliability_weight = 0.6
+                transcript.risk_reason = candidate.reason
+                transcript.text = candidate.text
+                transcript.words_json = candidate.words_json
             await session.commit()
 
     async def _store_refinement_passed(
@@ -316,16 +511,75 @@ class TranscriptionRiskGateService:
             await session.commit()
 
 
-def _speech_intervals(file: JobFile) -> list[TimeInterval]:
-    intervals = [
-        TimeInterval(item["source_start_ms"], item["source_end_ms"])
-        for item in _json_items(file.speech_mapping_json)
-        if _valid_interval(item, "source_start_ms", "source_end_ms")
-    ]
-    if intervals:
-        return intervals
+def _file_snapshot(
+    file_rows: list[tuple[Transcript, JobFile]],
+) -> _FileRiskSnapshot | None:
+    eligible = [transcript for transcript, _ in file_rows if not transcript.risk_classified]
+    if not eligible:
+        return None
+    file = file_rows[0][1]
     duration_ms = int(file.duration_ms or 0)
-    return [TimeInterval(0, duration_ms)] if duration_ms > 0 else []
+    speech_intervals = tuple(_speech_intervals(file))
+    return _FileRiskSnapshot(
+        file_id=file.id,
+        file_position=file.position,
+        owning_window=(
+            TimeInterval(0, duration_ms) if duration_ms > 0 else None
+        ),
+        speech_intervals=speech_intervals,
+        energy_intervals=tuple(_energy_intervals(file)),
+        vad_available=bool(file.vad_available or speech_intervals),
+        segments=tuple(
+            _SnapshotSegment(
+                transcript_id=transcript.id,
+                segment_uid=transcript.segment_uid,
+                file_id=transcript.job_file_id,
+                index=transcript.segment_index,
+                start_ms=transcript.start_ms,
+                end_ms=transcript.end_ms,
+                text=transcript.text,
+                words_json=transcript.words_json,
+            )
+            for transcript in eligible
+        ),
+        context_complete=len(eligible) == len(file_rows),
+    )
+
+
+def _planned_decision(
+    segment: _SnapshotSegment,
+    decision: RiskDecision,
+    *,
+    admitted: bool,
+) -> _PlannedDecision:
+    if decision.state == "HIGH_RISK_PENDING" and not admitted:
+        return _PlannedDecision(
+            segment.transcript_id,
+            None,
+            decision.reason,
+            True,
+            0.6,
+            segment.text,
+            segment.words_json,
+        )
+    discard_content = decision.state in {"REJECTED", "HIGH_RISK_PENDING"}
+    return _PlannedDecision(
+        segment.transcript_id,
+        decision.state,
+        decision.reason,
+        decision.is_reliable,
+        decision.reliability_weight,
+        "" if discard_content else segment.text,
+        "[]" if discard_content else segment.words_json,
+    )
+
+
+def _speech_intervals(file: JobFile) -> list[TimeInterval]:
+    return [
+        TimeInterval(item["start_ms"], item["end_ms"])
+        for item in _json_items(file.vad_speech_json)
+        if _valid_interval(item, "start_ms", "end_ms")
+    ]
 
 
 def _energy_intervals(file: JobFile) -> list[EnergyInterval]:
@@ -358,20 +612,29 @@ def _valid_interval(item: dict[str, object], start: str, end: str) -> bool:
 def _text_is_repeated(
     text: str,
     segment_uid: str,
-    context: dict[str, tuple[int, int, str]],
+    target_start_ms: int,
+    context: _TextContext,
 ) -> bool:
-    normalized = normalize_transcript_text(text)
+    normalized = normalize_transcript_text(text)[:MAX_COMPARISON_TEXT_CHARS]
     if not normalized:
         return True
     if _repeated_phrase(normalized):
         return True
-    target_start_ms = context[segment_uid][0]
-    nearby = 0
-    for candidate_start_ms, _, candidate_text in context.values():
-        if abs(target_start_ms - candidate_start_ms) <= 30_000 and (
-            normalized_similarity(text, candidate_text) >= 0.90
-        ):
+    nearby = 1 + context.exact_nearby_count(
+        normalized, target_start_ms, segment_uid
+    )
+    if nearby >= 3:
+        return True
+    for candidate_text in context.nearby_texts(target_start_ms, segment_uid):
+        candidate_normalized = normalize_transcript_text(candidate_text)[
+            :MAX_COMPARISON_TEXT_CHARS
+        ]
+        if candidate_normalized == normalized:
+            continue
+        if normalized_similarity(normalized, candidate_normalized) >= 0.90:
             nearby += 1
+            if nearby >= 3:
+                return True
     return nearby >= 3
 
 

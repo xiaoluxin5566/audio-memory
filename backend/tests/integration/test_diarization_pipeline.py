@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session
 
 from audio_memory.api.jobs import router
 from audio_memory.config import AppPaths
@@ -496,11 +498,444 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
         stored = await session.get(JobFile, "file-1")
     assert stored is not None
     assert stored.speech_mapping_json == file.speech_mapping_json
+    assert stored.vad_available is True
+    assert json.loads(stored.vad_speech_json) == [
+        {"start_ms": 60_000, "end_ms": 62_000},
+        {"start_ms": 17_999_000, "end_ms": 18_000_000},
+    ]
     assert json.loads(stored.vad_energy_json) == [
         {"start_ms": 0, "end_ms": 1_000, "has_signal": True},
         {"start_ms": 1_000, "end_ms": 2_000, "has_signal": False},
     ]
     await engine.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_file_classification_commit_rolls_back_as_one_recoverable_snapshot(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-atomic-snapshot.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        file = JobFile(
+            id="file-1",
+            job_id="job-1",
+            original_name="source.mp3",
+            extension=".mp3",
+            size_bytes=10,
+            sha256="q" * 64,
+            duration_ms=10_000,
+            speech_mapping_json=(
+                '[{"compact_start_ms":0,"compact_end_ms":10000,'
+                '"source_start_ms":0,"source_end_ms":10000}]'
+            ),
+            position=0,
+            temporary_path=str(tmp_path / "source.mp3"),
+        )
+        file.vad_speech_json = '[{"start_ms":0,"end_ms":10000}]'
+        session.add(file)
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="three identical fast transcripts",
+                    words_json="[]",
+                )
+                for index in range(3)
+            ]
+        )
+        await session.commit()
+
+    commits = 0
+
+    def interrupt_during_classification(session: Session) -> None:
+        nonlocal commits
+        dirty_transcripts = [
+            item for item in session.dirty if isinstance(item, Transcript)
+        ]
+        if len(dirty_transcripts) >= 3 or commits == 2:
+            raise RuntimeError("injected classification persistence failure")
+        if dirty_transcripts:
+            commits += 1
+
+    event.listen(Session, "before_commit", interrupt_during_classification)
+    gate = TranscriptionRiskGateService(database)
+    try:
+        with pytest.raises(
+            RuntimeError, match="injected classification persistence failure"
+        ):
+            await gate.apply("job-1", object())
+    finally:
+        event.remove(Session, "before_commit", interrupt_during_classification)
+
+    async with database.session() as session:
+        after_failure = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert [item.risk_classified for item in after_failure] == [False, False, False]
+    assert [item.text for item in after_failure] == [
+        "three identical fast transcripts",
+        "three identical fast transcripts",
+        "three identical fast transcripts",
+    ]
+
+    class SafeRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=4_000,
+                    end_ms=5_000,
+                    text="recovered accurate transcript",
+                    words=(Word("recovered", 4_000, 5_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    refiner = SafeRefiner()
+    await gate.apply("job-1", refiner)
+
+    async with database.session() as session:
+        recovered = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert refiner.calls == ["file-1:2"]
+    assert recovered[2].risk_state == "POST_EDIT_PASSED"
+    assert recovered[2].text == "recovered accurate transcript"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_service_hard_rejects_file_overflow_corruption_and_time_conflicts(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-file-boundaries.sqlite3")
+    await database.create_schema()
+    rows = [
+        ("head", -100, 500, "head overflow"),
+        ("tail", 800, 1_100, "tail overflow"),
+        ("timing", 500, 500, "invalid timing"),
+        ("blank", 0, 500, "   "),
+    ]
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        for position, (name, start_ms, end_ms, text) in enumerate(rows):
+            file = JobFile(
+                id=f"file-{name}",
+                job_id="job-1",
+                original_name=f"{name}.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256=f"{position + 1:064x}",
+                duration_ms=1_000,
+                speech_mapping_json=(
+                    '[{"compact_start_ms":0,"compact_end_ms":1000,'
+                    '"source_start_ms":0,"source_end_ms":1000}]'
+                ),
+                position=position,
+                temporary_path=str(tmp_path / f"{name}.mp3"),
+            )
+            file.vad_speech_json = '[{"start_ms":0,"end_ms":1000}]'
+            session.add(file)
+            session.add(
+                Transcript(
+                    id=f"transcript-{name}",
+                    job_file_id=file.id,
+                    segment_index=0,
+                    segment_uid=f"{file.id}:0",
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    text=text,
+                    words_json="[]",
+                )
+            )
+        conflict_file = JobFile(
+            id="file-conflict",
+            job_id="job-1",
+            original_name="conflict.mp3",
+            extension=".mp3",
+            size_bytes=10,
+            sha256="f" * 64,
+            duration_ms=3_000,
+            speech_mapping_json=(
+                '[{"compact_start_ms":0,"compact_end_ms":3000,'
+                '"source_start_ms":0,"source_end_ms":3000}]'
+            ),
+            position=len(rows),
+            temporary_path=str(tmp_path / "conflict.mp3"),
+        )
+        conflict_file.vad_speech_json = '[{"start_ms":0,"end_ms":3000}]'
+        session.add(conflict_file)
+        session.add_all(
+            [
+                Transcript(
+                    id=f"conflict-{index}",
+                    job_file_id=conflict_file.id,
+                    segment_index=index,
+                    segment_uid=f"file-conflict:{index}",
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    text=f"conflict {index}",
+                    words_json="[]",
+                )
+                for index, (start_ms, end_ms) in enumerate(
+                    [(0, 1_500), (1_000, 2_000)]
+                )
+            ]
+        )
+        await session.commit()
+
+    class UnexpectedRefiner:
+        async def refine(self, _segment_uids: list[str]):
+            raise AssertionError("hard-rejected rows must not be refined")
+
+    metrics = await TranscriptionRiskGateService(database).apply(
+        "job-1", UnexpectedRefiner()
+    )
+    async with database.session() as session:
+        stored = list(await session.scalars(select(Transcript)))
+    reasons = {item.id: item.risk_reason for item in stored}
+    assert reasons == {
+        "transcript-head": "outside_file_window",
+        "transcript-tail": "outside_file_window",
+        "transcript-timing": "invalid_timing",
+        "transcript-blank": "blank_text",
+        "conflict-0": "timestamp_conflict",
+        "conflict-1": "timestamp_conflict",
+    }
+    assert metrics.rejected == 6
+    assert all(item.risk_state == "REJECTED" for item in stored)
+    assert all(item.text == "" for item in stored)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_risk_gate_uses_raw_vad_for_rate_not_the_padded_processing_mapping(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-raw-vad.sqlite3")
+    await database.create_schema()
+    repeated = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉"
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        file = JobFile(
+            id="file-1",
+            job_id="job-1",
+            original_name="source.mp3",
+            extension=".mp3",
+            size_bytes=10,
+            sha256="r" * 64,
+            duration_ms=5_000,
+            speech_mapping_json=(
+                '[{"compact_start_ms":0,"compact_end_ms":5000,'
+                '"source_start_ms":0,"source_end_ms":5000}]'
+            ),
+            position=0,
+            temporary_path=str(tmp_path / "source.mp3"),
+        )
+        file.vad_speech_json = (
+            '[{"start_ms":0,"end_ms":2000},'
+            '{"start_ms":3000,"end_ms":3600}]'
+        )
+        session.add(file)
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    text=repeated,
+                    words_json="[]",
+                )
+                for index, (start_ms, end_ms) in enumerate([(0, 2_000), (3_000, 5_000)])
+            ]
+        )
+        await session.commit()
+
+    class RecordingRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=3_000,
+                    end_ms=5_000,
+                    text="safe replacement",
+                    words=(Word("safe", 3_000, 5_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    refiner = RecordingRefiner()
+    await TranscriptionRiskGateService(database).apply("job-1", refiner)
+
+    assert refiner.calls == ["file-1:1"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refinement_recheck_counts_replacement_and_excludes_target_old_text(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "risk-gate-replacement-context.sqlite3")
+    await database.create_schema()
+    nearby_text = "new nearby result"
+    old_repeated = "old phrase old phrase old phrase"
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        file = JobFile(
+            id="file-1",
+            job_id="job-1",
+            original_name="source.mp3",
+            extension=".mp3",
+            size_bytes=10,
+            sha256="s" * 64,
+            duration_ms=12_000,
+            speech_mapping_json=(
+                '[{"compact_start_ms":0,"compact_end_ms":12000,'
+                '"source_start_ms":0,"source_end_ms":12000}]'
+            ),
+            position=0,
+            temporary_path=str(tmp_path / "source.mp3"),
+        )
+        file.vad_speech_json = '[{"start_ms":0,"end_ms":12000}]'
+        session.add(file)
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 4_000,
+                    end_ms=index * 4_000 + 1_000,
+                    text=text,
+                    words_json="[]",
+                )
+                for index, text in enumerate([nearby_text, nearby_text, old_repeated])
+            ]
+        )
+        await session.commit()
+
+    class ReplacingRefiner:
+        async def refine(self, segment_uids: list[str]):
+            assert segment_uids == ["file-1:2"]
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=8_000,
+                    end_ms=9_000,
+                    text=nearby_text,
+                    words=(Word("nearby", 8_000, 9_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    await TranscriptionRiskGateService(database).apply("job-1", ReplacingRefiner())
+    async with database.session() as session:
+        target = await session.get(Transcript, "transcript-2")
+    assert target is not None
+    assert (target.risk_state, target.is_reliable, target.text) == (
+        "POST_EDIT_FAILED",
+        False,
+        "",
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_classification_time_exhausts_total_budget_before_any_refinement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "risk-gate-total-budget.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="transcribing"))
+        file = JobFile(
+            id="file-1",
+            job_id="job-1",
+            original_name="source.mp3",
+            extension=".mp3",
+            size_bytes=10,
+            sha256="t" * 64,
+            duration_ms=10_000,
+            speech_mapping_json=(
+                '[{"compact_start_ms":0,"compact_end_ms":10000,'
+                '"source_start_ms":0,"source_end_ms":10000}]'
+            ),
+            position=0,
+            temporary_path=str(tmp_path / "source.mp3"),
+        )
+        file.vad_speech_json = '[{"start_ms":0,"end_ms":10000}]'
+        session.add(file)
+        session.add_all(
+            [
+                Transcript(
+                    id=f"transcript-{index}",
+                    job_file_id="file-1",
+                    segment_index=index,
+                    segment_uid=f"file-1:{index}",
+                    start_ms=index * 2_000,
+                    end_ms=index * 2_000 + 1_000,
+                    text="budget repeated transcript",
+                    words_json="[]",
+                )
+                for index in range(3)
+            ]
+        )
+        await session.commit()
+
+    from audio_memory.transcription import risk_service
+
+    real_classifier = risk_service.classify_segments
+
+    def delayed_classifier(*args, **kwargs):
+        time.sleep(0.02)
+        return real_classifier(*args, **kwargs)
+
+    monkeypatch.setattr(risk_service, "classify_segments", delayed_classifier)
+
+    class RecordingRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            return []
+
+    refiner = RecordingRefiner()
+    metrics = await TranscriptionRiskGateService(database).apply(
+        "job-1", refiner, bulk_elapsed_seconds=0.01
+    )
+    async with database.session() as session:
+        target = await session.get(Transcript, "transcript-2")
+    assert refiner.calls == []
+    assert metrics.queued == 0
+    assert metrics.overflowed == 1
+    assert target is not None
+    assert (target.risk_state, target.is_reliable, target.reliability_weight) == (
+        None,
+        True,
+        0.6,
+    )
     await database.dispose()
 
 
@@ -831,10 +1266,16 @@ async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
         )
     assert [item.segment_uid for item in rows] == ["file-1:0", "file-1:10000"]
     assert len({item.segment_uid for item in rows}) == 2
-    assert [(item.start_ms, item.end_ms, item.text) for item in rows] == [
-        (1_784_800, 1_786_800, "前窗后句记录完成"),
-        (1_784_000, 1_785_000, "后窗前句转入讨论"),
+    assert [(item.start_ms, item.end_ms) for item in rows] == [
+        (1_784_800, 1_786_800),
+        (1_784_000, 1_785_000),
     ]
+    assert all(
+        item.risk_state == "REJECTED"
+        and item.risk_reason == "timestamp_conflict"
+        and item.text == ""
+        for item in rows
+    )
 
     await engine.close()
     await database.dispose()
@@ -905,6 +1346,8 @@ async def test_whisper_pipeline_continues_when_vad_fails(
     assert [(item.text, item.speaker_id) for item in segments] == [
         ("这段文字不能丢", None)
     ]
+    assert file.vad_available is False
+    assert file.vad_speech_json == "[]"
     assert "diagnostic=vad_failed" in caplog.text
     await engine.close()
     await database.dispose()
@@ -931,6 +1374,7 @@ async def test_risk_gate_refines_one_repeated_segment_replaces_text_and_never_re
                     '[{"compact_start_ms":0,"compact_end_ms":10000,'
                     '"source_start_ms":0,"source_end_ms":10000}]'
                 ),
+                vad_speech_json='[{"start_ms":0,"end_ms":10000}]',
                 position=0,
                 temporary_path=str(tmp_path / "source.mp3"),
             )
@@ -1012,6 +1456,7 @@ async def test_risk_gate_isolates_repeated_refinement_and_downgrades_queue_overf
                     '[{"compact_start_ms":0,"compact_end_ms":30000,'
                     '"source_start_ms":0,"source_end_ms":30000}]'
                 ),
+                vad_speech_json='[{"start_ms":0,"end_ms":30000}]',
                 position=0,
                 temporary_path=str(tmp_path / "source.mp3"),
             )
@@ -1176,6 +1621,7 @@ async def test_refinement_recheck_excludes_hard_rejected_text(tmp_path: Path) ->
                     '[{"compact_start_ms":10000,"compact_end_ms":16000,'
                     '"source_start_ms":10000,"source_end_ms":16000}]'
                 ),
+                vad_speech_json='[{"start_ms":10000,"end_ms":16000}]',
                 position=0,
                 temporary_path=str(tmp_path / "source.mp3"),
             )
@@ -1256,6 +1702,7 @@ async def test_refinement_result_cannot_shift_to_the_next_queued_segment(
                     '[{"compact_start_ms":0,"compact_end_ms":10000,'
                     '"source_start_ms":0,"source_end_ms":10000}]'
                 ),
+                vad_speech_json='[{"start_ms":0,"end_ms":10000}]',
                 position=0,
                 temporary_path=str(tmp_path / "source.mp3"),
             )

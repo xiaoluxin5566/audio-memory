@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 _VALID_RISK_STATES = frozenset(
@@ -23,6 +24,8 @@ class TranscriptSegment:
     is_reliable: bool = True
     reliability_weight: float = 1.0
     risk_reason: str | None = None
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
 
     def __post_init__(self) -> None:
         if self.index < 0:
@@ -37,6 +40,13 @@ class TranscriptSegment:
             raise ValueError(f"{self.risk_state} requires is_reliable=False")
         if self.risk_state == "POST_EDIT_PASSED" and not self.is_reliable:
             raise ValueError("POST_EDIT_PASSED requires is_reliable=True")
+        if self.no_speech_prob is not None and (
+            not math.isfinite(self.no_speech_prob)
+            or not 0.0 <= self.no_speech_prob <= 1.0
+        ):
+            raise ValueError("no_speech_prob must be finite and between zero and one")
+        if self.avg_logprob is not None and not math.isfinite(self.avg_logprob):
+            raise ValueError("avg_logprob must be finite")
 
 
 def ordered_text(

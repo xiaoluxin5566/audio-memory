@@ -96,15 +96,20 @@ def test_structured_transcript_migration_adds_required_metadata(tmp_path: Path) 
         }
 
     assert {"segment_uid", "speaker_id"} <= transcript_columns
+    assert {"no_speech_prob", "avg_logprob"} <= transcript_columns
     assert transcript_not_null["segment_uid"] == 1
     assert {
         "recording_started_at",
         "recording_time_source",
         "timezone",
         "speech_mapping_json",
+        "vad_speech_json",
+        "vad_available",
     } <= job_file_columns
     assert job_file_not_null["recording_time_source"] == 1
     assert job_file_not_null["speech_mapping_json"] == 1
+    assert job_file_not_null["vad_speech_json"] == 1
+    assert job_file_not_null["vad_available"] == 1
 
 
 def test_structured_transcript_migration_backfills_stable_segment_uid(
@@ -176,13 +181,61 @@ def test_risk_classification_migration_marks_legacy_risk_results_complete(
         )
         connection.commit()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0009")
 
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             "SELECT risk_classified FROM transcripts WHERE id = 'transcript-1'"
         ).fetchone()
     assert row == (1,)
+
+
+def test_source_signal_migration_rechecks_legacy_reliable_rows_and_isolates_old_refinement(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "risk-source-signals.sqlite3"
+    config = migration_config(database_path)
+    command.upgrade(config, "0001")
+    seed_v1_transcript(database_path)
+    command.upgrade(config, "0009")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE transcripts SET risk_classified = 1 WHERE id = 'transcript-1'"
+        )
+        connection.execute(
+            "INSERT INTO transcripts "
+            "(id, job_file_id, segment_index, segment_uid, start_ms, end_ms, "
+            "text, words_json, risk_state, risk_classified, is_reliable, "
+            "reliability_weight) VALUES "
+            "('transcript-2', 'file-1', 8, 'file-1:8', 1000, 2000, "
+            "'legacy refined text', '[]', 'POST_EDIT_PASSED', 1, 1, 1.0)"
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT id, risk_state, risk_classified, is_reliable, "
+            "reliability_weight, text, risk_reason FROM transcripts ORDER BY id"
+        ).fetchall()
+        vad_available = connection.execute(
+            "SELECT vad_available FROM job_files WHERE id = 'file-1'"
+        ).fetchone()
+    assert rows == [
+        ("transcript-1", None, 0, 1, 1.0, "你好", None),
+        (
+            "transcript-2",
+            "POST_EDIT_FAILED",
+            1,
+            0,
+            0.0,
+            "",
+            "legacy_risk_context_unavailable",
+        ),
+    ]
+    assert vad_available == (0,)
 
 
 @pytest.mark.parametrize(

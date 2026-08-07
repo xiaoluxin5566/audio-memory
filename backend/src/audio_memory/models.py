@@ -88,6 +88,8 @@ class JobFile(Base):
     speech_mapping_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )
+    vad_speech_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    vad_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     vad_energy_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     temporary_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -129,6 +131,8 @@ class Transcript(Base):
     end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     words_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    no_speech_prob: Mapped[float | None] = mapped_column(Float)
+    avg_logprob: Mapped[float | None] = mapped_column(Float)
     risk_state: Mapped[str | None] = mapped_column(String(40))
     risk_classified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
