@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+
+
+_VALID_RISK_STATES = frozenset(
+    {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_PASSED", "POST_EDIT_FAILED"}
+)
+_UNRELIABLE_RISK_STATES = frozenset(
+    {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_FAILED"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +20,12 @@ class TranscriptSegment:
     end_ms: int
     text: str
     words: list[dict[str, object]]
+    risk_state: str | None = None
+    is_reliable: bool = True
+    reliability_weight: float = 1.0
+    risk_reason: str | None = None
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
 
     def __post_init__(self) -> None:
         if self.index < 0:
@@ -19,6 +34,19 @@ class TranscriptSegment:
             raise ValueError("Segment timestamps must be increasing")
         if not self.text.strip():
             raise ValueError("Segment text cannot be blank")
+        if self.risk_state is not None and self.risk_state not in _VALID_RISK_STATES:
+            raise ValueError("Unknown transcript risk state")
+        if self.risk_state in _UNRELIABLE_RISK_STATES and self.is_reliable:
+            raise ValueError(f"{self.risk_state} requires is_reliable=False")
+        if self.risk_state == "POST_EDIT_PASSED" and not self.is_reliable:
+            raise ValueError("POST_EDIT_PASSED requires is_reliable=True")
+        if self.no_speech_prob is not None and (
+            not math.isfinite(self.no_speech_prob)
+            or not 0.0 <= self.no_speech_prob <= 1.0
+        ):
+            raise ValueError("no_speech_prob must be finite and between zero and one")
+        if self.avg_logprob is not None and not math.isfinite(self.avg_logprob):
+            raise ValueError("avg_logprob must be finite")
 
 
 def ordered_text(
@@ -36,4 +64,3 @@ def progress_percent(*, processed_ms: int, total_ms: int) -> int:
     if total_ms <= 0:
         return 0
     return min(100, max(0, round(processed_ms / total_ms * 100)))
-

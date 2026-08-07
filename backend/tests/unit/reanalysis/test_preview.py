@@ -94,6 +94,7 @@ async def seed_completed_history(database: Database) -> None:
                         end_ms=1000,
                         text="abcd",
                         words_json="[]",
+                        risk_classified=True,
                     )
                 )
         await session.flush()

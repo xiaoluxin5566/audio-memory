@@ -8,6 +8,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import select
 
 from audio_memory.api.content import router
 from audio_memory.config import AppPaths
@@ -27,7 +28,7 @@ from audio_memory.models import (
 
 class FakeQuestionAnswerer:
     async def answer(self, **kwargs):
-        assert "会议原文" in kwargs["transcript"]
+        assert kwargs["transcript"] == "会议原文"
         return "本次会议决定先做 macOS。"
 
 
@@ -63,7 +64,21 @@ async def content_client(tmp_path: Path):
         assert batch is not None
         batch.current_analysis_version_id = version_id
         session.add(JobFile(id=file_id, job_id=job_id, original_name="会议.mp3", extension=".mp3", size_bytes=10, sha256="c" * 64, duration_ms=1000, position=0, temporary_path=str(paths.audio / "会议.mp3")))
-        session.add(Transcript(id=str(uuid4()), job_file_id=file_id, segment_index=0, start_ms=0, end_ms=1000, text="会议原文", words_json="[]"))
+        session.add(Transcript(id=str(uuid4()), job_file_id=file_id, segment_index=0, start_ms=0, end_ms=1000, text="会议原文", words_json="[]", risk_classified=True))
+        session.add(
+            Transcript(
+                id=str(uuid4()),
+                job_file_id=file_id,
+                segment_index=1,
+                start_ms=1000,
+                end_ms=2000,
+                text="",
+                words_json="[]",
+                risk_state="HIGH_RISK_PENDING",
+                risk_classified=True,
+                is_reliable=False,
+            )
+        )
         session.add(Card(id=card_id, batch_id=batch_id, analysis_version_id=version_id, scene_id="meeting", position=0, payload_json=json.dumps({"card": {"title": "评审会", "summary": "确认一期范围"}, "detail_sections": []}, ensure_ascii=False)))
         session.add(Todo(id=todo_id, batch_id=batch_id, analysis_version_id=version_id, source_job_id=job_id, source_event_id="event_1", normalized_action="follow up", normalized_assignee="user", source_fingerprint="fingerprint-1", text="已过期事项", due_at="2026-08-04T08:00:00+00:00"))
         await session.commit()
@@ -99,6 +114,30 @@ async def test_feed_history_and_scoped_question(content_client):
     assert history["days"][0]["audio"][0]["original_name"] == "会议.mp3"
     assert answer.json()["messages"][-1]["role"] == "assistant"
     assert refreshed_feed["days"][0]["cards"][0]["qa"] == answer.json()["messages"]
+
+
+@pytest.mark.asyncio
+async def test_unclassified_legacy_transcript_hides_derived_content_and_blocks_qa(
+    content_client,
+) -> None:
+    client, _, database, ids = content_client
+    async with database.session() as session:
+        transcript = await session.scalar(
+            select(Transcript).where(Transcript.text == "会议原文")
+        )
+        assert transcript is not None
+        transcript.risk_classified = False
+        await session.commit()
+
+    feed = (await client.get("/api/feed")).json()
+    answer = await client.post(
+        f"/api/cards/{ids['card_id']}/questions",
+        json={"question": "决定是什么？"},
+    )
+
+    assert feed["days"] == []
+    assert all(item["id"] != ids["todo_id"] for item in feed["todos"])
+    assert answer.status_code == 404
 
 
 @pytest.mark.asyncio

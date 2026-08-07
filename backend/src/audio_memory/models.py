@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -87,6 +88,9 @@ class JobFile(Base):
     speech_mapping_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )
+    vad_speech_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    vad_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    vad_energy_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     temporary_path: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -95,6 +99,23 @@ class Transcript(Base):
     __tablename__ = "transcripts"
     __table_args__ = (
         UniqueConstraint("job_file_id", "segment_index", name="uq_transcript_segment"),
+        CheckConstraint(
+            "risk_state IS NULL OR risk_state IN "
+            "('REJECTED', 'HIGH_RISK_PENDING', 'POST_EDIT_PASSED', "
+            "'POST_EDIT_FAILED')",
+            name="ck_transcripts_risk_state",
+        ),
+        CheckConstraint(
+            "risk_state IS NULL OR "
+            "(risk_state IN ('REJECTED', 'HIGH_RISK_PENDING', "
+            "'POST_EDIT_FAILED') AND is_reliable = 0) OR "
+            "(risk_state = 'POST_EDIT_PASSED' AND is_reliable = 1)",
+            name="ck_transcripts_risk_reliability",
+        ),
+        CheckConstraint(
+            "is_reliable = 1 OR (text = '' AND words_json = '[]')",
+            name="ck_transcripts_unreliable_content",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -110,6 +131,17 @@ class Transcript(Base):
     end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     words_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    no_speech_prob: Mapped[float | None] = mapped_column(Float)
+    avg_logprob: Mapped[float | None] = mapped_column(Float)
+    risk_state: Mapped[str | None] = mapped_column(String(40))
+    risk_classified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    is_reliable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reliability_weight: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0
+    )
+    risk_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class Batch(Base):

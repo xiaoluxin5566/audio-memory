@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import logging
+import time
 from typing import Protocol
 from uuid import uuid4
 
@@ -13,6 +14,10 @@ from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
 from audio_memory.transcription.eta import TranscriptionEtaTracker
+from audio_memory.transcription.risk_service import (
+    SegmentRefiner,
+    TranscriptionRiskGateService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,25 +29,48 @@ class TranscriptionEngine(Protocol):
 
 class TranscriptionService:
     def __init__(
-        self, database: Database, *, eta_tracker: TranscriptionEtaTracker | None = None
+        self,
+        database: Database,
+        *,
+        eta_tracker: TranscriptionEtaTracker | None = None,
+        risk_gate: TranscriptionRiskGateService | None = None,
+        refiner: SegmentRefiner | None = None,
     ) -> None:
         self.database = database
         self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
+        self.risk_gate = risk_gate
+        self.refiner = refiner
 
     async def run_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         files = await self._files(job_id)
         try:
+            bulk_started = time.monotonic()
             for file in files:
                 resume_from = await self._resume_index(file.id)
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
+            bulk_elapsed_seconds = time.monotonic() - bulk_started
+            if self.risk_gate is None or self.refiner is None:
+                raise RuntimeError(
+                    "Transcription risk gate and segment refiner are required"
+                )
+            await self.risk_gate.apply(
+                job_id,
+                self.refiner,
+                bulk_elapsed_seconds=bulk_elapsed_seconds,
+            )
         except asyncio.CancelledError:
             self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
             raise
-        except Exception:
+        except Exception as error:
             self.eta_tracker.clear(job_id)
-            logger.exception("Local transcription failed for job %s", job_id)
+            logger.error(
+                "Local transcription failed job_id=%s "
+                "diagnostic=transcription_failed error_type=%s",
+                job_id,
+                type(error).__name__,
+            )
             await self._set_stage(
                 job_id, JobStage.INTERRUPTED, error_code="transcription_failed"
             )
@@ -99,6 +127,11 @@ class TranscriptionService:
             return int(maximum if maximum is not None else -1) + 1
 
     async def _save_segment(self, segment: TranscriptSegment) -> None:
+        discard_content = (
+            not segment.is_reliable
+            or segment.risk_state
+            in {"REJECTED", "HIGH_RISK_PENDING", "POST_EDIT_FAILED"}
+        )
         async with self.database.session() as session:
             session.add(
                 Transcript(
@@ -107,9 +140,20 @@ class TranscriptionService:
                     segment_index=segment.index,
                     start_ms=segment.start_ms,
                     end_ms=segment.end_ms,
-                    text=segment.text.strip(),
-                    words_json=json.dumps(segment.words, ensure_ascii=False),
+                    text="" if discard_content else segment.text.strip(),
+                    words_json=(
+                        "[]"
+                        if discard_content
+                        else json.dumps(segment.words, ensure_ascii=False)
+                    ),
+                    no_speech_prob=segment.no_speech_prob,
+                    avg_logprob=segment.avg_logprob,
                     speaker_id=getattr(segment, "speaker_id", None),
+                    risk_state=segment.risk_state,
+                    risk_classified=False,
+                    is_reliable=segment.is_reliable,
+                    reliability_weight=segment.reliability_weight,
+                    risk_reason=segment.risk_reason,
                 )
             )
             await session.commit()

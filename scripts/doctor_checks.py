@@ -31,7 +31,7 @@ DIARIZATION_HASHES = {
 DIARIZATION_SIZES = {
     "10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e": 1540514,
 }
-EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 8)]
+EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 11)]
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -78,11 +78,22 @@ def check_whisper(app_data: Path) -> bool:
         config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
         if not isinstance(config, dict) or config.get("model_type") != "whisper":
             return False
+        blob_root = snapshot.parent.parent / "blobs"
         for item in files:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 return False
-            path = (snapshot / item["path"]).resolve()
-            if snapshot not in path.parents or not _valid_file(path, item):
+            relative = Path(item["path"])
+            if relative.is_absolute() or ".." in relative.parts:
+                return False
+            path = snapshot / relative
+            resolved = path.resolve()
+            allowed = (
+                resolved == snapshot
+                or snapshot in resolved.parents
+                or resolved == blob_root
+                or blob_root in resolved.parents
+            )
+            if not allowed or not _valid_file(path, item):
                 return False
         return True
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
@@ -161,7 +172,7 @@ def check_database(database: Path) -> bool:
     try:
         with _connect(database) as connection:
             revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
-            return revisions == [("0007",)] and all(
+            return revisions == [("0010",)] and all(
                 columns.issubset(_columns(connection, table))
                 for table, columns in required.items()
             )

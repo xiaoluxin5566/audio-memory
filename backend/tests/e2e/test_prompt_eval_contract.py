@@ -655,7 +655,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     database = app_data / "audio-memory.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE alembic_version (version_num TEXT NOT NULL)")
-        connection.execute("INSERT INTO alembic_version VALUES ('0007')")
+        connection.execute("INSERT INTO alembic_version VALUES ('0010')")
         connection.execute(
             "CREATE TABLE reanalysis_batches (id TEXT, status TEXT NOT NULL)"
         )
@@ -686,9 +686,8 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     assert "✓ 分析迁移链" in result.stdout
     assert "✓ 历史重分析恢复" in result.stdout
     assert "✓ 本地会话安全" in result.stdout
-    assert "✓ 本地数据库已迁移至 0007" in result.stdout
+    assert "✓ 本地数据库已迁移至 0010" in result.stdout
     assert "✓ 历史重分析状态已恢复" in result.stdout
-
     vad_path = app_data / "models/diarization/silero_vad.onnx"
     trusted_vad = vad_path.read_bytes()
     vad_path.write_bytes(b"bad")
@@ -753,7 +752,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert "✗ 本地数据库已迁移至 0007" in stale.stdout
+    assert "✗ 本地数据库已迁移至 0010" in stale.stdout
     assert "✗ 历史重分析状态已恢复" in stale.stdout
     assert stale.returncode == 1
 
@@ -772,6 +771,55 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     )
     assert "✗ Whisper 模型清单" in invalid_model.stdout
     assert invalid_model.returncode == 1
+
+
+def test_doctor_accepts_huggingface_style_symlinked_whisper_snapshot(
+    tmp_path: Path,
+) -> None:
+    app_data = tmp_path / "app-data"
+    snapshot = tmp_path / "hub" / "snapshots" / "revision"
+    blobs = tmp_path / "hub" / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir()
+    config_blob = blobs / "config"
+    config_blob.write_text(json.dumps({"model_type": "whisper"}))
+    weights_blob = blobs / "weights"
+    weights_blob.write_bytes(b"trusted weights")
+    (snapshot / "config.json").symlink_to(config_blob)
+    (snapshot / "weights.safetensors").symlink_to(weights_blob)
+    app_data.mkdir()
+    app_data.joinpath("whisper-model-manifest.json").write_text(
+        json.dumps(
+            {
+                "model_id": "mlx-community/whisper-large-v3-turbo",
+                "snapshot": str(snapshot),
+                "files": [
+                    {
+                        "path": "config.json",
+                        "size": config_blob.stat().st_size,
+                        "sha256": hashlib.sha256(config_blob.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": "weights.safetensors",
+                        "size": weights_blob.stat().st_size,
+                        "sha256": hashlib.sha256(weights_blob.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "doctor_checks.py"),
+            "whisper",
+            str(app_data),
+        ],
+        check=False,
+    )
+
+    assert result.returncode == 0
 
 
 def test_doctor_rejects_tampered_migration_chain(tmp_path: Path) -> None:

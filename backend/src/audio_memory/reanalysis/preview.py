@@ -16,7 +16,6 @@ from audio_memory.models import (
     AnalysisVersion,
     Batch,
     JobFile,
-    ProfileFact,
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
@@ -36,6 +35,10 @@ from audio_memory.reanalysis.types import (
     ReanalysisPreview,
     ReanalysisSnapshot,
     SourceSnapshot,
+)
+from audio_memory.transcript_safety import (
+    pending_risk_review_exists,
+    safe_active_profile_facts,
 )
 
 
@@ -265,6 +268,7 @@ class ReanalysisPreviewBuilder:
                     .where(
                         AnalysisVersion.status == "completed",
                         AnalysisJob.stage == "completed",
+                        ~pending_risk_review_exists(Batch.job_id),
                     )
                     .order_by(Batch.uploaded_at.desc(), Batch.id.desc())
                 )
@@ -301,13 +305,7 @@ class ReanalysisPreviewBuilder:
 
     async def _profile_snapshot(self) -> list[dict[str, object]]:
         async with self.database.session() as session:
-            rows = list(
-                await session.scalars(
-                    select(ProfileFact)
-                    .where(ProfileFact.status == "active")
-                    .order_by(ProfileFact.subject_id, ProfileFact.dimension, ProfileFact.id)
-                )
-            )
+            rows = await safe_active_profile_facts(session)
         return [
             {
                 "subject_id": row.subject_id,

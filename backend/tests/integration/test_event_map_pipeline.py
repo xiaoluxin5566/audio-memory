@@ -255,6 +255,7 @@ async def seed_version(
                 end_ms=1000,
                 text="普通转写内容",
                 words_json="[]",
+                risk_classified=True,
             )
         )
         if history_batch_id is not None:

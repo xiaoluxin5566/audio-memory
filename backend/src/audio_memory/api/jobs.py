@@ -7,12 +7,11 @@ import logging
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import select
 
 from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.models import ProfileFact
 from audio_memory.prompts.store import PROMPT_SCENES
+from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
 
 
@@ -61,10 +60,10 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
             error = completed.exception()
             if error is not None:
                 logger.error(
-                    "Analysis pipeline failed for job %s: %s",
+                    "Analysis pipeline failed job_id=%s "
+                    "diagnostic=pipeline_failed error_type=%s",
                     job_id,
-                    error,
-                    exc_info=(type(error), error, error.__traceback__),
+                    type(error).__name__,
                 )
 
     task.add_done_callback(finish)
@@ -107,11 +106,7 @@ async def snapshot_analysis_request(
     }
     database = request.app.state.database
     async with database.session() as session:
-        facts = list(
-            await session.scalars(
-                select(ProfileFact).where(ProfileFact.status == "active")
-            )
-        )
+        facts = await safe_active_profile_facts(session)
     profile = [
         {
             "subject_id": fact.subject_id,

@@ -15,11 +15,14 @@ from audio_memory.models import (
     Batch,
     Card,
     JobFile,
-    ProfileFact,
     QAMessage,
     Todo,
     TodoTombstone,
     Transcript,
+)
+from audio_memory.transcript_safety import (
+    pending_risk_review_exists,
+    safe_active_profile_facts,
 )
 
 
@@ -50,7 +53,13 @@ class ContentService:
     async def feed(self) -> dict[str, object]:
         now = datetime.now(UTC)
         async with self.database.session() as session:
-            todos = list(await session.scalars(select(Todo)))
+            todos = list(
+                await session.scalars(
+                    select(Todo)
+                    .join(Batch, Batch.id == Todo.batch_id)
+                    .where(~pending_risk_review_exists(Batch.job_id))
+                )
+            )
             rows = list(
                 (
                     await session.execute(
@@ -63,6 +72,7 @@ class ContentService:
                                 == Batch.current_analysis_version_id
                             ),
                         )
+                        .where(~pending_risk_review_exists(Batch.job_id))
                         .order_by(Batch.uploaded_at.desc(), Card.position)
                     )
                 ).all()
@@ -148,7 +158,14 @@ class ContentService:
         update_due_at: bool,
     ) -> dict[str, object]:
         async with self.database.session() as session:
-            todo = await session.get(Todo, todo_id)
+            todo = await session.scalar(
+                select(Todo)
+                .join(Batch, Batch.id == Todo.batch_id)
+                .where(
+                    Todo.id == todo_id,
+                    ~pending_risk_review_exists(Batch.job_id),
+                )
+            )
             if todo is None:
                 raise LookupError("Unknown todo")
             if text is not None:
@@ -168,7 +185,14 @@ class ContentService:
 
     async def delete_todo(self, todo_id: str) -> None:
         async with self.database.session() as session:
-            todo = await session.get(Todo, todo_id)
+            todo = await session.scalar(
+                select(Todo)
+                .join(Batch, Batch.id == Todo.batch_id)
+                .where(
+                    Todo.id == todo_id,
+                    ~pending_risk_review_exists(Batch.job_id),
+                )
+            )
             if todo is None:
                 raise LookupError("Unknown todo")
             if todo.source_fingerprint is not None:
@@ -198,11 +222,7 @@ class ContentService:
             )
         history = [{"role": item.role, "content": item.content} for item in existing]
         async with self.database.session() as session:
-            facts = list(
-                await session.scalars(
-                    select(ProfileFact).where(ProfileFact.status == "active")
-                )
-            )
+            facts = await safe_active_profile_facts(session)
         profile = [
             {
                 "dimension": item.dimension,
@@ -257,14 +277,27 @@ class ContentService:
 
     async def _card_context(self, card_id: str) -> tuple[str, dict[str, object]]:
         async with self.database.session() as session:
-            card = await session.get(Card, card_id)
-            if card is None:
+            card_context = (
+                await session.execute(
+                    select(Card, Batch)
+                    .join(Batch, Batch.id == Card.batch_id)
+                    .where(
+                        Card.id == card_id,
+                        ~pending_risk_review_exists(Batch.job_id),
+                    )
+                )
+            ).first()
+            if card_context is None:
                 raise LookupError("Unknown card")
-            batch = await session.get(Batch, card.batch_id)
+            card, batch = card_context
             rows = await session.execute(
                 select(Transcript.text)
                 .join(JobFile, JobFile.id == Transcript.job_file_id)
-                .where(JobFile.job_id == batch.job_id)
+                .where(
+                    JobFile.job_id == batch.job_id,
+                    Transcript.risk_classified.is_(True),
+                    Transcript.is_reliable.is_(True),
+                )
                 .order_by(JobFile.position, Transcript.segment_index)
             )
         return "\n".join(row[0] for row in rows), json.loads(card.payload_json)
