@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
+from audio_memory.diarization.alignment import AlignedTranscriptSegment, Word
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.checkpoints import TranscriptionService
@@ -81,6 +83,121 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
     assert engine.calls == [(file_id, 0), (file_id, 1)]
     assert len(rows) == 3
     assert job.stage == JobStage.ANALYZING.value
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["run", "resume"])
+async def test_transcription_passes_bulk_wall_clock_to_risk_gate_and_bounds_refinement(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    """The production and recovery paths must enforce the 20% refinement budget."""
+    database = Database(tmp_path / f"risk-budget-{entrypoint}.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(
+            AnalysisJob(
+                id=job_id,
+                stage=(
+                    JobStage.TRANSCRIBING.value
+                    if entrypoint == "run"
+                    else JobStage.INTERRUPTED.value
+                ),
+            )
+        )
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="source.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="f" * 64,
+                duration_ms=30_000,
+                speech_mapping_json=(
+                    '[{"compact_start_ms":0,"compact_end_ms":30000,'
+                    '"source_start_ms":0,"source_end_ms":30000}]'
+                ),
+                position=0,
+                temporary_path=str(tmp_path / "source.mp3"),
+            )
+        )
+        await session.commit()
+
+    class DelayedRepeatedEngine:
+        async def transcribe_file(self, file: JobFile, resume_from: int):
+            for index in range(resume_from, 13):
+                await asyncio.sleep(0.01)
+                yield TranscriptSegment(
+                    file.id,
+                    index,
+                    index * 2_000,
+                    index * 2_000 + 1_000,
+                    "重复的快速转写内容",
+                    [],
+                )
+
+    class SlowRefiner:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def refine(self, segment_uids: list[str]):
+            self.calls.extend(segment_uids)
+            await asyncio.sleep(0.05)
+            uid = segment_uids[0]
+            segment_index = int(uid.rsplit(":", maxsplit=1)[1])
+            start_ms = segment_index * 2_000
+            return [
+                AlignedTranscriptSegment(
+                    start_ms=start_ms,
+                    end_ms=start_ms + 1_000,
+                    text=f"refined {segment_index}",
+                    words=(Word("refined", start_ms, start_ms + 1_000),),
+                    speaker_id=None,
+                )
+            ]
+
+    class RecordingRiskGate(TranscriptionRiskGateService):
+        def __init__(self, database: Database) -> None:
+            super().__init__(database)
+            self.bulk_elapsed_seconds: float | None = None
+
+        async def apply(
+            self,
+            job_id: str,
+            refiner,
+            *,
+            bulk_elapsed_seconds: float | None = None,
+        ):
+            self.bulk_elapsed_seconds = bulk_elapsed_seconds
+            return await super().apply(
+                job_id,
+                refiner,
+                bulk_elapsed_seconds=bulk_elapsed_seconds,
+            )
+
+    refiner = SlowRefiner()
+    risk_gate = RecordingRiskGate(database)
+    service = TranscriptionService(database, risk_gate=risk_gate, refiner=refiner)
+    if entrypoint == "run":
+        await service.run_job(job_id, DelayedRepeatedEngine())
+    else:
+        await service.resume_job(job_id, DelayedRepeatedEngine())
+
+    assert risk_gate.bulk_elapsed_seconds is not None
+    assert risk_gate.bulk_elapsed_seconds > 0
+    assert refiner.calls == [f"{file_id}:2"]
+    async with database.session() as session:
+        transcripts = list(
+            await session.scalars(
+                select(Transcript).order_by(Transcript.segment_index)
+            )
+        )
+    assert transcripts[2].risk_state == "POST_EDIT_PASSED"
+    assert all(item.risk_state is None for item in transcripts[3:])
+    assert all(item.reliability_weight == 0.6 for item in transcripts[3:])
     await database.dispose()
 
 

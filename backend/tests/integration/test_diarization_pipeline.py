@@ -1116,7 +1116,7 @@ async def test_transcription_does_not_enter_analysis_when_risk_gate_fails(
                 yield None
 
     class FailingRiskGate:
-        async def apply(self, _job_id, _refiner):
+        async def apply(self, _job_id, _refiner, *, bulk_elapsed_seconds):
             raise RuntimeError("risk gate unavailable")
 
     service = TranscriptionService(

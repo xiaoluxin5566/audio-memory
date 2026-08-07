@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import logging
+import time
 from typing import Protocol
 from uuid import uuid4
 
@@ -43,15 +44,21 @@ class TranscriptionService:
     async def run_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         files = await self._files(job_id)
         try:
+            bulk_started = time.monotonic()
             for file in files:
                 resume_from = await self._resume_index(file.id)
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
+            bulk_elapsed_seconds = time.monotonic() - bulk_started
             if self.risk_gate is None or self.refiner is None:
                 raise RuntimeError(
                     "Transcription risk gate and segment refiner are required"
                 )
-            await self.risk_gate.apply(job_id, self.refiner)
+            await self.risk_gate.apply(
+                job_id,
+                self.refiner,
+                bulk_elapsed_seconds=bulk_elapsed_seconds,
+            )
         except asyncio.CancelledError:
             self.eta_tracker.clear(job_id)
             await self._set_stage(job_id, JobStage.INTERRUPTED)
