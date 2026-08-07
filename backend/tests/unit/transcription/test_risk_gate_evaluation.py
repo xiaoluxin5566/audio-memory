@@ -94,3 +94,36 @@ def test_evaluator_rejects_content_or_audio_path_fields(
     assert "input schema violation" in completed.stderr
     assert secret not in completed.stdout
     assert secret not in completed.stderr
+
+
+@pytest.mark.parametrize("feature", ["similarity", "characters_per_second"])
+@pytest.mark.parametrize("non_finite_value", [float("nan"), float("inf"), float("-inf")])
+def test_evaluator_rejects_non_finite_feature_values_without_echoing_input(
+    tmp_path: Path, feature: str, non_finite_value: float
+) -> None:
+    # Removing finite-number validation would let NaN or infinity distort the
+    # aggregate metrics while the rejected anonymous identifier must stay private.
+    secret = "must-not-appear-in-validation-error"
+    input_path = tmp_path / "non-finite-features.jsonl"
+    features: dict[str, object] = {
+        "similarity": 0.95,
+        "characters_per_second": 16,
+    }
+    features[feature] = non_finite_value
+    _write_jsonl(
+        input_path,
+        [
+            {
+                "segment_id": secret,
+                "expected_risk": "risk",
+                "features": features,
+            }
+        ],
+    )
+
+    completed = _run_evaluator(input_path)
+
+    assert completed.returncode != 0
+    assert "input schema violation" in completed.stderr
+    assert secret not in completed.stdout
+    assert secret not in completed.stderr

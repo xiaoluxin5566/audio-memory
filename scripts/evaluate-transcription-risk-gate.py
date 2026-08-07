@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -88,9 +89,11 @@ def _load_record(value: object) -> LabeledFeatures:
     if (
         isinstance(similarity, bool)
         or not isinstance(similarity, (int, float))
+        or not math.isfinite(float(similarity))
         or not 0.0 <= float(similarity) <= 1.0
         or isinstance(characters_per_second, bool)
         or not isinstance(characters_per_second, (int, float))
+        or not math.isfinite(float(characters_per_second))
         or float(characters_per_second) < 0.0
     ):
         raise _schema_error()
