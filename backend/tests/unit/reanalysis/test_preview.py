@@ -165,8 +165,11 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert preview.source_batch_count == 3
     assert preview.audio_file_count == 7
     assert preview.transcript_character_count == 28
-    assert preview.estimated_calls_min == 18
-    assert preview.estimated_calls_max == 42
+    # Seven file-scoped evidence windows + six scene calls per source.
+    assert preview.estimated_calls_min == 25
+    # The upper bound includes one schema-repair attempt for every window,
+    # scene, and optional profile call.
+    assert preview.estimated_calls_max == 56
     assert preview.whisper_calls == 0
     assert preview.diarization_calls == 0
     assert preview.provider_id == "kimi"

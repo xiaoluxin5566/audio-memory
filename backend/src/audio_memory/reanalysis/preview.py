@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from audio_memory.analysis.windows import build_analysis_windows
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
@@ -205,6 +206,7 @@ class ReanalysisPreviewBuilder:
         source_count = len(sources)
         audio_count = sum(item.audio_file_count for item in sources)
         character_count = sum(item.transcript_character_count for item in sources)
+        analysis_window_count = await self._analysis_window_count(sources)
         snapshot = ReanalysisSnapshot(
             sources=tuple(sources),
             provider_id=provider.provider_id,
@@ -220,8 +222,8 @@ class ReanalysisPreviewBuilder:
             source_batch_count=source_count,
             audio_file_count=audio_count,
             transcript_character_count=character_count,
-            estimated_calls_min=source_count * 6,
-            estimated_calls_max=source_count * 14,
+            estimated_calls_min=analysis_window_count + source_count * 6,
+            estimated_calls_max=2 * (analysis_window_count + source_count * 7),
         )
         snapshot_hash = canonical_hash(snapshot.canonical_payload())
         token, expires_at = self.signer.sign(snapshot, snapshot_hash)
@@ -302,6 +304,46 @@ class ReanalysisPreviewBuilder:
                     )
                 )
             return sources
+
+    async def _analysis_window_count(
+        self, sources: list[SourceSnapshot]
+    ) -> int:
+        total = 0
+        async with self.database.session() as session:
+            for source in sources:
+                rows = (
+                    await session.execute(
+                        select(
+                            JobFile.id,
+                            JobFile.position,
+                            Transcript.segment_index,
+                            Transcript.start_ms,
+                            Transcript.end_ms,
+                        )
+                        .join(Transcript, Transcript.job_file_id == JobFile.id)
+                        .where(
+                            JobFile.job_id == source.job_id,
+                            Transcript.risk_classified.is_(True),
+                            Transcript.is_reliable.is_(True),
+                        )
+                        .order_by(
+                            JobFile.position,
+                            Transcript.segment_index,
+                            Transcript.id,
+                        )
+                    )
+                ).all()
+                transcript = [
+                    {
+                        "segment_id": f"seg_{position}_{segment_index}",
+                        "file_id": file_id,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                    }
+                    for file_id, position, segment_index, start_ms, end_ms in rows
+                ]
+                total += len(build_analysis_windows(transcript))
+        return total
 
     async def _profile_snapshot(self) -> list[dict[str, object]]:
         async with self.database.session() as session:
