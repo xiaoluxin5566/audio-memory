@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from hashlib import sha256
@@ -16,6 +17,9 @@ from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,9 +370,29 @@ class ProviderAnalysisClient:
 
     def _record_diagnostic(self, **values: object) -> None:
         values.setdefault("parameter_fingerprint", self.parameter_fingerprint)
-        self.request_diagnostics.append(ProviderRequestDiagnostic(**values))
+        diagnostic = ProviderRequestDiagnostic(**values)
+        self.request_diagnostics.append(diagnostic)
         if len(self.request_diagnostics) > 128:
             del self.request_diagnostics[:-128]
+        logger.info(
+            "analysis_provider_request provider_id=%s model_id=%s scene_id=%s "
+            "parameter_fingerprint=%s request_bytes=%d response_bytes=%d "
+            "segment_count=%d input_tokens=%d output_tokens=%d elapsed_seconds=%.3f "
+            "status_category=%s finish_reason=%s repair_attempted=%s",
+            diagnostic.provider_id,
+            diagnostic.model_id,
+            diagnostic.scene_id,
+            diagnostic.parameter_fingerprint,
+            diagnostic.request_bytes,
+            diagnostic.response_bytes,
+            diagnostic.segment_count,
+            diagnostic.input_tokens,
+            diagnostic.output_tokens,
+            diagnostic.elapsed_seconds,
+            diagnostic.status_category,
+            diagnostic.finish_reason or "none",
+            diagnostic.repair_attempted,
+        )
 
     @staticmethod
     def _usage_value(usage: dict[object, object], *names: str) -> int:

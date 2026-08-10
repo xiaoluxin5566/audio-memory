@@ -82,7 +82,10 @@ async def test_deepseek_event_map_request_is_bounded_and_disables_thinking() -> 
 
 
 @pytest.mark.asyncio
-async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_free() -> None:
+async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_free(
+    caplog,
+) -> None:
+    caplog.set_level("INFO", logger="audio_memory.analysis.provider")
     async def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -125,6 +128,14 @@ async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_
     assert "PRIVATE_FIXTURE_TEXT" not in serialized
     assert "PRIVATE_RESPONSE_TEXT" not in serialized
     assert "test-only-secret" not in serialized
+    assert "analysis_provider_request" in caplog.text
+    assert "scene_id=event-map" in caplog.text
+    assert "input_tokens=10" in caplog.text
+    assert "output_tokens=5" in caplog.text
+    assert "PRIVATE_SYSTEM_TEXT" not in caplog.text
+    assert "PRIVATE_FIXTURE_TEXT" not in caplog.text
+    assert "PRIVATE_RESPONSE_TEXT" not in caplog.text
+    assert "test-only-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

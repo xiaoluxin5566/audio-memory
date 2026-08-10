@@ -363,7 +363,10 @@ async def seed_version(
 
 
 @pytest.mark.asyncio
-async def test_runner_completes_unassigned_segment_ids_before_checkpoint(tmp_path) -> None:
+async def test_runner_completes_unassigned_segment_ids_before_checkpoint(
+    tmp_path, caplog
+) -> None:
+    caplog.set_level("INFO", logger="audio_memory.analysis.runner")
     database = Database(tmp_path / "local-coverage.sqlite3")
     await database.create_schema()
     await seed_version(database, tmp_path)
@@ -408,6 +411,11 @@ async def test_runner_completes_unassigned_segment_ids_before_checkpoint(tmp_pat
     assert EventMap.model_validate_json(stored.event_map_json).unassigned_segment_ids == [
         "seg_0_1"
     ]
+    assert "event_map_coverage" in caplog.text
+    assert "known=2" in caplog.text
+    assert "assigned=1" in caplog.text
+    assert "unassigned=1" in caplog.text
+    assert "unknown=0" in caplog.text
     await database.dispose()
 
 

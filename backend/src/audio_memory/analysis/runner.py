@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
@@ -36,6 +37,9 @@ from audio_memory.prompts.schemas import (
     TodoSceneResult,
 )
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
+
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialChangedError(RuntimeError):
@@ -274,6 +278,12 @@ class AnalysisRunner:
                 "Event map coverage is incomplete",
                 code="event_map_coverage_invalid",
             )
+        logger.info(
+            "event_map_coverage known=%d assigned=%d unassigned=%d unknown=0",
+            len(transcript_ids),
+            len(assigned),
+            len(event_map.unassigned_segment_ids),
+        )
         serialized = json.dumps(
             event_map.model_dump(mode="json"),
             ensure_ascii=False,
