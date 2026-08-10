@@ -76,16 +76,17 @@ function detailBlock(title, { content = '', items = [], eventTitle = '' } = {}) 
 }
 
 function meetingBlocks(detail = {}) {
-  const participants = (detail.participants ?? []).map((item) => [item.display_name, item.role].filter(Boolean).join(' · '))
-  return [
-    detailBlock('会议背景', { content: detail.background }),
-    detailBlock('参与者', { items: participants }),
-    detailBlock('核心结论', { items: textList(detail.core_conclusions) }),
-    detailBlock('已确认决策', { items: textList(detail.decisions) }),
-    detailBlock('待确认问题', { items: textList(detail.open_questions) }),
-    detailBlock('会议待办', { items: (detail.meeting_todos ?? []).map((item) => item.text) }),
-    detailBlock('讨论议题', { items: textList(detail.discussion_topics) }),
-  ].filter((block) => block.content || block.items.length)
+  const sections = [
+    { kind: 'overview', title: detail.analysis_angle || '对话全景', content: detail.context_summary },
+    { kind: 'participants', title: '对话角色', entries: (detail.participants ?? []).map((item) => ({ name: item.display_name || '未命名参与者', role: item.role || '' })) },
+    { kind: 'facts', title: '关键事实', entries: (detail.key_facts ?? []).map((item) => ({ fact: item.fact, interpretation: item.interpretation || '' })) },
+    { kind: 'quotes', title: '原句分析', entries: (detail.quote_analyses ?? []).map((item) => ({ speaker: item.speaker, quote: item.quote, context: item.context, surfaceMeaning: item.surface_meaning, deeperAnalysis: item.deeper_analysis, interactionEffect: item.interaction_effect || '' })) },
+    { kind: 'arguments', title: '双方论点', entries: (detail.arguments ?? []).map((item) => ({ speaker: item.speaker, position: item.position, reasoning: item.reasoning, supportingFacts: item.supporting_facts ?? [], assumptions: item.assumptions ?? [], responseFromOthers: item.response_from_others || '', counterpoints: item.counterpoints ?? [], assessment: item.assessment })) },
+    ...(detail.sections ?? []).map((item) => ({ kind: 'adaptive', title: item.title, sectionType: item.section_type, content: item.narrative, items: item.key_points ?? [] })),
+    { kind: 'recommendations', title: '针对性建议', entries: (detail.recommendations ?? []).map((item) => ({ target: item.target, observedIssue: item.observed_issue, evidenceBasis: item.evidence_basis, whyItMatters: item.why_it_matters, recommendation: item.recommendation, actions: item.actions ?? [], suggestedLanguage: item.suggested_language || '', expectedResult: item.expected_result || '', caveat: item.caveat || '' })) },
+    { kind: 'uncertainties', title: '仍需确认', entries: (detail.uncertainties ?? []).map((item) => ({ question: item.question, whyUncertain: item.why_uncertain })) },
+  ]
+  return sections.filter((section) => section.content || section.items?.length || section.entries?.length)
 }
 
 function parentingBlocks(detail = {}) {
@@ -184,13 +185,12 @@ function normalizeStrictCards(item, batch) {
   return payload.cards.map((source, index) => {
     const shell = source.card ?? {}
     const detail = source.detail ?? {}
-    const topic = payload.scene_id === 'meeting' ? detail.topic : ''
     return {
       id: `${item.id}:${index}`,
       apiId: item.id,
       sceneId: item.scene_id,
       label: SCENE_LABELS[item.scene_id] ?? item.scene_id,
-      title: shell.title || topic || '未命名结果',
+      title: shell.title || '未命名结果',
       summary: shell.summary ?? '',
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',

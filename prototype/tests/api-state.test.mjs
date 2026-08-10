@@ -76,8 +76,8 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
         { card_index: 1, segments: [{ segment_id: 'seg_0_2', start_ms: 3000, end_ms: 4500, playback_url: '/api/cards/analysis-meeting/evidence/seg_0_2/audio' }] },
       ],
       payload: { scene_id: 'meeting', cards: [
-        { card: { title: '产品评审', summary: '确定范围' }, detail: { topic: '一期范围', background: '团队评审', participants: [], core_conclusions: [{ content: '先做桌面端' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
-        { card: { title: '预算复盘', summary: '控制成本' }, detail: { topic: 'Q3 预算', background: '财务会议', participants: [], core_conclusions: [{ content: '压缩外包' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
+        { card: { title: '产品评审', summary: '确定范围' }, detail: { analysis_angle: '范围取舍背后的判断', context_summary: '团队在资源有限的情况下讨论一期范围。', participants: [{ display_name: '林岚', role: '产品负责人' }], key_facts: [{ fact: '一期先做桌面端', interpretation: '团队优先验证高频办公场景' }], quote_analyses: [{ speaker: '林岚', quote: '先把桌面端做透。', context: '讨论多端范围时', surface_meaning: '暂缓移动端', deeper_analysis: '她在用聚焦换取验证速度', interaction_effect: '讨论转向桌面端验收标准' }], arguments: [{ speaker: '林岚', position: '一期只做桌面端', reasoning: '资源不足以同时保证两端质量', supporting_facts: ['桌面端使用频率更高'], assumptions: ['桌面端用户具有代表性'], response_from_others: '研发接受范围缩减', counterpoints: ['移动端需求会被延后'], assessment: '方向合理，但应明确移动端回补条件' }], recommendations: [{ target: '产品负责人', observed_issue: '范围缩减缺少回补条件', evidence_basis: '讨论只确认暂缓移动端', why_it_matters: '可能永久搁置重要需求', recommendation: '定义移动端重启门槛', actions: ['记录触发指标'], suggested_language: '当桌面端周活达到目标后，我们重新评估移动端。', expected_result: '让取舍可逆', caveat: '指标需与业务目标一致' }], sections: [{ section_type: 'tradeoff', title: '被忽略的取舍', narrative: '速度与覆盖面之间的权衡已经发生。', key_points: ['聚焦可加速验证'] }], uncertainties: [{ question: '移动端需求占比是多少？', why_uncertain: '录音未给出数据' }] } },
+        { card: { title: '预算复盘', summary: '控制成本' }, detail: { analysis_angle: '成本结构', context_summary: '财务会议讨论外包预算。', participants: [], key_facts: [{ fact: '计划压缩外包', interpretation: null }], quote_analyses: [], arguments: [], recommendations: [], sections: [], uncertainties: [] } },
       ] },
     },
     {
@@ -101,6 +101,10 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
   assert.equal(cards.filter((card) => card.sceneId === 'meeting').length, 2)
   assert.deepEqual(cards[0].evidence, [{ segmentId: 'seg_0_1', startMs: 1000, endMs: 2400, playbackUrl: '/api/cards/analysis-meeting/evidence/seg_0_1/audio' }])
   assert.deepEqual(cards[1].evidence, [{ segmentId: 'seg_0_2', startMs: 3000, endMs: 4500, playbackUrl: '/api/cards/analysis-meeting/evidence/seg_0_2/audio' }])
+  assert.deepEqual(cards[0].detailSections.map((section) => section.kind), ['overview', 'participants', 'facts', 'quotes', 'arguments', 'adaptive', 'recommendations', 'uncertainties'])
+  assert.equal(cards[0].detailSections.find((section) => section.kind === 'quotes').entries[0].deeperAnalysis, '她在用聚焦换取验证速度')
+  assert.equal(cards[0].detailSections.find((section) => section.kind === 'recommendations').entries[0].suggestedLanguage.includes('周活'), true)
+  assert.equal(JSON.stringify(cards[0]).includes('evidence_segment_ids'), false)
   const contentCard = cards.find((card) => card.sceneId === 'content')
   assert.equal(contentCard.details.consumedItems.length, 2)
   assert.equal(contentCard.detailSections.filter((section) => section.eventTitle).length, 2)

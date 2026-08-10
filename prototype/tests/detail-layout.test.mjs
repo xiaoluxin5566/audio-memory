@@ -39,6 +39,8 @@ test('detail renders common blocks rather than strict scene payload keys', () =>
   );
 
   assert.match(detail, /card\.detailSections\.map/)
+  assert.match(detail, /MeetingDetailSection/)
+  assert.match(detail, /meeting-quote|meeting-argument|meeting-recommendation/)
   assert.doesNotMatch(detail, /inferred_title_hint|evidence_segment_ids|generation_reason|finding_id|case_id/)
 });
 
