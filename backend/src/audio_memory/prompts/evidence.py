@@ -136,12 +136,6 @@ def validate_evidence_integrity(
     requires_user_identity = any(
         todo.owner_type in {"user", "shared"} for todo in todos
     )
-    if isinstance(result, MeetingSceneResult):
-        requires_user_identity = requires_user_identity or any(
-            todo.owner_type in {"user", "shared"}
-            for card in result.cards
-            for todo in card.detail.meeting_todos
-        )
     if isinstance(result, ParentingSceneResult):
         requires_user_identity = requires_user_identity or any(
             interaction.observed_parent_actions
@@ -167,25 +161,26 @@ def validate_evidence_integrity(
 
     if isinstance(result, MeetingSceneResult):
         for card in result.cards:
-            event = _require_event(card.detail.event_id, events)
-            _require_dossier_events([event.event_id], scope)
+            for event_id in card.event_ids:
+                _require_event(event_id, events)
+                _require_dossier_events([event_id], scope)
             evidence_items = [
                 *card.detail.participants,
-                *card.detail.core_conclusions,
-                *card.detail.decisions,
-                *card.detail.open_questions,
-                *card.detail.discussion_topics,
+                *card.detail.key_facts,
+                *card.detail.quote_analyses,
+                *card.detail.arguments,
+                *card.detail.recommendations,
+                *card.detail.sections,
+                *card.detail.uncertainties,
             ]
             for item in evidence_items:
-                _validate_event_evidence(
-                    event.event_id,
+                _validate_multi_event_evidence(
+                    item.event_ids,
                     item.evidence_segment_ids,
-                    event,
+                    events,
                     segment_ids,
                     scope,
                 )
-            for meeting_todo in card.detail.meeting_todos:
-                _validate_todo(meeting_todo, events, segment_ids, scope)
 
     if isinstance(result, ParentingSceneResult):
         for card in result.cards:
@@ -428,8 +423,9 @@ def _validate_multi_event_evidence(
         }
         outside = evidence - allowed
         if outside:
+            boundary = identifiers[0] if len(identifiers) == 1 else "referenced events"
             raise EvidenceIntegrityError(
-                f"evidence segment IDs {sorted(outside)} are outside referenced events"
+                f"evidence segment IDs {sorted(outside)} are outside {boundary}"
             )
 
 
