@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from audio_memory.analysis.dossiers import SceneDossier
 from audio_memory.prompts.event_schema import Event, EventMap, UserSpeaker
 from audio_memory.prompts.evidence import (
     EvidenceIntegrityError,
@@ -125,6 +126,180 @@ def test_rejects_cross_event_evidence_even_when_segment_exists() -> None:
             todo_result(evidence_segment_ids=["seg_002"]),
             event_map(),
             {"seg_001", "seg_002"},
+        )
+
+
+def dossier_event_map() -> EventMap:
+    base = event_map()
+    return base.model_copy(update={"unassigned_segment_ids": ["seg_003"]})
+
+
+def dossier(
+    *,
+    allowed_segment_ids: tuple[str, ...] = ("seg_001", "seg_003"),
+    file_ids: tuple[str, ...] = ("file-a",),
+    start_ms: int = 0,
+    end_ms: int = 3_000,
+    source_event_ids: tuple[str, ...] = ("event_001",),
+) -> SceneDossier:
+    return SceneDossier(
+        dossier_id="dossier_1234567890abcdefabcd",
+        primary_event_id="event_001",
+        source_event_ids=source_event_ids,
+        candidate_scenes=("todo", "meeting"),
+        selected_cluster_ids=("cluster_1234567890abcdefabcd",),
+        expanded_cluster_ids=("cluster_1234567890abcdefabcd",),
+        allowed_segment_ids=allowed_segment_ids,
+        file_ids=file_ids,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        title="完整工作讨论",
+        selection_reason="包含 Event 未分配的完整上下文。",
+        priority="high",
+    )
+
+
+def dossier_segment_lookup() -> dict[str, dict[str, object]]:
+    return {
+        "seg_001": {
+            "segment_id": "seg_001",
+            "file_id": "file-a",
+            "start_ms": 0,
+            "end_ms": 1_000,
+        },
+        "seg_002": {
+            "segment_id": "seg_002",
+            "file_id": "file-a",
+            "start_ms": 1_000,
+            "end_ms": 2_000,
+        },
+        "seg_003": {
+            "segment_id": "seg_003",
+            "file_id": "file-a",
+            "start_ms": 2_000,
+            "end_ms": 3_000,
+        },
+    }
+
+
+def test_dossier_allows_event_unassigned_todo_evidence() -> None:
+    validate_evidence_integrity(
+        todo_result(evidence_segment_ids=["seg_003"]),
+        dossier_event_map(),
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "scope", "lookup", "match"),
+    [
+        (
+            todo_result(evidence_segment_ids=["seg_999"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "unknown segment",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_002"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "outside dossier",
+        ),
+        (
+            todo_result(event_id="event_002", evidence_segment_ids=["seg_003"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "authorize event",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_003"]),
+            dossier(),
+            {
+                **dossier_segment_lookup(),
+                "seg_003": {
+                    "segment_id": "seg_003",
+                    "file_id": "file-b",
+                    "start_ms": 2_000,
+                    "end_ms": 3_000,
+                },
+            },
+            "file",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_003"]),
+            dossier(end_ms=2_500),
+            dossier_segment_lookup(),
+            "time",
+        ),
+    ],
+)
+def test_dossier_rejects_unknown_outside_or_misaligned_evidence(
+    result: TodoSceneResult,
+    scope: SceneDossier,
+    lookup: dict[str, dict[str, object]],
+    match: str,
+) -> None:
+    with pytest.raises(EvidenceIntegrityError, match=match):
+        validate_evidence_integrity(
+            result,
+            dossier_event_map(),
+            {"seg_001", "seg_002", "seg_003"},
+            dossiers=[scope],
+            segment_lookup=lookup,
+        )
+
+
+def test_dossier_allows_meeting_conclusion_outside_event_membership() -> None:
+    result = meeting_with_cross_event_conclusion()
+    result.cards[0].detail.core_conclusions[0].evidence_segment_ids = ["seg_003"]
+
+    validate_evidence_integrity(
+        result,
+        dossier_event_map(),
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
+
+
+def test_dossier_rejects_card_event_without_authorized_scope() -> None:
+    result = MeetingSceneResult(
+        scene_id="meeting",
+        should_generate=True,
+        generation_reason="event_002 被错误路由为会议。",
+        cards=[
+            MeetingCard(
+                event_ids=["event_002"],
+                card=CardShell(title="错误事件", summary="没有档案授权。"),
+                confidence=0.9,
+                detail=MeetingDetail(
+                    event_id="event_002",
+                    topic="错误事件",
+                    start_ms=0,
+                    end_ms=1_000,
+                    background="没有档案授权。",
+                    participants=[],
+                    core_conclusions=[],
+                    decisions=[],
+                    open_questions=[],
+                    meeting_todos=[],
+                    discussion_topics=[],
+                ),
+            )
+        ],
+        todos=[],
+        confidence=0.9,
+    )
+
+    with pytest.raises(EvidenceIntegrityError, match="authorize event"):
+        validate_evidence_integrity(
+            result,
+            dossier_event_map(),
+            {"seg_001", "seg_002", "seg_003"},
+            dossiers=[dossier()],
+            segment_lookup=dossier_segment_lookup(),
         )
 
 
