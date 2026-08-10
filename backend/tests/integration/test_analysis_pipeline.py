@@ -16,7 +16,7 @@ from audio_memory.analysis.provider import (
 from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.prompts.composer import PromptComposer
-from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.prompts.schemas import MeetingSceneResult
 from audio_memory.prompts.store import PromptDocument
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
@@ -43,7 +43,6 @@ def map_payload() -> dict[str, object]:
             "evidence_segment_ids": [],
         },
         "events": [],
-        "unassigned_segment_ids": ["seg_0_0"],
     }
 
 
@@ -220,14 +219,14 @@ async def test_invalid_schema_makes_exactly_one_repair_request() -> None:
                 }
             ],
             profile=[],
-            schema=EventMap.model_json_schema(),
+            schema=EventMapDraft.model_json_schema(),
         )
         result = await analyzer.analyze_event_map(
             model_request,
             {"provider_id": "kimi", "model_id": "kimi-k2.5"},
         )
 
-    assert result == EventMap.model_validate(map_payload())
+    assert result == EventMapDraft.model_validate(map_payload())
     assert len(requests) == 2
     repair_system = requests[1]["messages"][0]["content"]
     assert "修复" in repair_system
@@ -254,7 +253,7 @@ async def test_second_invalid_schema_is_not_repaired_again() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         analyzer = RemoteSceneAnalyzer(ProviderAnalysisClient(ConfiguredKeychain(), client))
         model_request = PromptComposer().compose_event_map(
-            transcript=[], profile=[], schema=EventMap.model_json_schema()
+            transcript=[], profile=[], schema=EventMapDraft.model_json_schema()
         )
         with pytest.raises(ProviderAnalysisError) as raised:
             await analyzer.analyze_event_map(

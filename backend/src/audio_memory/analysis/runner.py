@@ -33,7 +33,7 @@ from audio_memory.models import (
 )
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.evidence import validate_evidence_integrity
-from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.transcript_safety import pending_risk_review_exists
 from audio_memory.prompts.schemas import (
     ContentSceneResult,
@@ -63,7 +63,7 @@ class LeaseLostError(RuntimeError):
 
 
 class StrictAnalysisProvider(Protocol):
-    async def analyze_event_map(self, request, provider_snapshot) -> EventMap: ...
+    async def analyze_event_map(self, request, provider_snapshot) -> EventMapDraft: ...
 
     async def analyze_scene(
         self, scene_id, request, provider_snapshot
@@ -253,7 +253,7 @@ class AnalysisRunner:
             request = self.composer.compose_event_map(
                 transcript=list(window.segments),
                 profile=profile,
-                schema=EventMap.model_json_schema(),
+                schema=EventMapDraft.model_json_schema(),
                 window_id=window.window_id,
             )
             await self._require_ownership(version.id, worker_owner_id)
@@ -268,8 +268,10 @@ class AnalysisRunner:
                 if hasattr(generated, "model_dump")
                 else generated
             )
+            if isinstance(generated, EventMap):
+                raw_event_map.pop("unassigned_segment_ids", None)
             try:
-                local_map = EventMap.model_validate(raw_event_map)
+                local_map = EventMapDraft.model_validate(raw_event_map)
             except ValidationError as exc:
                 raise ProviderAnalysisError(
                     "Event map violates the required schema",

@@ -11,7 +11,7 @@ from audio_memory.analysis.windows import (
     merge_window_event_maps,
     validate_analysis_quality,
 )
-from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 
 
 def segment(
@@ -45,8 +45,8 @@ def local_event_map(
     user_speaker_id: str | None = None,
     user_confidence: float = 0,
     user_evidence_ids: list[str] | None = None,
-) -> EventMap:
-    return EventMap.model_validate(
+) -> EventMapDraft:
+    return EventMapDraft.model_validate(
         {
             "user_speaker": {
                 "speaker_id": user_speaker_id,
@@ -74,7 +74,6 @@ def local_event_map(
                     "timezone": None,
                 }
             ],
-            "unassigned_segment_ids": [],
         }
     )
 
@@ -282,7 +281,9 @@ def test_complete_window_event_map_rewrites_parent_reference_in_namespace() -> N
     )
     payload["events"].append(child)
 
-    completed = complete_window_event_map(window, EventMap.model_validate(payload))
+    completed = complete_window_event_map(
+        window, EventMapDraft.model_validate(payload)
+    )
 
     assert completed.events[1].event_id == "event_w0000_002"
     assert completed.events[1].parent_event_id == "event_w0000_001"

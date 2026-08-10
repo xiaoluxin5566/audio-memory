@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from audio_memory.prompts.event_schema import EventMap, UserSpeaker
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft, UserSpeaker
 
 
 ANALYSIS_WINDOW_GAP_MS = 45_000
@@ -117,9 +117,12 @@ def build_analysis_windows(
 
 def complete_window_event_map(
     window: AnalysisWindow,
-    generated: EventMap,
+    generated: EventMapDraft | EventMap,
 ) -> EventMap:
-    event_map = EventMap.model_validate(generated.model_dump(mode="python"))
+    payload = generated.model_dump(mode="python")
+    if isinstance(generated, EventMap):
+        payload.pop("unassigned_segment_ids", None)
+    event_map = EventMapDraft.model_validate(payload)
     segments = {
         str(item["segment_id"]): item
         for item in window.segments

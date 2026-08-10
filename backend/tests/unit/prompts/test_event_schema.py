@@ -1,30 +1,58 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
+from audio_memory.analysis.parser import parse_event_map_output
 from audio_memory.prompts.event_schema import (
     Event,
     EventMap,
+    EventMapDraft,
     StructuredTranscriptSegment,
     UserSpeaker,
 )
 
 
-def test_event_map_allows_model_to_omit_server_owned_unassigned_ids() -> None:
-    event_map = EventMap.model_validate(
-        {
-            "user_speaker": {
-                "speaker_id": None,
-                "confidence": 0,
-                "reasoning": "无法判断",
-                "evidence_segment_ids": [],
-            },
-            "events": [],
-        }
+def empty_event_map_payload() -> dict[str, object]:
+    return {
+        "user_speaker": {
+            "speaker_id": None,
+            "confidence": 0,
+            "reasoning": "无法判断",
+            "evidence_segment_ids": [],
+        },
+        "events": [],
+    }
+
+
+def test_model_event_map_contract_omits_server_owned_unassigned_ids() -> None:
+    schema = EventMapDraft.model_json_schema()
+
+    assert "unassigned_segment_ids" not in schema["properties"]
+    with pytest.raises(ValidationError):
+        EventMapDraft.model_validate(
+            {**empty_event_map_payload(), "unassigned_segment_ids": []}
+        )
+
+
+def test_persisted_event_map_keeps_legacy_unassigned_compatibility() -> None:
+    omitted = EventMap.model_validate(empty_event_map_payload())
+    explicit = EventMap.model_validate(
+        {**empty_event_map_payload(), "unassigned_segment_ids": ["seg_001"]}
     )
 
-    assert event_map.unassigned_segment_ids == []
+    assert omitted.unassigned_segment_ids == []
+    assert explicit.unassigned_segment_ids == ["seg_001"]
+
+
+def test_event_map_parser_returns_response_only_draft() -> None:
+    parsed = parse_event_map_output(
+        json.dumps(empty_event_map_payload(), ensure_ascii=False)
+    )
+
+    assert isinstance(parsed, EventMapDraft)
 
 
 def event(
