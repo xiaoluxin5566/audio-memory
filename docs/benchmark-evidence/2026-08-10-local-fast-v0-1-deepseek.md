@@ -8,13 +8,11 @@
 
 | Field | Aggregate value |
 |---|---:|
-| Source job | `d29475e4-f148-4b99-9b7e-1e5751da1e48` |
 | Total transcript rows | 4,117 |
 | Reliable rows used by analysis | 3,442 |
 | Discarded unreliable rows | 675 |
 | Reliable text characters | 28,470 |
-| Prior failed version retained | `c65e86d7-5dc7-401f-90e0-96d92b01e866` |
-| Prior failure code retained | `model_analysis_failed` |
+| Analysis windows | 23 |
 
 The analysis-only retry did not run VAD, Whisper, the risk gate, selective
 refinement, or diarization. Their call counts were all zero. The source row
@@ -26,72 +24,94 @@ counts and reliable text character count were unchanged after completion.
 |---|---|
 | Provider | DeepSeek |
 | Model | `deepseek-v4-flash` |
-| Parameter fingerprint | `9ea1c86908a19a5f3c517c68035545ec1c9418196c88bb013d369a613cd4fae3` |
 | Thinking | disabled |
 | Temperature | 0 |
 | Response format | JSON object |
 | Event-map output / timeout | 32,768 tokens / 180 seconds |
 | Scene output / timeout | 16,384 tokens / 120 seconds |
 | Profile output / timeout | 8,192 tokens / 120 seconds |
+| Event-map concurrency | 1 |
 | Scene concurrency | 1 |
 | Transient retry bound | at most one extra attempt |
 | Schema repair bound | at most one repair attempt |
 
-The pipeline requires eight logical requests: one event map, six serialized
-scenes, and one profile extraction. All eight logical stages completed. Exact
-HTTP attempt count, request/response byte totals, input/output token totals,
-finish reasons, repair flags, and per-request elapsed times were held by the
-running worker but were not exported by the production logger used for this
-run. They are therefore deliberately recorded as unavailable rather than
-estimated. A tested logger-routing correction is included after this run so a
-future full-chain acceptance can capture those aggregate-only fields without
-persisting request or response content. No second paid analysis retry was made
-to reconstruct missing telemetry.
+The preview estimated 29–60 calls: 23 event windows plus six scene calls at
+minimum, with one schema-repair allowance per stage and one optional profile
+stage at maximum. Exact HTTP attempt and token counts were not persisted, so
+they are deliberately recorded as unavailable rather than reconstructed.
+
+## Recovery during the formal run
+
+The first attempt failed safely with `event_map_coverage_invalid` before
+publication. DeepSeek had returned event time bounds that did not fully contain
+the valid evidence segments it cited. The server now derives event bounds from
+verified evidence IDs and expands parent bounds to include child events. The
+unknown-evidence check remains strict. The focused regression suite passed 68
+tests before the second attempt.
+
+The second attempt completed in 157.247 seconds. The prior published version
+remained active until the replacement version completed, then the batch pointer
+changed atomically.
 
 ## Coverage and publication
 
 | Field | Result |
 |---|---:|
-| New analysis version | `fa0c5b48-b2c6-445b-ae91-0b78d5ffc7f6` |
+| New analysis version | `0029970e-eb50-49a7-b683-3b53b7e931a7` |
 | Final version status | `completed` |
-| Final job status | `completed` |
 | Final error code | empty |
-| Total elapsed | 252.806 seconds |
-| Event-map JSON bytes | 55,520 |
-| Event count | 1 |
-| Assigned reliable segments | 2,352 |
-| Server-completed unassigned segments | 1,090 |
+| Event-map JSON bytes | 66,442 |
+| Event count | 24 |
+| Assigned reliable segments | 1,314 |
+| Server-completed unassigned segments | 2,128 |
 | Assigned/unassigned overlap | 0 |
 | Unknown evidence references | 0 |
 | Coverage union | 3,442 / 3,442 |
 | Completed scene keys | 6 / 6 |
+| Reliable user speaker | `speaker_0`, confidence 0.90 |
 | Profile candidates | 0 |
-| Published cards | 0 |
-| Published todos | 0 |
+| Published scene containers | 2 |
+| Frontend-visible result cards | 3 |
+| Published global todos | 0 |
 
-The zero-card and zero-todo result is a successful atomic publication with no
-items that passed the strict evidence rules, not a pipeline failure. Because
-there are no published items, evidence playback has no entry to render for this
-run. No partial card or todo batch was published before all required stages
-completed.
+Event types were: eight `other`, seven `casual_chat`, four `discussion`, two
+`interview`, two `media`, and one `conversation`. Meeting analysis produced two
+independent interview cards; inspiration analysis produced one AI/industry
+insight card. The remaining four scenes correctly completed with empty output.
+Todo analysis explicitly reported that it found no user commitment, accepted
+assignment, or definite execution plan, so no global todo was published.
 
-## Page verification
+## Historical-quality comparison
 
-The local product page was opened in the app browser and left on Audio History
-for user acceptance. The completed audio appears in local history, the active
-provider is `deepseek-v4-flash`, and the page emitted no console errors. The
-feed empty state matches the zero-card and zero-todo publication above.
+This run closes the productization failures that caused the prior one-event,
+zero-card result:
 
-## Code evidence
+- long input is divided into 23 bounded evidence windows;
+- every reliable segment is covered exactly once as assigned or unassigned;
+- 24 local events survive merge instead of one dominant low-confidence event;
+- the six scene analyses receive event-scoped evidence rather than one oversized
+  transcript packet;
+- useful work/career cards are allowed even when ownership is not inferred;
+- a long, valuable recording cannot silently publish an all-empty result.
 
-Stage 1 implementation commits through the formal run:
+The output is materially useful and traceable, but it is not yet the same
+artifact shape as the historical hand-written analysis. The historical chain
+produced one dense cross-scene daily report with deduplication, conclusions,
+risks, and recommendations. The current product publishes separate scene cards,
+so several organization and career discussions are compressed into one
+inspiration card. Whether this reaches the user's historical quality bar is an
+explicit page-acceptance checkpoint before compact-chain work begins.
 
-- `ee8e107 fix: bound deepseek analysis requests`
-- `a9b9427 fix: complete event map coverage locally`
-- `3640710 fix: surface specific analysis failures`
-- `d4eb487 test: verify deepseek analysis recovery`
-- `ec5817e chore: log safe deepseek acceptance metrics`
-- `1a9318b fix: route analysis metrics to server log`
+## Verification
 
-No database, audio, transcript content, browser profile, screenshot, API key,
-request body, or provider response body is included in this report or in Git.
+- Backend: `590 passed`.
+- Frontend unit tests: `43 passed`, `0 failed`.
+- Recovery Playwright tests: `5 passed`.
+- Production build: passed, 38 Vite modules.
+- Focused boundary and analysis/reanalysis suites after the live failure fix:
+  `68 passed`.
+- In-app page: three visible result cards; first meeting detail includes
+  background, participants, core conclusions, and discussion topics.
+
+No database, audio, transcript text, browser profile, screenshot, API key,
+request body, or provider response body is included in Git.
