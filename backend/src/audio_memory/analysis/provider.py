@@ -67,6 +67,9 @@ def _analysis_parameter_fingerprint() -> str:
             "split_on_file_boundary": True,
             "identity_min_windows": 2,
             "identity_confidence": 0.85,
+            "event_map_semantic_repair_attempts": (
+                analysis_windows.EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS
+            ),
         },
     }
     encoded = json.dumps(

@@ -30,7 +30,9 @@ from audio_memory.analysis.dossiers import (
 )
 from audio_memory.analysis.windows import (
     AnalysisQualityError,
+    AnalysisWindow,
     AnalysisWindowError,
+    EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS,
     build_analysis_windows,
     complete_window_event_map,
     merge_window_event_maps,
@@ -313,42 +315,15 @@ class AnalysisRunner:
         windows = build_analysis_windows(transcript)
         completed_maps: list[EventMap] = []
         for window in windows:
-            request = self.composer.compose_event_map(
-                transcript=list(window.segments),
-                profile=profile,
-                schema=EventMapDraft.model_json_schema(),
-                window_id=window.window_id,
-            )
-            await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version, worker_owner_id)
-            generated = await self.provider.analyze_event_map(
-                request, provider_snapshot
-            )
-            await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version, worker_owner_id)
-            raw_event_map = (
-                generated.model_dump(mode="python")
-                if hasattr(generated, "model_dump")
-                else generated
-            )
-            if isinstance(generated, EventMap):
-                raw_event_map.pop("unassigned_segment_ids", None)
-            try:
-                local_map = EventMapDraft.model_validate(raw_event_map)
-            except ValidationError as exc:
-                raise ProviderAnalysisError(
-                    "Event map violates the required schema",
-                    code="event_map_schema_invalid",
-                ) from exc
-            try:
-                completed_maps.append(
-                    complete_window_event_map(window, local_map)
+            completed_maps.append(
+                await self._completed_window_event_map(
+                    version,
+                    window,
+                    profile,
+                    provider_snapshot,
+                    worker_owner_id,
                 )
-            except AnalysisWindowError as exc:
-                raise ProviderAnalysisError(
-                    "Local event map evidence is invalid",
-                    code=exc.code,
-                ) from exc
+            )
         try:
             event_map = merge_window_event_maps(windows, completed_maps)
         except AnalysisWindowError as exc:
@@ -408,6 +383,65 @@ class AnalysisRunner:
         version.event_map_json = serialized
         version.event_map_hash = sha256(serialized.encode("utf-8")).hexdigest()
         return event_map
+
+    async def _completed_window_event_map(
+        self,
+        version: AnalysisVersion,
+        window: AnalysisWindow,
+        profile: list[dict[str, object]],
+        provider_snapshot: dict[str, object],
+        worker_owner_id: str | None,
+    ) -> EventMap:
+        for attempt in range(EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS + 1):
+            request = self.composer.compose_event_map(
+                transcript=list(window.segments),
+                profile=profile,
+                schema=EventMapDraft.model_json_schema(),
+                window_id=window.window_id,
+                semantic_retry=attempt > 0,
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            generated = await self.provider.analyze_event_map(
+                request, provider_snapshot
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            raw_event_map = (
+                generated.model_dump(mode="python")
+                if hasattr(generated, "model_dump")
+                else generated
+            )
+            if isinstance(generated, EventMap):
+                raw_event_map.pop("unassigned_segment_ids", None)
+            try:
+                local_map = EventMapDraft.model_validate(raw_event_map)
+            except ValidationError as exc:
+                raise ProviderAnalysisError(
+                    "Event map violates the required schema",
+                    code="event_map_schema_invalid",
+                ) from exc
+            try:
+                return complete_window_event_map(window, local_map)
+            except AnalysisWindowError as exc:
+                if (
+                    exc.code == "event_map_unknown_segment"
+                    and attempt < EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS
+                ):
+                    logger.warning(
+                        "event_map_semantic_repair window_id=%s attempt=%d "
+                        "known_segments=%d reason=%s",
+                        window.window_id,
+                        attempt + 1,
+                        len(window.segments),
+                        exc.code,
+                    )
+                    continue
+                raise ProviderAnalysisError(
+                    "Local event map evidence is invalid",
+                    code=exc.code,
+                ) from exc
+        raise AssertionError("event map semantic repair loop exhausted")
 
     async def _scene_context(
         self,

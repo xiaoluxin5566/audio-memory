@@ -8,6 +8,7 @@ from audio_memory.prompts.event_schema import EventMap, EventMapDraft, UserSpeak
 ANALYSIS_WINDOW_GAP_MS = 45_000
 ANALYSIS_WINDOW_MAX_SPAN_MS = 1_200_000
 ANALYSIS_WINDOW_MAX_SEGMENTS = 400
+EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS = 1
 
 
 class AnalysisWindowError(ValueError):

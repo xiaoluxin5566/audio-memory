@@ -81,6 +81,11 @@ class PromptComposer:
                 "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
                 "max_segments": analysis_windows.ANALYSIS_WINDOW_MAX_SEGMENTS,
             },
+            "event_map_policy": {
+                "event_map_semantic_repair_attempts": (
+                    analysis_windows.EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS
+                ),
+            },
             "dossier_policy": {
                 "max_span_ms": dossier_policy.DOSSIER_MAX_SPAN_MS,
                 "max_segments": dossier_policy.DOSSIER_MAX_SEGMENTS,
@@ -102,14 +107,24 @@ class PromptComposer:
         profile: list[dict[str, object]],
         schema: dict[str, object],
         window_id: str | None = None,
+        semantic_retry: bool = False,
     ) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["event-map"]
+        common_rules = self._fixed_prompt("event-map.md")
+        if semantic_retry:
+            allowed_ids = [str(item["segment_id"]) for item in transcript]
+            common_rules += (
+                "\n\n服务端校验反馈（必须修正）：上一轮输出引用了当前窗口之外的证据 ID。"
+                "本轮只能逐字使用以下 allowed_segment_ids 中的值；不要构造、续写或猜测 ID。"
+                "如果某个事件没有合法直接证据，就不要输出该事件。\n"
+                f"allowed_segment_ids={json.dumps(allowed_ids, ensure_ascii=False)}"
+            )
         return ModelRequest(
             scene_id=(f"event-map:{window_id}" if window_id else "event-map"),
             prompt_version=0,
             schema_version=self.SCHEMA_VERSION,
             system_rules=self._fixed_prompt("system.md"),
-            common_rules=self._fixed_prompt("event-map.md"),
+            common_rules=common_rules,
             scene_prompt="",
             user_data="\n".join(
                 [

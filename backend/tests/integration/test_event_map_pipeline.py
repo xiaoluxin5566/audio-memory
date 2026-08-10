@@ -232,6 +232,20 @@ class AssignedOnlyProvider(RecordingProvider):
         return assigned_event_map(evidence_id=self.evidence_id)
 
 
+class RepairsUnknownEvidenceProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.event_map_requests = []
+
+    async def analyze_event_map(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        self.event_map_requests.append(request)
+        evidence_id = (
+            "seg_missing" if len(self.event_map_requests) == 1 else "seg_0_0"
+        )
+        return assigned_event_map(evidence_id=evidence_id)
+
+
 class SpecificFailureProvider(RecordingProvider):
     async def analyze_event_map(self, request, provider_snapshot):
         raise ProviderAnalysisError(
@@ -918,6 +932,41 @@ async def test_runner_rejects_unknown_event_evidence_without_checkpoint(tmp_path
     assert json.loads(version.staged_results_json) == {}
     assert job is not None and job.error_code == "event_map_unknown_segment"
     assert publisher.results is None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_retries_unknown_local_event_evidence_once(tmp_path) -> None:
+    database = Database(tmp_path / "unknown-coverage-repair.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    provider = RepairsUnknownEvidenceProvider()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    outcome = await runner.run("version-1")
+
+    assert outcome.batch_id == "published-batch"
+    assert [request.scene_id for request in provider.event_map_requests] == [
+        "event-map:window_0000",
+        "event-map:window_0000",
+    ]
+    assert "上一轮输出引用了当前窗口之外的证据 ID" not in (
+        provider.event_map_requests[0].common_rules
+    )
+    assert "上一轮输出引用了当前窗口之外的证据 ID" in (
+        provider.event_map_requests[1].common_rules
+    )
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.error_code is None
+    checkpoint = EventMap.model_validate_json(version.event_map_json or "null")
+    assert checkpoint.events[0].evidence_segment_ids == ["seg_0_0"]
     await database.dispose()
 
 
