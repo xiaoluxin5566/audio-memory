@@ -14,10 +14,12 @@ from audio_memory.analysis.profile import validate_profile_delta
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
 from audio_memory.analysis.windows import (
+    AnalysisQualityError,
     AnalysisWindowError,
     build_analysis_windows,
     complete_window_event_map,
     merge_window_event_maps,
+    validate_analysis_quality,
 )
 from audio_memory.db import Database
 from audio_memory.models import (
@@ -175,6 +177,14 @@ class AnalysisRunner:
                     await self._save_staged(version.id, staged, worker_owner_id)
                 validate_evidence_integrity(result, event_map, segment_ids)
                 results.append(result)
+
+            try:
+                validate_analysis_quality(transcript, event_map, results)
+            except AnalysisQualityError as exc:
+                raise ProviderAnalysisError(
+                    "Analysis result did not pass the semantic quality gate",
+                    code="analysis_quality_insufficient",
+                ) from exc
 
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)

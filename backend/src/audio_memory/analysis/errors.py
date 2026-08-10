@@ -17,6 +17,7 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "event_map_schema_invalid",
         "event_map_unknown_segment",
         "event_map_coverage_invalid",
+        "analysis_quality_insufficient",
     }
 )
 

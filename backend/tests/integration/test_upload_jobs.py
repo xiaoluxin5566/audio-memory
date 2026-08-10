@@ -202,6 +202,7 @@ async def test_abandoned_upload_is_cleaned_on_next_start(job_client, tmp_path):
         "event_map_schema_invalid",
         "event_map_unknown_segment",
         "event_map_coverage_invalid",
+        "analysis_quality_insufficient",
     ],
 )
 async def test_failed_model_analysis_retries_with_active_provider_without_whisper(

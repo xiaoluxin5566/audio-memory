@@ -49,7 +49,7 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   expect(resumed).toBe(true)
 })
 
-for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment']) {
+for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment', 'analysis_quality_insufficient']) {
   test(`a failed ${errorCode} analysis retries without returning to Whisper`, async ({ page }) => {
     let retried = false
     await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {

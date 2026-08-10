@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from audio_memory.analysis.windows import (
     AnalysisWindowError,
+    AnalysisQualityError,
     build_analysis_windows,
     complete_window_event_map,
     merge_window_event_maps,
+    validate_analysis_quality,
 )
 from audio_memory.prompts.event_schema import EventMap
 
@@ -367,3 +370,120 @@ def test_merge_window_event_maps_rejects_conflicting_or_subthreshold_identity() 
     assert merged.user_speaker.speaker_id is None
     assert merged.user_speaker.confidence == 0
     assert merged.user_speaker.evidence_segment_ids == []
+
+
+def scene_results(*, generated: bool = False) -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            scene_id=scene_id,
+            should_generate=generated and scene_id == "meeting",
+            cards=[object()] if generated and scene_id == "meeting" else [],
+            todos=[],
+        )
+        for scene_id in (
+            "todo",
+            "meeting",
+            "parenting",
+            "content",
+            "growth",
+            "inspiration",
+        )
+    ]
+
+
+def empty_event_map(segment_ids: list[str]) -> EventMap:
+    return EventMap.model_validate(
+        {
+            "user_speaker": {
+                "speaker_id": None,
+                "confidence": 0,
+                "reasoning": "synthetic unknown identity",
+                "evidence_segment_ids": [],
+            },
+            "events": [],
+            "unassigned_segment_ids": segment_ids,
+        }
+    )
+
+
+def test_quality_gate_rejects_one_event_for_two_hour_transcript() -> None:
+    transcript = [segment("seg_0_0", "file-a", 0, 7_200_000)]
+    event_map = local_event_map(
+        evidence_ids=["seg_0_0"],
+        start_ms=0,
+        end_ms=7_200_000,
+    )
+
+    with pytest.raises(AnalysisQualityError) as captured:
+        validate_analysis_quality(transcript, event_map, scene_results())
+
+    assert captured.value.reason == "long_audio_undersegmented"
+
+
+def test_quality_gate_rejects_empty_scenes_with_valuable_events() -> None:
+    transcript = [
+        segment("seg_0_0", "file-a", 0, 1_000),
+        segment("seg_0_1", "file-a", 2_000, 3_000),
+    ]
+    payload = local_event_map(evidence_ids=["seg_0_0"]).model_dump(mode="python")
+    second = payload["events"][0].copy()
+    second.update(
+        {
+            "event_id": "event_002",
+            "event_type": "interview",
+            "start_ms": 2_000,
+            "end_ms": 3_000,
+            "evidence_segment_ids": ["seg_0_1"],
+        }
+    )
+    payload["events"].append(second)
+    event_map = EventMap.model_validate(payload)
+
+    with pytest.raises(AnalysisQualityError) as captured:
+        validate_analysis_quality(transcript, event_map, scene_results())
+
+    assert captured.value.reason == "valuable_events_all_empty"
+
+
+def test_quality_gate_rejects_large_reliable_text_with_all_empty_scenes() -> None:
+    transcript = [segment("seg_0_0", "file-a", 0, 1_000)]
+    transcript[0]["text"] = "x" * 10_000
+
+    with pytest.raises(AnalysisQualityError) as captured:
+        validate_analysis_quality(
+            transcript,
+            empty_event_map(["seg_0_0"]),
+            scene_results(),
+        )
+
+    assert captured.value.reason == "large_transcript_all_empty"
+
+
+def test_quality_gate_allows_short_empty_and_visible_multi_event_results() -> None:
+    short = [segment("seg_0_0", "file-a", 0, 1_000)]
+    validate_analysis_quality(
+        short,
+        empty_event_map(["seg_0_0"]),
+        scene_results(),
+    )
+
+    long_transcript = [
+        segment("seg_0_0", "file-a", 0, 1_000),
+        segment("seg_0_1", "file-a", 7_199_000, 7_200_000),
+    ]
+    payload = local_event_map(evidence_ids=["seg_0_0"]).model_dump(mode="python")
+    second = payload["events"][0].copy()
+    second.update(
+        {
+            "event_id": "event_002",
+            "start_ms": 7_199_000,
+            "end_ms": 7_200_000,
+            "evidence_segment_ids": ["seg_0_1"],
+        }
+    )
+    payload["events"].append(second)
+    validate_analysis_quality(
+        long_transcript,
+        EventMap.model_validate(payload),
+        scene_results(generated=True),
+    )

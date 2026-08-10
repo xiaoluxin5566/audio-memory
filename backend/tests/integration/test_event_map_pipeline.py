@@ -641,6 +641,88 @@ async def test_runner_skips_profile_extraction_when_global_identity_is_unknown(
 
 
 @pytest.mark.asyncio
+async def test_runner_rejects_undersegmented_empty_long_audio_before_publication(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "undersegmented-quality.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        session.add(
+            Transcript(
+                id="transcript-2",
+                job_file_id="file-1",
+                segment_index=1,
+                segment_uid="file-1:1",
+                speaker_id="unknown",
+                start_ms=7_199_000,
+                end_ms=7_200_000,
+                text="Synthetic distant segment",
+                words_json="[]",
+                risk_classified=True,
+            )
+        )
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.event_map_json = EventMap.model_validate(
+            {
+                "user_speaker": {
+                    "speaker_id": None,
+                    "confidence": 0,
+                    "reasoning": "Synthetic unknown identity.",
+                    "evidence_segment_ids": [],
+                },
+                "events": [
+                    {
+                        "event_id": "event_existing_001",
+                        "parent_event_id": None,
+                        "event_type": "casual_chat",
+                        "title": "Synthetic broad event",
+                        "start_ms": 0,
+                        "end_ms": 7_200_000,
+                        "speaker_ids": ["unknown"],
+                        "user_role": None,
+                        "user_role_confidence": 0,
+                        "factual_summary": "Synthetic broad event.",
+                        "topics": ["synthetic"],
+                        "candidate_scenes": [],
+                        "evidence_segment_ids": ["seg_0_0", "seg_0_1"],
+                        "boundary_confidence": 0.5,
+                        "local_date": None,
+                        "timezone": None,
+                    }
+                ],
+                "unassigned_segment_ids": [],
+            }
+        ).model_dump_json()
+        await session.commit()
+    publisher = RecordingPublisher()
+    profile_extractor = FailIfProfileExtractor()
+    runner = AnalysisRunner(
+        database=database,
+        provider=RecordingProvider(),
+        profile_extractor=profile_extractor,
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1")
+
+    assert raised.value.code == "analysis_quality_insufficient"
+    assert profile_extractor.calls == 0
+    assert publisher.results is None
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert version is not None
+    assert version.error_code == "analysis_quality_insufficient"
+    assert set(json.loads(version.staged_results_json)) == set(PROMPT_SCENES)
+    assert job is not None and job.error_code == "analysis_quality_insufficient"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_runner_rejects_unknown_event_evidence_without_checkpoint(tmp_path) -> None:
     database = Database(tmp_path / "unknown-coverage.sqlite3")
     await database.create_schema()

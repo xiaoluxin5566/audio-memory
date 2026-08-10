@@ -21,6 +21,12 @@ class AnalysisWindowError(ValueError):
         self.code = code
 
 
+class AnalysisQualityError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__("analysis result did not pass the semantic quality gate")
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class AnalysisWindow:
     window_id: str
@@ -238,3 +244,63 @@ def merge_window_event_maps(
             "unassigned_segment_ids": sorted(known_ids - assigned_ids),
         }
     )
+
+
+def validate_analysis_quality(
+    transcript: list[dict[str, object]],
+    event_map: EventMap,
+    results: list[object],
+) -> None:
+    file_bounds: dict[str, tuple[int, int]] = {}
+    for item in transcript:
+        file_id = str(item["file_id"])
+        start_ms = int(item["start_ms"])
+        end_ms = int(item["end_ms"])
+        if file_id not in file_bounds:
+            file_bounds[file_id] = (start_ms, end_ms)
+        else:
+            earliest, latest = file_bounds[file_id]
+            file_bounds[file_id] = (min(earliest, start_ms), max(latest, end_ms))
+    transcript_span_ms = sum(end - start for start, end in file_bounds.values())
+    is_long_audio = transcript_span_ms >= 7_200_000
+
+    if is_long_audio and len(event_map.events) == 1:
+        raise AnalysisQualityError("long_audio_undersegmented")
+    if is_long_audio and transcript_span_ms > 0 and any(
+        (event.end_ms - event.start_ms) / transcript_span_ms >= 0.80
+        and event.boundary_confidence < 0.70
+        for event in event_map.events
+    ):
+        raise AnalysisQualityError("dominant_low_confidence_event")
+
+    generated = any(
+        bool(getattr(result, "should_generate", False))
+        and bool(getattr(result, "cards", []) or getattr(result, "todos", []))
+        for result in results
+    )
+    if generated:
+        return
+
+    valuable_event_types = {
+        "meeting",
+        "work_meeting",
+        "parenting",
+        "family_interaction",
+        "commitment",
+        "phone_call",
+        "discussion",
+        "work_session",
+        "media",
+        "video",
+        "podcast",
+        "interview",
+        "course",
+        "speech",
+        "news",
+        "program",
+    }
+    if any(event.event_type in valuable_event_types for event in event_map.events):
+        raise AnalysisQualityError("valuable_events_all_empty")
+    text_characters = sum(len(str(item.get("text", ""))) for item in transcript)
+    if text_characters >= 10_000:
+        raise AnalysisQualityError("large_transcript_all_empty")
