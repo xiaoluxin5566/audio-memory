@@ -9,6 +9,7 @@ import pytest
 from audio_memory.analysis.runner import AnalysisRunner
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
+    ProviderAnalysisError,
     RemoteProfileExtractor,
     RemoteSceneAnalyzer,
 )
@@ -201,9 +202,8 @@ async def test_invalid_schema_makes_exactly_one_repair_request() -> None:
         return chat_response(next(responses))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        analyzer = RemoteSceneAnalyzer(
-            ProviderAnalysisClient(ConfiguredKeychain(), client)
-        )
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        analyzer = RemoteSceneAnalyzer(provider)
         model_request = PromptComposer().compose_event_map(
             transcript=[
                 {
@@ -231,6 +231,15 @@ async def test_invalid_schema_makes_exactly_one_repair_request() -> None:
     assert len(requests) == 2
     repair_system = requests[1]["messages"][0]["content"]
     assert "修复" in repair_system
+    assert [item.repair_attempted for item in provider.request_diagnostics] == [
+        False,
+        True,
+    ]
+    assert [item.scene_id for item in provider.request_diagnostics] == [
+        "event-map",
+        "event-map",
+    ]
+    assert all(request["max_tokens"] == 32_768 for request in requests)
 
 
 @pytest.mark.asyncio
@@ -243,19 +252,18 @@ async def test_second_invalid_schema_is_not_repaired_again() -> None:
         return chat_response("still-not-json")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        analyzer = RemoteSceneAnalyzer(
-            ProviderAnalysisClient(ConfiguredKeychain(), client)
-        )
+        analyzer = RemoteSceneAnalyzer(ProviderAnalysisClient(ConfiguredKeychain(), client))
         model_request = PromptComposer().compose_event_map(
             transcript=[], profile=[], schema=EventMap.model_json_schema()
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ProviderAnalysisError) as raised:
             await analyzer.analyze_event_map(
                 model_request,
                 {"provider_id": "kimi", "model_id": "kimi-k2.5"},
             )
 
     assert call_count == 2
+    assert raised.value.code == "event_map_schema_invalid"
 
 
 @pytest.mark.asyncio

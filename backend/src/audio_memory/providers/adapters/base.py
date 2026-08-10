@@ -6,6 +6,12 @@ from audio_memory.providers.types import ProviderConfig
 
 
 @dataclass(frozen=True, slots=True)
+class ChatCompletionResult:
+    text: str
+    finish_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChatCompletionsAdapter:
     config: ProviderConfig
 
@@ -18,7 +24,10 @@ class ChatCompletionsAdapter:
             "stream": False,
         }
 
-    def extract_text(self, body: object) -> str:
+    def analysis_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        return payload
+
+    def extract_result(self, body: object) -> ChatCompletionResult:
         if not isinstance(body, dict):
             raise ValueError("Response envelope is not an object")
         choices = body.get("choices")
@@ -30,5 +39,10 @@ class ChatCompletionsAdapter:
         content = choice["message"].get("content")
         if not isinstance(content, str):
             raise ValueError("Response has no text content")
-        return content
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise ValueError("Response finish reason is invalid")
+        return ChatCompletionResult(content, finish_reason)
 
+    def extract_text(self, body: object) -> str:
+        return self.extract_result(body).text

@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from typing import TypeVar
 
+from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.parser import SceneOutputError
 
 
@@ -16,6 +17,7 @@ async def request_with_one_repair(
     request,
     provider_snapshot: dict[str, object],
     parse: Callable[[str], T],
+    invalid_code: str = "model_response_invalid",
 ) -> T:
     """Send a strict request and permit exactly one schema/JSON repair."""
 
@@ -24,6 +26,10 @@ async def request_with_one_repair(
         system=request.rendered_instructions,
         user=request.user_data,
         model_id=str(provider_snapshot["model_id"]),
+        scene_id=request.scene_id,
+        max_tokens=request.max_tokens,
+        timeout_seconds=request.timeout_seconds,
+        segment_count=request.segment_count,
     )
     try:
         return parse(raw)
@@ -44,5 +50,16 @@ async def request_with_one_repair(
                 separators=(",", ":"),
             ),
             model_id=str(provider_snapshot["model_id"]),
+            scene_id=request.scene_id,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+            segment_count=request.segment_count,
+            repair_attempted=True,
         )
-        return parse(repair)
+        try:
+            return parse(repair)
+        except (SceneOutputError, ValueError) as second_error:
+            raise ProviderAnalysisError(
+                "Provider returned output that violates the required schema",
+                code=invalid_code,
+            ) from second_error

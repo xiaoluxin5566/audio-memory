@@ -11,6 +11,19 @@ from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRequestPolicy:
+    max_tokens: int
+    timeout_seconds: float
+
+
+MODEL_REQUEST_POLICIES = {
+    "event-map": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=180),
+    "scene": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=120),
+    "profile": ModelRequestPolicy(max_tokens=8_192, timeout_seconds=120),
+}
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequest:
     scene_id: str
     prompt_version: int
@@ -19,6 +32,9 @@ class ModelRequest:
     scene_prompt: str
     user_data: str
     schema_json: str
+    max_tokens: int
+    timeout_seconds: float
+    segment_count: int
     common_rules: str = ""
 
     @property
@@ -57,6 +73,7 @@ class PromptComposer:
         profile: list[dict[str, object]],
         schema: dict[str, object],
     ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["event-map"]
         return ModelRequest(
             scene_id="event-map",
             prompt_version=0,
@@ -71,6 +88,9 @@ class PromptComposer:
                 ]
             ),
             schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(transcript),
         )
 
     def compose_scene(
@@ -85,6 +105,7 @@ class PromptComposer:
     ) -> ModelRequest:
         if scene_id not in PROMPT_SCENES or prompt.scene_id != scene_id:
             raise ValueError("Prompt scene does not match request scene")
+        policy = MODEL_REQUEST_POLICIES["scene"]
         return ModelRequest(
             scene_id=scene_id,
             prompt_version=prompt.version,
@@ -102,6 +123,9 @@ class PromptComposer:
                 ]
             ),
             schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(transcript),
         )
 
     @staticmethod

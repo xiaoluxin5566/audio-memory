@@ -102,6 +102,24 @@ def test_event_map_composition_uses_fixed_event_rules_without_editable_scene_pro
     assert "只识别事件和还原事实" in request.common_rules
     assert request.scene_prompt == ""
     assert "event_map" not in request.user_data
+    assert request.max_tokens == 32_768
+    assert request.timeout_seconds == 180
+    assert request.segment_count == 1
+
+
+def test_scene_composition_uses_frozen_output_bound_and_timeout() -> None:
+    request = PromptComposer().compose_scene(
+        "meeting",
+        transcript=transcript_with_injection(),
+        event_map=sample_event_map(),
+        profile=[],
+        prompt=PromptDocument("meeting", 1, "关注结论"),
+        schema=strict_schema(),
+    )
+
+    assert request.max_tokens == 16_384
+    assert request.timeout_seconds == 120
+    assert request.segment_count == 1
 
 
 def test_transcript_event_map_and_profile_are_escaped_untrusted_data_packets() -> None:
