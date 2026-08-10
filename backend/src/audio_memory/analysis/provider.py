@@ -19,6 +19,7 @@ from audio_memory.analysis.parser import (
 )
 from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest
+from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
@@ -70,6 +71,7 @@ def _analysis_parameter_fingerprint() -> str:
             "event_map_semantic_repair_attempts": (
                 analysis_windows.EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS
             ),
+            "scene_semantic_repair_attempts": SCENE_SEMANTIC_REPAIR_ATTEMPTS,
         },
     }
     encoded = json.dumps(

@@ -23,6 +23,9 @@ class EvidenceIntegrityError(ValueError):
     pass
 
 
+SCENE_SEMANTIC_REPAIR_ATTEMPTS = 1
+
+
 _MEDIA_EVENT_TYPES = {
     "media",
     "video",

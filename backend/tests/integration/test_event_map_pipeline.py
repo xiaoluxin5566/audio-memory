@@ -376,6 +376,24 @@ class ObjectiveWorkProvider(RecordingProvider):
         )
 
 
+class RepairsMeetingEvidenceProvider(ObjectiveWorkProvider):
+    def __init__(self, *, repair_succeeds: bool = True) -> None:
+        super().__init__()
+        self.repair_succeeds = repair_succeeds
+        self.meeting_requests = []
+
+    async def analyze_scene(self, scene_id, request, provider_snapshot):
+        result = await super().analyze_scene(scene_id, request, provider_snapshot)
+        if scene_id != "meeting":
+            return result
+        self.meeting_requests.append(request)
+        if len(self.meeting_requests) == 1 or not self.repair_succeeds:
+            result.cards[0].detail.core_conclusions[0].evidence_segment_ids = [
+                "seg_missing"
+            ]
+        return result
+
+
 class ChangesAfterProviderFailure(StableGeneration):
     def __init__(self) -> None:
         self.calls = 0
@@ -818,6 +836,68 @@ async def test_runner_skips_profile_extraction_when_global_identity_is_unknown(
     assert next(
         result for result in publisher.results if result.scene_id == "meeting"
     ).should_generate is True
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_retries_invalid_scene_evidence_once(tmp_path) -> None:
+    database = Database(tmp_path / "scene-evidence-repair.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    provider = RepairsMeetingEvidenceProvider()
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    outcome = await runner.run("version-1")
+
+    assert outcome.batch_id == "published-batch"
+    assert len(provider.meeting_requests) == 2
+    assert "上一轮输出未通过场景档案证据校验" not in (
+        provider.meeting_requests[0].common_rules
+    )
+    assert "上一轮输出未通过场景档案证据校验" in (
+        provider.meeting_requests[1].common_rules
+    )
+    meeting = next(
+        result for result in publisher.results if result.scene_id == "meeting"
+    )
+    assert meeting.cards[0].detail.core_conclusions[0].evidence_segment_ids == [
+        "seg_0_0"
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_scene_evidence_after_one_semantic_retry(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "scene-evidence-invalid.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    provider = RepairsMeetingEvidenceProvider(repair_succeeds=False)
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1")
+
+    assert raised.value.code == "scene_evidence_invalid"
+    assert len(provider.meeting_requests) == 2
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.error_code == "scene_evidence_invalid"
+    assert "meeting" not in json.loads(version.staged_results_json)
     await database.dispose()
 
 

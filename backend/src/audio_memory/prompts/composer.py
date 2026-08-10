@@ -11,6 +11,7 @@ from audio_memory.analysis import windows as analysis_windows
 from audio_memory.analysis.clusters import TranscriptCluster
 from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
 from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
@@ -85,6 +86,9 @@ class PromptComposer:
                 "event_map_semantic_repair_attempts": (
                     analysis_windows.EVENT_MAP_SEMANTIC_REPAIR_ATTEMPTS
                 ),
+            },
+            "scene_policy": {
+                "scene_semantic_repair_attempts": SCENE_SEMANTIC_REPAIR_ATTEMPTS,
             },
             "dossier_policy": {
                 "max_span_ms": dossier_policy.DOSSIER_MAX_SPAN_MS,
@@ -179,6 +183,7 @@ class PromptComposer:
         profile: list[dict[str, object]],
         prompt: PromptDocument,
         schema: dict[str, object],
+        semantic_retry: bool = False,
     ) -> ModelRequest:
         if scene_id not in PROMPT_SCENES or prompt.scene_id != scene_id:
             raise ValueError("Prompt scene does not match request scene")
@@ -202,12 +207,21 @@ class PromptComposer:
                     for segment_id in dossier.allowed_segment_ids
                 }
             )
+        common_rules = self._fixed_prompt("common-scene.md")
+        if semantic_retry:
+            common_rules += (
+                "\n\n服务端校验反馈（必须修正）：上一轮输出未通过场景档案证据校验。"
+                "所有事件 ID 必须来自对应 dossier 的 primary_event_id 或 source_event_ids；"
+                "所有 evidence_segment_ids 必须逐字来自同一 dossier 的 allowed_segment_ids，"
+                "且文件和时间必须落在该 dossier 内。身份不可靠时不得生成 user/shared 待办、"
+                "用户行为评价或强归因；删除证据不足的内容，不要猜测或构造 ID。"
+            )
         return ModelRequest(
             scene_id=scene_id,
             prompt_version=prompt.version,
             schema_version=self.SCHEMA_VERSION,
             system_rules=self._fixed_prompt("system.md"),
-            common_rules=self._fixed_prompt("common-scene.md"),
+            common_rules=common_rules,
             scene_prompt=prompt.content,
             user_data="\n".join(
                 [

@@ -50,7 +50,11 @@ from audio_memory.models import (
 )
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.director_schema import DirectorResult
-from audio_memory.prompts.evidence import validate_evidence_integrity
+from audio_memory.prompts.evidence import (
+    EvidenceIntegrityError,
+    SCENE_SEMANTIC_REPAIR_ATTEMPTS,
+    validate_evidence_integrity,
+)
 from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.transcript_safety import pending_risk_review_exists
 from audio_memory.prompts.schemas import (
@@ -201,34 +205,64 @@ class AnalysisRunner:
                         )
                     else:
                         prompt = self._prompt_from_snapshot(scene_id, prompts)
-                        request = self.composer.compose_scene(
-                            scene_id,
-                            transcript=transcript,
-                            event_map=event_map,
-                            dossiers=scene_dossiers,
-                            profile=profile,
-                            prompt=prompt,
-                            schema=_SCENE_MODELS[scene_id].model_json_schema(),
-                        )
-                        await self._require_ownership(version.id, worker_owner_id)
-                        await self._require_generation(version, worker_owner_id)
-                        generated = await self.provider.analyze_scene(
-                            scene_id, request, provider_snapshot
-                        )
-                        await self._require_ownership(version.id, worker_owner_id)
-                        await self._require_generation(version, worker_owner_id)
-                        result = adapter.validate_python(
-                            generated.model_dump(mode="python")
-                            if hasattr(generated, "model_dump")
-                            else generated
-                        )
-                        validate_evidence_integrity(
-                            result,
-                            event_map,
-                            segment_ids,
-                            dossiers=scene_dossiers,
-                            segment_lookup=segment_lookup,
-                        )
+                        for attempt in range(SCENE_SEMANTIC_REPAIR_ATTEMPTS + 1):
+                            request = self.composer.compose_scene(
+                                scene_id,
+                                transcript=transcript,
+                                event_map=event_map,
+                                dossiers=scene_dossiers,
+                                profile=profile,
+                                prompt=prompt,
+                                schema=_SCENE_MODELS[scene_id].model_json_schema(),
+                                semantic_retry=attempt > 0,
+                            )
+                            await self._require_ownership(
+                                version.id, worker_owner_id
+                            )
+                            await self._require_generation(
+                                version, worker_owner_id
+                            )
+                            generated = await self.provider.analyze_scene(
+                                scene_id, request, provider_snapshot
+                            )
+                            await self._require_ownership(
+                                version.id, worker_owner_id
+                            )
+                            await self._require_generation(
+                                version, worker_owner_id
+                            )
+                            result = adapter.validate_python(
+                                generated.model_dump(mode="python")
+                                if hasattr(generated, "model_dump")
+                                else generated
+                            )
+                            try:
+                                validate_evidence_integrity(
+                                    result,
+                                    event_map,
+                                    segment_ids,
+                                    dossiers=scene_dossiers,
+                                    segment_lookup=segment_lookup,
+                                )
+                            except EvidenceIntegrityError as exc:
+                                if attempt < SCENE_SEMANTIC_REPAIR_ATTEMPTS:
+                                    logger.warning(
+                                        "scene_semantic_repair scene_id=%s "
+                                        "attempt=%d dossiers=%d",
+                                        scene_id,
+                                        attempt + 1,
+                                        len(scene_dossiers),
+                                    )
+                                    continue
+                                raise ProviderAnalysisError(
+                                    "Scene result evidence is invalid",
+                                    code="scene_evidence_invalid",
+                                ) from exc
+                            break
+                        else:
+                            raise AssertionError(
+                                "scene semantic repair loop exhausted"
+                            )
                     staged[scene_id] = result.model_dump(mode="json")
                     await self._save_staged(version.id, staged, worker_owner_id)
                 if scene_dossiers:
