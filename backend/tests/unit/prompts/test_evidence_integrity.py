@@ -128,11 +128,11 @@ def test_rejects_cross_event_evidence_even_when_segment_exists() -> None:
         )
 
 
-def test_rejects_user_attribution_below_point_seven() -> None:
+def test_rejects_user_attribution_below_point_eight_five() -> None:
     with pytest.raises(EvidenceIntegrityError, match="user identity"):
         validate_evidence_integrity(
             todo_result(),
-            event_map(user_confidence=0.69),
+            event_map(user_confidence=0.84),
             {"seg_001", "seg_002"},
         )
 
@@ -498,7 +498,7 @@ def test_low_identity_rejects_personal_evaluation_or_profile_signal(result_facto
     with pytest.raises(EvidenceIntegrityError, match="user identity"):
         validate_evidence_integrity(
             result_factory(),
-            event_map(user_confidence=0.69),
+            event_map(user_confidence=0.84),
             {"seg_001", "seg_002"},
         )
 
@@ -511,24 +511,24 @@ def test_low_identity_still_allows_objective_content_consumption_record() -> Non
 
     validate_evidence_integrity(
         ContentSceneResult.model_validate(payload),
-        event_map(user_confidence=0.69),
+        event_map(user_confidence=0.84),
         {"seg_001", "seg_002"},
     )
 
 
-def test_meeting_detail_user_todo_uses_point_seven_identity_boundary() -> None:
+def test_meeting_detail_user_todo_uses_point_eight_five_identity_boundary() -> None:
     result = meeting_with_user_owned_detail_todo()
 
     with pytest.raises(EvidenceIntegrityError, match="user identity"):
         validate_evidence_integrity(
             result,
-            event_map(user_confidence=0.69),
+            event_map(user_confidence=0.84),
             {"seg_001", "seg_002"},
         )
 
     validate_evidence_integrity(
         result,
-        event_map(user_confidence=0.70),
+        event_map(user_confidence=0.85),
         {"seg_001", "seg_002"},
     )
 
@@ -643,7 +643,7 @@ def test_integrity_rejects_empty_parenting_basis_after_model_copy_bypass() -> No
 
 
 def test_integrity_revalidates_reliable_user_evidence_after_model_copy_bypass() -> None:
-    valid_map = event_map(user_confidence=0.70)
+    valid_map = event_map(user_confidence=0.85)
     invalid_speaker = valid_map.user_speaker.model_copy(
         update={"evidence_segment_ids": []}
     )
@@ -658,7 +658,7 @@ def test_integrity_revalidates_reliable_user_evidence_after_model_copy_bypass() 
 
 
 def test_reliable_user_speaker_evidence_must_reference_a_transcript_segment() -> None:
-    valid_map = event_map(user_confidence=0.70)
+    valid_map = event_map(user_confidence=0.85)
     invalid_speaker = valid_map.user_speaker.model_copy(
         update={"evidence_segment_ids": ["seg_999"]}
     )

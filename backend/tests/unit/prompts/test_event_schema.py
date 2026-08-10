@@ -56,16 +56,16 @@ def event(
     )
 
 
-def test_user_speaker_reliability_starts_at_point_seven() -> None:
+def test_user_speaker_reliability_starts_at_point_eight_five() -> None:
     below = UserSpeaker(
         speaker_id="speaker_A",
-        confidence=0.69,
+        confidence=0.84,
         reasoning="只有弱身份线索",
         evidence_segment_ids=["seg_001"],
     )
     boundary = UserSpeaker(
         speaker_id="speaker_A",
-        confidence=0.70,
+        confidence=0.85,
         reasoning="存在明确责任锚点",
         evidence_segment_ids=["seg_001"],
     )
@@ -84,7 +84,7 @@ def test_reliable_user_speaker_requires_nonempty_unique_evidence(
     with pytest.raises(ValidationError, match="evidence"):
         UserSpeaker(
             speaker_id="speaker_A",
-            confidence=0.70,
+            confidence=0.85,
             reasoning="存在明确责任锚点",
             evidence_segment_ids=evidence_segment_ids,
         )

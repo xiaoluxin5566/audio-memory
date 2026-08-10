@@ -84,7 +84,7 @@ def validate_evidence_integrity(
     referenced_map_segments = event_map_segments | set(
         event_map.user_speaker.evidence_segment_ids
     )
-    if event_map.user_speaker.confidence >= 0.70:
+    if event_map.user_speaker.confidence >= 0.85:
         _require_nonempty_unique_ids(
             event_map.user_speaker.evidence_segment_ids,
             "reliable user speaker evidence_segment_ids",
@@ -129,7 +129,7 @@ def validate_evidence_integrity(
         requires_user_identity = requires_user_identity or bool(result.cards)
     if requires_user_identity and not event_map.user_speaker.is_reliable:
         raise EvidenceIntegrityError(
-            "user identity must have a speaker_id and confidence >= 0.70"
+            "user identity must have a speaker_id and confidence >= 0.85"
         )
     for todo in todos:
         _validate_todo(todo, events, segment_ids)

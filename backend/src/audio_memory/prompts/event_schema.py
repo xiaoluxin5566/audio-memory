@@ -57,7 +57,7 @@ class UserSpeaker(StrictModel):
 
     @model_validator(mode="after")
     def validate_reliable_evidence(self) -> UserSpeaker:
-        if self.confidence >= 0.70:
+        if self.confidence >= 0.85:
             if not self.evidence_segment_ids:
                 raise ValueError("reliable user speaker evidence must not be empty")
             if len(self.evidence_segment_ids) != len(set(self.evidence_segment_ids)):
@@ -68,7 +68,7 @@ class UserSpeaker(StrictModel):
     def is_reliable(self) -> bool:
         return (
             self.speaker_id is not None
-            and self.confidence >= 0.70
+            and self.confidence >= 0.85
             and bool(self.evidence_segment_ids)
             and len(self.evidence_segment_ids) == len(set(self.evidence_segment_ids))
         )

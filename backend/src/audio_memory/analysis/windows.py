@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from audio_memory.prompts.event_schema import EventMap, UserSpeaker
+
 
 ANALYSIS_WINDOW_GAP_MS = 45_000
 ANALYSIS_WINDOW_MAX_SPAN_MS = 1_200_000
@@ -98,3 +100,128 @@ def build_analysis_windows(
         )
         for index, items in enumerate(raw_windows)
     ]
+
+
+def complete_window_event_map(
+    window: AnalysisWindow,
+    generated: EventMap,
+) -> EventMap:
+    event_map = EventMap.model_validate(generated.model_dump(mode="python"))
+    segments = {
+        str(item["segment_id"]): item
+        for item in window.segments
+    }
+    known_ids = set(segments)
+    assigned_ids = {
+        segment_id
+        for event in event_map.events
+        for segment_id in event.evidence_segment_ids
+    }
+    referenced_ids = assigned_ids | set(event_map.user_speaker.evidence_segment_ids)
+    if referenced_ids - known_ids:
+        raise AnalysisWindowError("local event map contains unknown evidence")
+
+    for event in event_map.events:
+        evidence = [segments[segment_id] for segment_id in event.evidence_segment_ids]
+        evidence_start = min(int(item["start_ms"]) for item in evidence)
+        evidence_end = max(int(item["end_ms"]) for item in evidence)
+        if event.start_ms > evidence_start or event.end_ms < evidence_end:
+            raise AnalysisWindowError("local event time range must contain its evidence")
+        if event.start_ms < window.start_ms or event.end_ms > window.end_ms:
+            raise AnalysisWindowError("local event time range must stay inside its window")
+
+    window_suffix = window.window_id.removeprefix("window_")
+    event_ids = {
+        event.event_id: (
+            f"event_w{window_suffix}_{event.event_id.removeprefix('event_')}"
+        )
+        for event in event_map.events
+    }
+    namespaced_events = [
+        event.model_copy(
+            update={
+                "event_id": event_ids[event.event_id],
+                "parent_event_id": (
+                    event_ids[event.parent_event_id]
+                    if event.parent_event_id is not None
+                    else None
+                ),
+            }
+        )
+        for event in event_map.events
+    ]
+    return EventMap.model_validate(
+        {
+            "user_speaker": event_map.user_speaker.model_dump(mode="python"),
+            "events": [event.model_dump(mode="python") for event in namespaced_events],
+            "unassigned_segment_ids": sorted(known_ids - assigned_ids),
+        }
+    )
+
+
+def merge_window_event_maps(
+    windows: list[AnalysisWindow],
+    maps: list[EventMap],
+) -> EventMap:
+    if len(windows) != len(maps):
+        raise AnalysisWindowError("analysis windows and event maps must align")
+
+    known_ids = {
+        str(item["segment_id"])
+        for window in windows
+        for item in window.segments
+    }
+    events = [event for event_map in maps for event in event_map.events]
+    event_ids = [event.event_id for event in events]
+    if len(event_ids) != len(set(event_ids)):
+        raise AnalysisWindowError("merged event IDs must be unique")
+    assigned_ids = {
+        segment_id
+        for event in events
+        for segment_id in event.evidence_segment_ids
+    }
+    if assigned_ids - known_ids:
+        raise AnalysisWindowError("merged event map contains unknown evidence")
+
+    support: dict[str, list[tuple[str, UserSpeaker]]] = {}
+    for window, event_map in zip(windows, maps, strict=True):
+        speaker = event_map.user_speaker
+        if speaker.speaker_id is None:
+            continue
+        support.setdefault(speaker.speaker_id, []).append((window.window_id, speaker))
+    qualified = {
+        speaker_id: candidates
+        for speaker_id, candidates in support.items()
+        if len({window_id for window_id, _ in candidates}) >= 2
+        and min(item.confidence for _, item in candidates) >= 0.85
+    }
+    if len(qualified) == 1:
+        speaker_id, candidates = next(iter(qualified.items()))
+        evidence_ids: list[str] = []
+        seen_evidence: set[str] = set()
+        for _, speaker in candidates:
+            for segment_id in speaker.evidence_segment_ids:
+                if segment_id not in seen_evidence:
+                    evidence_ids.append(segment_id)
+                    seen_evidence.add(segment_id)
+        user_speaker = UserSpeaker(
+            speaker_id=speaker_id,
+            confidence=min(item.confidence for _, item in candidates),
+            reasoning="同一说话人由至少两个独立分析窗口一致支持。",
+            evidence_segment_ids=evidence_ids,
+        )
+    else:
+        user_speaker = UserSpeaker(
+            speaker_id=None,
+            confidence=0,
+            reasoning="没有同一说话人在至少两个独立窗口中达到可靠身份门槛。",
+            evidence_segment_ids=[],
+        )
+
+    return EventMap.model_validate(
+        {
+            "user_speaker": user_speaker.model_dump(mode="python"),
+            "events": [event.model_dump(mode="python") for event in events],
+            "unassigned_segment_ids": sorted(known_ids - assigned_ids),
+        }
+    )
