@@ -30,6 +30,7 @@ async def request_with_one_repair(
         max_tokens=request.max_tokens,
         timeout_seconds=request.timeout_seconds,
         segment_count=request.segment_count,
+        repair_attempted=False,
     )
     try:
         return parse(raw)
