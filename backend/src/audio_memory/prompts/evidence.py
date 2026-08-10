@@ -333,15 +333,35 @@ def _validate_todo(
         segment_ids,
         scope,
     )
-    if event.event_type.strip().lower() in _MEDIA_EVENT_TYPES:
+    meeting_routed_interview = _is_meeting_routed_interview(event, scope)
+    if (
+        event.event_type.strip().lower() in _MEDIA_EVENT_TYPES
+        and not meeting_routed_interview
+    ):
         raise EvidenceIntegrityError(
             f"a media event cannot be classified as a user todo: {event.event_id}"
         )
-    if event.event_type.strip().lower() not in _TODO_CAPABLE_EVENT_TYPES:
+    if (
+        event.event_type.strip().lower() not in _TODO_CAPABLE_EVENT_TYPES
+        and not meeting_routed_interview
+    ):
         raise EvidenceIntegrityError(
             f"event type {event.event_type!r} cannot support a user todo: "
             f"{event.event_id}"
         )
+
+
+def _is_meeting_routed_interview(
+    event: Event, scope: _DossierScope | None
+) -> bool:
+    if event.event_type.strip().lower() != "interview" or scope is None:
+        return False
+    return any(
+        "meeting" in dossier.candidate_scenes
+        and event.event_id
+        in {dossier.primary_event_id, *dossier.source_event_ids}
+        for dossier in scope.dossiers
+    )
 
 
 def _require_event(event_id: str, events: dict[str, Event]) -> Event:

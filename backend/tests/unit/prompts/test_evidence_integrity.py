@@ -326,6 +326,7 @@ def test_rejects_media_action_call_misclassified_as_user_todo() -> None:
     [
         "media",
         "video",
+        "interview",
         "podcast",
         "music",
         "audiobook",
@@ -369,6 +370,48 @@ def test_other_event_kind_cannot_default_to_user_commitment() -> None:
             other_map,
             {"seg_001", "seg_002"},
         )
+
+
+def test_meeting_routed_interview_allows_unknown_owner_internal_action() -> None:
+    routed_map = dossier_event_map().model_copy(
+        update={
+            "user_speaker": UserSpeaker(
+                speaker_id=None,
+                confidence=0,
+                reasoning="身份未知。",
+                evidence_segment_ids=[],
+            ),
+            "events": [
+                event("event_001", "seg_001", event_type="interview"),
+                event("event_002", "seg_002", event_type="video"),
+            ],
+        }
+    )
+    result = meeting_with_cross_event_conclusion()
+    result.cards[0].detail.core_conclusions[0].evidence_segment_ids = ["seg_001"]
+    result.cards[0].detail.meeting_todos = [
+        StrictTodoDraft(
+            text="候选人补充作品集",
+            action="补充作品集",
+            owner_type="unknown",
+            assignee_text="候选人",
+            due_at=None,
+            due_text=None,
+            intent_type="assignment",
+            source_event_id="event_001",
+            source_context="面试中要求候选人补充作品集。",
+            evidence_segment_ids=["seg_001"],
+            confidence=0.9,
+        )
+    ]
+
+    validate_evidence_integrity(
+        result,
+        routed_map,
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
 
 
 def test_event_map_must_account_for_every_transcript_segment() -> None:
