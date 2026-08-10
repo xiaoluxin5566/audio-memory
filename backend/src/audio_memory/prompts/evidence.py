@@ -23,6 +23,7 @@ class EvidenceIntegrityError(ValueError):
     pass
 
 
+EVIDENCE_POLICY_VERSION = 2
 SCENE_SEMANTIC_REPAIR_ATTEMPTS = 1
 
 

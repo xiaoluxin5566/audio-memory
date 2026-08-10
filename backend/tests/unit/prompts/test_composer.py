@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from audio_memory.prompts import evidence as evidence_policy
 from audio_memory.analysis.clusters import build_transcript_clusters
 from audio_memory.analysis.director import AnchoredSelection
 from audio_memory.analysis.dossiers import build_scene_dossiers
@@ -225,6 +226,21 @@ def test_director_rules_participate_in_fixed_rules_hash(monkeypatch) -> None:
                 else original(name)
             )
         ),
+    )
+
+    assert PromptComposer.fixed_rules_hash() != baseline
+
+
+def test_evidence_policy_version_participates_in_fixed_rules_hash(
+    monkeypatch,
+) -> None:
+    baseline = PromptComposer.fixed_rules_hash()
+
+    monkeypatch.setattr(
+        evidence_policy,
+        "EVIDENCE_POLICY_VERSION",
+        99,
+        raising=False,
     )
 
     assert PromptComposer.fixed_rules_hash() != baseline

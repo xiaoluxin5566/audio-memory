@@ -10,8 +10,8 @@ from audio_memory.analysis import dossiers as dossier_policy
 from audio_memory.analysis import windows as analysis_windows
 from audio_memory.analysis.clusters import TranscriptCluster
 from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
+from audio_memory.prompts import evidence as evidence_policy
 from audio_memory.prompts.event_schema import EventMap
-from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
@@ -88,7 +88,10 @@ class PromptComposer:
                 ),
             },
             "scene_policy": {
-                "scene_semantic_repair_attempts": SCENE_SEMANTIC_REPAIR_ATTEMPTS,
+                "evidence_policy_version": evidence_policy.EVIDENCE_POLICY_VERSION,
+                "scene_semantic_repair_attempts": (
+                    evidence_policy.SCENE_SEMANTIC_REPAIR_ATTEMPTS
+                ),
             },
             "dossier_policy": {
                 "max_span_ms": dossier_policy.DOSSIER_MAX_SPAN_MS,
