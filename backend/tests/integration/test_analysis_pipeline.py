@@ -378,7 +378,29 @@ async def test_real_request_confines_editable_prompt_injection(injection: str) -
         captured.update(json.loads(request.content))
         return chat_response(json.dumps(empty_meeting_payload(), ensure_ascii=False))
 
-    event_map = EventMap.model_validate(map_payload())
+    assigned_payload = map_payload()
+    assigned_payload["events"] = [
+        {
+            "event_id": "event_injection_test",
+            "parent_event_id": None,
+            "event_type": "discussion",
+            "title": "Prompt isolation test",
+            "start_ms": 0,
+            "end_ms": 1_000,
+            "speaker_ids": ["unknown"],
+            "user_role": None,
+            "user_role_confidence": 0,
+            "factual_summary": "Synthetic prompt isolation discussion.",
+            "topics": ["prompt isolation"],
+            "candidate_scenes": ["meeting"],
+            "evidence_segment_ids": ["seg_0_0"],
+            "boundary_confidence": 0.9,
+            "local_date": None,
+            "timezone": None,
+        }
+    ]
+    assigned_payload["unassigned_segment_ids"] = []
+    event_map = EventMap.model_validate(assigned_payload)
     transcript = [
         {
             "segment_id": "seg_0_0",
