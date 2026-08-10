@@ -43,6 +43,7 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   await expect(page.getByText('unfinished.mp3')).toBeVisible()
   await page.getByRole('button', { name: '继续分析' }).click()
   await expect(page.getByText('本地 Whisper 转写中')).toBeVisible()
+  await expect(page.getByText('快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。')).toBeVisible()
   await expect(page.locator('.job-title span')).toHaveText('19%')
   await expect(page.getByText('正在估算剩余时间…')).toBeVisible()
   expect(resumed).toBe(true)
