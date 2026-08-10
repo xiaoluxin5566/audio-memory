@@ -39,7 +39,7 @@ from audio_memory.prompts.schemas import (
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 
 class CredentialChangedError(RuntimeError):

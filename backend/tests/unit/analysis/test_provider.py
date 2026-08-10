@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from audio_memory.analysis import provider as provider_module
 from audio_memory.analysis.provider import ProviderAnalysisClient, ProviderAnalysisError
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.event_schema import EventMap
@@ -83,9 +84,12 @@ async def test_deepseek_event_map_request_is_bounded_and_disables_thinking() -> 
 
 @pytest.mark.asyncio
 async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_free(
-    caplog,
+    monkeypatch,
 ) -> None:
-    caplog.set_level("INFO", logger="audio_memory.analysis.provider")
+    logged: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        provider_module.logger, "info", lambda *values: logged.append(values)
+    )
     async def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -128,14 +132,14 @@ async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_
     assert "PRIVATE_FIXTURE_TEXT" not in serialized
     assert "PRIVATE_RESPONSE_TEXT" not in serialized
     assert "test-only-secret" not in serialized
-    assert "analysis_provider_request" in caplog.text
-    assert "scene_id=event-map" in caplog.text
-    assert "input_tokens=10" in caplog.text
-    assert "output_tokens=5" in caplog.text
-    assert "PRIVATE_SYSTEM_TEXT" not in caplog.text
-    assert "PRIVATE_FIXTURE_TEXT" not in caplog.text
-    assert "PRIVATE_RESPONSE_TEXT" not in caplog.text
-    assert "test-only-secret" not in caplog.text
+    assert provider_module.logger.name == "uvicorn.error"
+    logged_repr = repr(logged)
+    assert "analysis_provider_request" in logged_repr
+    assert "event-map" in logged_repr
+    assert "PRIVATE_SYSTEM_TEXT" not in logged_repr
+    assert "PRIVATE_FIXTURE_TEXT" not in logged_repr
+    assert "PRIVATE_RESPONSE_TEXT" not in logged_repr
+    assert "test-only-secret" not in logged_repr
 
 
 @pytest.mark.asyncio

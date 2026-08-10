@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from audio_memory.analysis import runner as runner_module
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.parser import SceneOutputError
 from audio_memory.analysis.publisher import AnalysisOutcome, AnalysisPublisher
@@ -364,9 +365,12 @@ async def seed_version(
 
 @pytest.mark.asyncio
 async def test_runner_completes_unassigned_segment_ids_before_checkpoint(
-    tmp_path, caplog
+    tmp_path, monkeypatch
 ) -> None:
-    caplog.set_level("INFO", logger="audio_memory.analysis.runner")
+    logged: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        runner_module.logger, "info", lambda *values: logged.append(values)
+    )
     database = Database(tmp_path / "local-coverage.sqlite3")
     await database.create_schema()
     await seed_version(database, tmp_path)
@@ -411,11 +415,15 @@ async def test_runner_completes_unassigned_segment_ids_before_checkpoint(
     assert EventMap.model_validate_json(stored.event_map_json).unassigned_segment_ids == [
         "seg_0_1"
     ]
-    assert "event_map_coverage" in caplog.text
-    assert "known=2" in caplog.text
-    assert "assigned=1" in caplog.text
-    assert "unassigned=1" in caplog.text
-    assert "unknown=0" in caplog.text
+    assert runner_module.logger.name == "uvicorn.error"
+    assert logged == [
+        (
+            "event_map_coverage known=%d assigned=%d unassigned=%d unknown=0",
+            2,
+            1,
+            1,
+        )
+    ]
     await database.dispose()
 
 
