@@ -178,11 +178,14 @@ class AnalysisRunner:
 
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)
-            raw_delta = await self.profile_extractor.extract(
-                transcript, profile, provider_snapshot
-            )
-            await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version, worker_owner_id)
+            if event_map.user_speaker.is_reliable:
+                raw_delta = await self.profile_extractor.extract(
+                    transcript, profile, provider_snapshot
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+            else:
+                raw_delta = []
             verified_delta = await self._save_profile_candidates(
                 version.id, raw_delta, segment_ids, worker_owner_id
             )

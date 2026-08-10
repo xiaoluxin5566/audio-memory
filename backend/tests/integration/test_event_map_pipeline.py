@@ -105,6 +105,15 @@ class EvidenceProfileExtractor:
         ]
 
 
+class FailIfProfileExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def extract(self, transcript, existing, provider_snapshot):
+        self.calls += 1
+        raise AssertionError("unknown identity must not reach profile extraction")
+
+
 class RecordingPublisher:
     def __init__(self) -> None:
         self.results = None
@@ -230,6 +239,54 @@ class FailingSecondWindowProvider(WindowedProvider):
                 code="event_map_schema_invalid",
             )
         return await super().analyze_event_map(request, provider_snapshot)
+
+
+class ObjectiveWorkProvider(RecordingProvider):
+    async def analyze_event_map(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        return assigned_event_map(evidence_id="seg_0_0")
+
+    async def analyze_scene(self, scene_id, request, provider_snapshot):
+        self.calls.append(scene_id)
+        if scene_id != "meeting":
+            return empty_scene(scene_id)
+        return SCENE_ADAPTER.validate_python(
+            {
+                "scene_id": "meeting",
+                "should_generate": True,
+                "generation_reason": "有一段具备回顾价值的客观工作沟通。",
+                "confidence": 0.9,
+                "cards": [
+                    {
+                        "event_ids": ["event_w0000_001"],
+                        "card": {
+                            "title": "讨论明确了产品范围",
+                            "summary": "录音中的参与者讨论了一项产品范围。",
+                        },
+                        "confidence": 0.9,
+                        "detail": {
+                            "event_id": "event_w0000_001",
+                            "topic": "产品范围",
+                            "start_ms": 0,
+                            "end_ms": 1_000,
+                            "background": "一段客观工作沟通。",
+                            "participants": [],
+                            "core_conclusions": [
+                                {
+                                    "content": "参与者讨论了一项产品范围。",
+                                    "evidence_segment_ids": ["seg_0_0"],
+                                }
+                            ],
+                            "decisions": [],
+                            "open_questions": [],
+                            "meeting_todos": [],
+                            "discussion_topics": [],
+                        },
+                    }
+                ],
+                "todos": [],
+            }
+        )
 
 
 class ChangesAfterProviderFailure(StableGeneration):
@@ -556,6 +613,34 @@ async def test_runner_does_not_checkpoint_partial_window_event_maps(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_runner_skips_profile_extraction_when_global_identity_is_unknown(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "unknown-identity-profile.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    profile_extractor = FailIfProfileExtractor()
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=ObjectiveWorkProvider(),
+        profile_extractor=profile_extractor,
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    await runner.run("version-1")
+
+    assert profile_extractor.calls == 0
+    assert publisher.results is not None
+    assert publisher.profile_delta == []
+    assert next(
+        result for result in publisher.results if result.scene_id == "meeting"
+    ).should_generate is True
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_runner_rejects_unknown_event_evidence_without_checkpoint(tmp_path) -> None:
     database = Database(tmp_path / "unknown-coverage.sqlite3")
     await database.create_schema()
@@ -691,6 +776,23 @@ async def test_runner_persists_version_scoped_profile_candidates(tmp_path) -> No
     database = Database(tmp_path / "profile-candidates.sqlite3")
     await database.create_schema()
     await seed_version(database, tmp_path)
+    reliable_map = event_map().model_copy(
+        update={
+            "user_speaker": event_map().user_speaker.model_copy(
+                update={
+                    "speaker_id": "speaker_0",
+                    "confidence": 0.90,
+                    "reasoning": "Synthetic reliable identity evidence.",
+                    "evidence_segment_ids": ["seg_0_0"],
+                }
+            )
+        }
+    )
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        assert version is not None
+        version.event_map_json = reliable_map.model_dump_json()
+        await session.commit()
     runner = AnalysisRunner(
         database=database,
         provider=RecordingProvider(),

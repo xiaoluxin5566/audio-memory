@@ -98,6 +98,26 @@ def test_scene_composition_keeps_four_layers_ordered_and_separate() -> None:
     assert rendered.index(request.scene_prompt) < rendered.index(request.schema_json)
 
 
+def test_fixed_scene_rules_recall_work_communication_with_unknown_identity() -> None:
+    request = PromptComposer().compose_scene(
+        "meeting",
+        transcript=transcript_with_injection(),
+        event_map=sample_event_map(),
+        profile=[],
+        prompt=PromptDocument(
+            "meeting",
+            1,
+            "普通闲聊没有回顾价值时不生成。",
+        ),
+        schema=strict_schema(),
+    )
+
+    assert "招聘面谈" in request.common_rules
+    assert "职业、产品或业务" in request.common_rules
+    assert "owner_type=unknown" in request.common_rules
+    assert "不得生成全局待办" in request.common_rules
+
+
 def test_event_map_composition_uses_fixed_event_rules_without_editable_scene_prompt() -> None:
     request = PromptComposer().compose_event_map(
         transcript=transcript_with_injection(),
