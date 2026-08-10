@@ -13,6 +13,21 @@ from sqlalchemy import delete, select, update
 from audio_memory.analysis.profile import validate_profile_delta
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
+from audio_memory.analysis.clusters import (
+    build_transcript_clusters,
+    event_hints_for_cluster,
+)
+from audio_memory.analysis.director import (
+    DirectorSelectionError,
+    attach_event_anchors,
+    normalize_director_results,
+)
+from audio_memory.analysis.dossiers import (
+    DossierBuildError,
+    SceneDossier,
+    build_scene_dossiers,
+    dossiers_for_scene,
+)
 from audio_memory.analysis.windows import (
     AnalysisQualityError,
     AnalysisWindowError,
@@ -32,6 +47,7 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.evidence import validate_evidence_integrity
 from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.transcript_safety import pending_risk_review_exists
@@ -64,6 +80,8 @@ class LeaseLostError(RuntimeError):
 
 class StrictAnalysisProvider(Protocol):
     async def analyze_event_map(self, request, provider_snapshot) -> EventMapDraft: ...
+
+    async def analyze_director(self, request, provider_snapshot) -> DirectorResult: ...
 
     async def analyze_scene(
         self, scene_id, request, provider_snapshot
@@ -145,37 +163,82 @@ class AnalysisRunner:
                 provider_snapshot,
                 worker_owner_id,
             )
+            event_map, dossiers = await self._scene_context(
+                version,
+                transcript,
+                event_map,
+                provider_snapshot,
+                staged,
+                worker_owner_id,
+            )
+            segment_lookup = {
+                str(item["segment_id"]): item for item in transcript
+            }
             results: list[SceneResultBase] = []
             for scene_id in PROMPT_SCENES:
                 adapter = _SCENE_ADAPTERS[scene_id]
+                scene_dossiers = dossiers_for_scene(dossiers, scene_id)
                 if scene_id in staged:
                     result = adapter.validate_python(staged[scene_id])
+                    if not scene_dossiers and result.should_generate:
+                        raise ProviderAnalysisError(
+                            "Staged scene result has no routed dossier",
+                            code="scene_dossier_invalid",
+                        )
                 else:
-                    prompt = self._prompt_from_snapshot(scene_id, prompts)
-                    request = self.composer.compose_scene(
-                        scene_id,
-                        transcript=transcript,
-                        event_map=event_map,
-                        profile=profile,
-                        prompt=prompt,
-                        schema=_SCENE_MODELS[scene_id].model_json_schema(),
-                    )
-                    await self._require_ownership(version.id, worker_owner_id)
-                    await self._require_generation(version, worker_owner_id)
-                    generated = await self.provider.analyze_scene(
-                        scene_id, request, provider_snapshot
-                    )
-                    await self._require_ownership(version.id, worker_owner_id)
-                    await self._require_generation(version, worker_owner_id)
-                    result = adapter.validate_python(
-                        generated.model_dump(mode="python")
-                        if hasattr(generated, "model_dump")
-                        else generated
-                    )
-                    validate_evidence_integrity(result, event_map, segment_ids)
+                    if not scene_dossiers:
+                        result = adapter.validate_python(
+                            {
+                                "scene_id": scene_id,
+                                "should_generate": False,
+                                "generation_reason": "no_selected_dossier",
+                                "confidence": 0,
+                                "cards": [],
+                                "todos": [],
+                            }
+                        )
+                    else:
+                        prompt = self._prompt_from_snapshot(scene_id, prompts)
+                        request = self.composer.compose_scene(
+                            scene_id,
+                            transcript=transcript,
+                            event_map=event_map,
+                            dossiers=scene_dossiers,
+                            profile=profile,
+                            prompt=prompt,
+                            schema=_SCENE_MODELS[scene_id].model_json_schema(),
+                        )
+                        await self._require_ownership(version.id, worker_owner_id)
+                        await self._require_generation(version, worker_owner_id)
+                        generated = await self.provider.analyze_scene(
+                            scene_id, request, provider_snapshot
+                        )
+                        await self._require_ownership(version.id, worker_owner_id)
+                        await self._require_generation(version, worker_owner_id)
+                        result = adapter.validate_python(
+                            generated.model_dump(mode="python")
+                            if hasattr(generated, "model_dump")
+                            else generated
+                        )
+                        validate_evidence_integrity(
+                            result,
+                            event_map,
+                            segment_ids,
+                            dossiers=scene_dossiers,
+                            segment_lookup=segment_lookup,
+                        )
                     staged[scene_id] = result.model_dump(mode="json")
                     await self._save_staged(version.id, staged, worker_owner_id)
-                validate_evidence_integrity(result, event_map, segment_ids)
+                if scene_dossiers:
+                    validate_evidence_integrity(
+                        result,
+                        event_map,
+                        segment_ids,
+                        dossiers=scene_dossiers,
+                        segment_lookup=segment_lookup,
+                    )
+                else:
+                    validate_evidence_integrity(result, event_map, segment_ids)
                 results.append(result)
 
             try:
@@ -345,6 +408,214 @@ class AnalysisRunner:
         version.event_map_json = serialized
         version.event_map_hash = sha256(serialized.encode("utf-8")).hexdigest()
         return event_map
+
+    async def _scene_context(
+        self,
+        version: AnalysisVersion,
+        transcript: list[dict[str, object]],
+        event_map: EventMap,
+        provider_snapshot: dict[str, object],
+        staged: dict[str, object],
+        worker_owner_id: str | None,
+    ) -> tuple[EventMap, list[SceneDossier]]:
+        segment_lookup = {
+            str(item["segment_id"]): item for item in transcript
+        }
+        stored_context = staged.get("_scene_context")
+        if stored_context is not None:
+            if not isinstance(stored_context, dict):
+                raise ProviderAnalysisError(
+                    "Stored scene context is invalid",
+                    code="scene_dossier_invalid",
+                )
+            raw_dossiers = stored_context.get("dossiers")
+            if not isinstance(raw_dossiers, list):
+                raise ProviderAnalysisError(
+                    "Stored scene dossiers are invalid",
+                    code="scene_dossier_invalid",
+                )
+            try:
+                dossiers = [
+                    SceneDossier.model_validate(item) for item in raw_dossiers
+                ]
+            except ValidationError as exc:
+                raise ProviderAnalysisError(
+                    "Stored scene dossiers violate the required schema",
+                    code="scene_dossier_invalid",
+                ) from exc
+            known_events = {event.event_id for event in event_map.events}
+            for dossier in dossiers:
+                if not set(dossier.allowed_segment_ids).issubset(segment_lookup):
+                    raise ProviderAnalysisError(
+                        "Stored scene dossier references unknown evidence",
+                        code="scene_dossier_invalid",
+                    )
+                if dossier.primary_event_id not in known_events or not set(
+                    dossier.source_event_ids
+                ).issubset(known_events):
+                    raise ProviderAnalysisError(
+                        "Stored scene dossier references unknown events",
+                        code="scene_dossier_invalid",
+                    )
+            return event_map, dossiers
+
+        clusters = build_transcript_clusters(transcript)
+        director_results: list[tuple[str, DirectorResult]] = []
+        for cluster in clusters:
+            request = self.composer.compose_director(
+                cluster=cluster,
+                event_hints=event_hints_for_cluster(
+                    cluster, event_map, segment_lookup
+                ),
+                schema=DirectorResult.model_json_schema(),
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            generated = await self.provider.analyze_director(
+                request, provider_snapshot
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            try:
+                validated = DirectorResult.model_validate(
+                    generated.model_dump(mode="python")
+                    if hasattr(generated, "model_dump")
+                    else generated
+                )
+            except ValidationError as exc:
+                raise ProviderAnalysisError(
+                    "Director output violates the required schema",
+                    code="director_schema_invalid",
+                ) from exc
+            director_results.append((cluster.cluster_id, validated))
+
+        try:
+            selections = normalize_director_results(
+                clusters=clusters,
+                event_map=event_map,
+                results=director_results,
+            )
+            anchored_map, anchored = attach_event_anchors(
+                selections=selections,
+                clusters=clusters,
+                event_map=event_map,
+                segment_lookup=segment_lookup,
+            )
+            dossiers = build_scene_dossiers(
+                selections=anchored,
+                clusters=clusters,
+            )
+        except (DirectorSelectionError, DossierBuildError, ValidationError) as exc:
+            raise ProviderAnalysisError(
+                "Director selection or scene dossier is invalid",
+                code=getattr(exc, "code", "director_selection_invalid"),
+            ) from exc
+
+        if not dossiers and self._requires_director_selection(transcript):
+            raise ProviderAnalysisError(
+                "Director returned no valuable selection for a large transcript",
+                code="analysis_quality_insufficient",
+            )
+
+        staged["_scene_context"] = {
+            "selections": [
+                {
+                    "selection": item.selection.model_dump(mode="json"),
+                    "primary_event_id": item.primary_event_id,
+                    "source_event_ids": list(item.source_event_ids),
+                }
+                for item in anchored
+            ],
+            "dossiers": [
+                dossier.model_dump(mode="json") for dossier in dossiers
+            ],
+        }
+        await self._save_scene_context(
+            version,
+            anchored_map,
+            staged,
+            worker_owner_id,
+        )
+        logger.info(
+            "scene_context_coverage clusters=%d selections=%d dossiers=%d "
+            "known=%d allowed_unique=%d",
+            len(clusters),
+            len(selections),
+            len(dossiers),
+            len(segment_lookup),
+            len(
+                {
+                    segment_id
+                    for dossier in dossiers
+                    for segment_id in dossier.allowed_segment_ids
+                }
+            ),
+        )
+        return anchored_map, dossiers
+
+    async def _save_scene_context(
+        self,
+        version: AnalysisVersion,
+        event_map: EventMap,
+        staged: dict[str, object],
+        worker_owner_id: str | None,
+    ) -> None:
+        serialized = json.dumps(
+            event_map.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        event_map_hash = sha256(serialized.encode("utf-8")).hexdigest()
+        staged_json = json.dumps(
+            staged, ensure_ascii=False, separators=(",", ":")
+        )
+        async with self.database.session() as session:
+            statement = (
+                update(AnalysisVersion)
+                .where(
+                    AnalysisVersion.id == version.id,
+                    AnalysisVersion.status == "running",
+                )
+                .values(
+                    event_map_json=serialized,
+                    event_map_hash=event_map_hash,
+                    staged_results_json=staged_json,
+                )
+            )
+            if worker_owner_id is not None:
+                statement = statement.where(
+                    AnalysisVersion.worker_owner_id == worker_owner_id
+                )
+            stored = await session.execute(statement)
+            if int(stored.rowcount) != 1:
+                await session.rollback()
+                raise LeaseLostError("Analysis worker lease was lost")
+            await session.commit()
+        version.event_map_json = serialized
+        version.event_map_hash = event_map_hash
+        version.staged_results_json = staged_json
+
+    @staticmethod
+    def _requires_director_selection(
+        transcript: list[dict[str, object]],
+    ) -> bool:
+        if sum(len(str(item.get("text", ""))) for item in transcript) >= 10_000:
+            return True
+        file_bounds: dict[str, tuple[int, int]] = {}
+        for item in transcript:
+            file_id = str(item["file_id"])
+            start_ms = int(item["start_ms"])
+            end_ms = int(item["end_ms"])
+            if file_id not in file_bounds:
+                file_bounds[file_id] = (start_ms, end_ms)
+            else:
+                earliest, latest = file_bounds[file_id]
+                file_bounds[file_id] = (
+                    min(earliest, start_ms),
+                    max(latest, end_ms),
+                )
+        return sum(end - start for start, end in file_bounds.values()) >= 7_200_000
 
     async def _transcript(self, job_id: str) -> list[dict[str, object]]:
         async with self.database.session() as session:

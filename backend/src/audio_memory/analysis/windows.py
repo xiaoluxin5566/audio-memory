@@ -315,7 +315,11 @@ def validate_analysis_quality(
         "news",
         "program",
     }
-    if any(event.event_type in valuable_event_types for event in event_map.events):
+    if any(
+        event.event_type in valuable_event_types
+        and not event.event_id.startswith("event_context_")
+        for event in event_map.events
+    ):
         raise AnalysisQualityError("valuable_events_all_empty")
     text_characters = sum(len(str(item.get("text", ""))) for item in transcript)
     if text_characters >= 10_000:

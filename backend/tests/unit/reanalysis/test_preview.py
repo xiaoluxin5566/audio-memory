@@ -165,11 +165,12 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert preview.source_batch_count == 3
     assert preview.audio_file_count == 7
     assert preview.transcript_character_count == 28
-    # Seven file-scoped evidence windows + six scene calls per source.
-    assert preview.estimated_calls_min == 25
-    # The upper bound includes one schema-repair attempt for every window,
-    # scene, and optional profile call.
-    assert preview.estimated_calls_max == 56
+    # Seven Event windows plus seven full-cluster director calls. Scenes are
+    # routed only after selection, so the minimum does not guess six calls.
+    assert preview.estimated_calls_min == 14
+    # The upper bound includes six routed scenes and one optional profile call
+    # per source, with one Schema-repair attempt for every logical call.
+    assert preview.estimated_calls_max == 70
     assert preview.whisper_calls == 0
     assert preview.diarization_calls == 0
     assert preview.provider_id == "kimi"
@@ -182,6 +183,27 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert set(preview.prompt_summary) == set(PROMPT_SCENES)
     assert preview.blockers == []
     await database.dispose()
+
+
+def test_fixed_rule_hashes_cover_director_schema_and_dossier_limits(
+    monkeypatch,
+) -> None:
+    from audio_memory.analysis import dossiers as dossier_module
+    from audio_memory.reanalysis.preview import current_fixed_rule_hashes
+
+    baseline = current_fixed_rule_hashes()
+
+    assert "director.md" in baseline
+    assert len(baseline["analysis_schemas"]) == 64
+    assert len(baseline["analysis_parameters"]) == 64
+    monkeypatch.setattr(
+        dossier_module,
+        "DOSSIER_MAX_SEGMENTS",
+        dossier_module.DOSSIER_MAX_SEGMENTS + 1,
+    )
+
+    changed = current_fixed_rule_hashes()
+    assert changed["analysis_parameters"] != baseline["analysis_parameters"]
 
 
 @pytest.mark.asyncio

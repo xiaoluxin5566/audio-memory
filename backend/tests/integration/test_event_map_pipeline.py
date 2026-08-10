@@ -33,6 +33,7 @@ from audio_memory.models import (
 )
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.schemas import SceneResultUnion
 from audio_memory.prompts.store import PROMPT_SCENES
 from pydantic import TypeAdapter
@@ -78,6 +79,28 @@ class RecordingProvider:
     async def analyze_event_map(self, request, provider_snapshot):
         self.calls.append("event-map")
         return event_map()
+
+    async def analyze_director(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        cluster_id = request.scene_id.split(":", 1)[1]
+        return DirectorResult.model_validate(
+            {
+                "selections": [
+                    {
+                        "selection_id": "selection_001",
+                        "cluster_ids": [cluster_id],
+                        "source_event_ids": [],
+                        "candidate_scenes": list(PROMPT_SCENES),
+                        "title": "Synthetic valuable scene",
+                        "selection_reason": "Synthetic evidence needs scene analysis.",
+                        "value_signals": ["cross_scene_connection"],
+                        "priority": "high",
+                        "context_before_clusters": 0,
+                        "context_after_clusters": 0,
+                    }
+                ]
+            }
+        )
 
     async def analyze_scene(self, scene_id, request, provider_snapshot):
         self.calls.append(scene_id)
@@ -213,6 +236,56 @@ class SpecificFailureProvider(RecordingProvider):
     async def analyze_event_map(self, request, provider_snapshot):
         raise ProviderAnalysisError(
             "schema invalid", code="event_map_schema_invalid"
+        )
+
+
+class FailingDirectorProvider(AssignedOnlyProvider):
+    async def analyze_director(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        raise ProviderAnalysisError(
+            "synthetic director failure", code="director_schema_invalid"
+        )
+
+
+def decode_packet(user_data: str, name: str) -> object:
+    opening = f"<untrusted_{name}>\n"
+    closing = f"\n</untrusted_{name}>"
+    start = user_data.index(opening) + len(opening)
+    end = user_data.index(closing, start)
+    return json.loads(user_data[start:end])
+
+
+class SelectiveDirectorProvider(AssignedOnlyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.director_segment_ids: list[str] = []
+
+    async def analyze_director(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        clusters = decode_packet(request.user_data, "transcript_clusters")
+        self.director_segment_ids.extend(
+            segment["segment_id"]
+            for cluster in clusters
+            for segment in cluster["segments"]
+        )
+        cluster_id = request.scene_id.split(":", 1)[1]
+        return DirectorResult.model_validate(
+            {
+                "selections": [
+                    {
+                        "selection_id": "selection_001",
+                        "cluster_ids": [cluster_id],
+                        "source_event_ids": [],
+                        "candidate_scenes": ["meeting", "todo"],
+                        "title": "Synthetic work communication",
+                        "selection_reason": "Contains an assigned fact and adjacent context.",
+                        "value_signals": ["follow_up_needed"],
+                        "priority": "high",
+                        "context_before_clusters": 0,
+                        "context_after_clusters": 0,
+                    }
+                ]
+            }
         )
 
 
@@ -549,11 +622,15 @@ async def test_runner_builds_and_merges_one_event_map_per_analysis_window(
 
     await runner.run("version-1")
 
-    assert provider.calls == [
+    assert provider.calls[:2] == [
         "event-map:window_0000",
         "event-map:window_0001",
-        *PROMPT_SCENES,
     ]
+    assert len(provider.calls[2:4]) == 2
+    assert all(
+        call.startswith("director:cluster_") for call in provider.calls[2:4]
+    )
+    assert provider.calls[4:] == list(PROMPT_SCENES)
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
     assert version is not None and version.event_map_json is not None
@@ -564,6 +641,96 @@ async def test_runner_builds_and_merges_one_event_map_per_analysis_window(
     ]
     assert merged.unassigned_segment_ids == []
     assert publisher.results is not None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_director_reads_all_segments_and_calls_only_routed_scenes(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "director-routing.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        session.add(
+            Transcript(
+                id="transcript-2",
+                job_file_id="file-1",
+                segment_index=1,
+                segment_uid="file-1:1",
+                speaker_id="unknown",
+                start_ms=1_100,
+                end_ms=2_000,
+                text="Synthetic context omitted by Event Map",
+                words_json="[]",
+                risk_classified=True,
+            )
+        )
+        await session.commit()
+    provider = SelectiveDirectorProvider()
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    await runner.run("version-1")
+
+    assert provider.director_segment_ids == ["seg_0_0", "seg_0_1"]
+    assert [call for call in provider.calls if call in PROMPT_SCENES] == [
+        "todo",
+        "meeting",
+    ]
+    assert publisher.results is not None
+    assert [result.scene_id for result in publisher.results] == list(PROMPT_SCENES)
+    assert all(
+        result.generation_reason == "no_selected_dossier"
+        for result in publisher.results
+        if result.scene_id not in {"todo", "meeting"}
+    )
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None
+    staged = json.loads(version.staged_results_json)
+    context = staged["_scene_context"]
+    assert len(context["dossiers"]) == 1
+    assert context["dossiers"][0]["allowed_segment_ids"] == [
+        "seg_0_0",
+        "seg_0_1",
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_director_failure_leaves_no_context_or_supplemental_anchor(tmp_path) -> None:
+    database = Database(tmp_path / "director-failure.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    provider = FailingDirectorProvider()
+    runner = AnalysisRunner(
+        database=database,
+        provider=provider,
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1")
+
+    assert raised.value.code == "director_schema_invalid"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    assert version is not None and version.event_map_json is not None
+    stored_map = EventMap.model_validate_json(version.event_map_json)
+    assert all(
+        not event.event_id.startswith("event_context_")
+        for event in stored_map.events
+    )
+    assert "_scene_context" not in json.loads(version.staged_results_json)
     await database.dispose()
 
 
@@ -717,7 +884,10 @@ async def test_runner_rejects_undersegmented_empty_long_audio_before_publication
         job = await session.get(AnalysisJob, "job-1")
     assert version is not None
     assert version.error_code == "analysis_quality_insufficient"
-    assert set(json.loads(version.staged_results_json)) == set(PROMPT_SCENES)
+    assert set(json.loads(version.staged_results_json)) == {
+        "_scene_context",
+        *PROMPT_SCENES,
+    }
     assert job is not None and job.error_code == "analysis_quality_insufficient"
     await database.dispose()
 
@@ -797,10 +967,15 @@ async def test_runner_checkpoints_event_map_and_each_scene_then_resumes(tmp_path
         version = await session.get(AnalysisVersion, "version-1")
         assert version is not None
         checkpoint = EventMap.model_validate_json(version.event_map_json or "null")
-        assert checkpoint.events == []
-        assert checkpoint.unassigned_segment_ids == ["seg_0_0"]
+        assert len(checkpoint.events) == 1
+        assert checkpoint.events[0].event_id.startswith("event_context_")
+        assert checkpoint.unassigned_segment_ids == []
         assert checkpoint.user_speaker.speaker_id is None
-        assert list(json.loads(version.staged_results_json)) == ["todo", "meeting"]
+        assert list(json.loads(version.staged_results_json)) == [
+            "_scene_context",
+            "todo",
+            "meeting",
+        ]
         version.status = "running"
         version.error_code = None
         await session.commit()

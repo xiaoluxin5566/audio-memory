@@ -6,6 +6,8 @@ from html import escape
 from hashlib import sha256
 from importlib.resources import files
 
+from audio_memory.analysis import dossiers as dossier_policy
+from audio_memory.analysis import windows as analysis_windows
 from audio_memory.analysis.clusters import TranscriptCluster
 from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
 from audio_memory.prompts.event_schema import EventMap
@@ -59,20 +61,39 @@ class ModelRequest:
 
 
 class PromptComposer:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     @classmethod
     def fixed_rules_hash(cls) -> str:
-        fixed = "\n\n".join(
-            cls._fixed_prompt(name)
-            for name in (
-                "system.md",
-                "event-map.md",
-                "director.md",
-                "common-scene.md",
-            )
+        payload = {
+            "prompts": {
+                name: cls._fixed_prompt(name)
+                for name in (
+                    "system.md",
+                    "event-map.md",
+                    "director.md",
+                    "common-scene.md",
+                )
+            },
+            "schema_version": cls.SCHEMA_VERSION,
+            "cluster_policy": {
+                "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
+                "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
+                "max_segments": analysis_windows.ANALYSIS_WINDOW_MAX_SEGMENTS,
+            },
+            "dossier_policy": {
+                "max_span_ms": dossier_policy.DOSSIER_MAX_SPAN_MS,
+                "max_segments": dossier_policy.DOSSIER_MAX_SEGMENTS,
+                "adjacent_clusters_per_side": 1,
+            },
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        return sha256(fixed.encode("utf-8")).hexdigest()
+        return sha256(canonical.encode("utf-8")).hexdigest()
 
     def compose_event_map(
         self,

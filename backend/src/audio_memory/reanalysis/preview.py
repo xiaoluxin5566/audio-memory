@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from audio_memory.analysis import dossiers as dossier_policy
+from audio_memory.analysis import windows as analysis_windows
 from audio_memory.analysis.windows import build_analysis_windows
 from audio_memory.db import Database
 from audio_memory.models import (
@@ -20,7 +22,8 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
-from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.director_schema import DirectorResult
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.prompts.schemas import (
     ContentSceneResult,
     GrowthSceneResult,
@@ -66,7 +69,7 @@ def current_fixed_rule_hashes() -> dict[str, str]:
         name: hashlib.sha256(
             PromptComposer._fixed_prompt(name).encode("utf-8")
         ).hexdigest()
-        for name in ("system.md", "event-map.md", "common-scene.md")
+        for name in ("system.md", "event-map.md", "director.md", "common-scene.md")
     }
     hashes["schema_version"] = canonical_hash(
         {"schema_version": PromptComposer.SCHEMA_VERSION}
@@ -74,12 +77,28 @@ def current_fixed_rule_hashes() -> dict[str, str]:
     hashes["analysis_schemas"] = canonical_hash(
         {
             "event_map": EventMap.model_json_schema(),
+            "event_map_draft": EventMapDraft.model_json_schema(),
+            "director": DirectorResult.model_json_schema(),
             "todo": TodoSceneResult.model_json_schema(),
             "meeting": MeetingSceneResult.model_json_schema(),
             "parenting": ParentingSceneResult.model_json_schema(),
             "content": ContentSceneResult.model_json_schema(),
             "growth": GrowthSceneResult.model_json_schema(),
             "inspiration": InspirationSceneResult.model_json_schema(),
+        }
+    )
+    hashes["analysis_parameters"] = canonical_hash(
+        {
+            "clusters": {
+                "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
+                "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
+                "max_segments": analysis_windows.ANALYSIS_WINDOW_MAX_SEGMENTS,
+            },
+            "dossiers": {
+                "max_span_ms": dossier_policy.DOSSIER_MAX_SPAN_MS,
+                "max_segments": dossier_policy.DOSSIER_MAX_SEGMENTS,
+                "adjacent_clusters_per_side": 1,
+            },
         }
     )
     return hashes
@@ -222,8 +241,10 @@ class ReanalysisPreviewBuilder:
             source_batch_count=source_count,
             audio_file_count=audio_count,
             transcript_character_count=character_count,
-            estimated_calls_min=analysis_window_count + source_count * 6,
-            estimated_calls_max=2 * (analysis_window_count + source_count * 7),
+            estimated_calls_min=analysis_window_count * 2,
+            estimated_calls_max=2 * (
+                analysis_window_count * 2 + source_count * 7
+            ),
         )
         snapshot_hash = canonical_hash(snapshot.canonical_payload())
         token, expires_at = self.signer.sign(snapshot, snapshot_hash)
