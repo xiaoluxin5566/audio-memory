@@ -352,22 +352,23 @@ class ObjectiveWorkProvider(RecordingProvider):
                         },
                         "confidence": 0.9,
                         "detail": {
-                            "event_id": "event_w0000_001",
-                            "topic": "产品范围",
-                            "start_ms": 0,
-                            "end_ms": 1_000,
-                            "background": "一段客观工作沟通。",
+                            "event_ids": ["event_w0000_001"],
+                            "analysis_angle": "产品范围如何被确认",
+                            "context_summary": "一段客观工作沟通中，参与者讨论了一项产品范围。",
                             "participants": [],
-                            "core_conclusions": [
+                            "key_facts": [
                                 {
-                                    "content": "参与者讨论了一项产品范围。",
+                                    "event_ids": ["event_w0000_001"],
                                     "evidence_segment_ids": ["seg_0_0"],
+                                    "fact": "参与者讨论了一项产品范围。",
+                                    "interpretation": None,
                                 }
                             ],
-                            "decisions": [],
-                            "open_questions": [],
-                            "meeting_todos": [],
-                            "discussion_topics": [],
+                            "quote_analyses": [],
+                            "arguments": [],
+                            "recommendations": [],
+                            "sections": [],
+                            "uncertainties": [],
                         },
                     }
                 ],
@@ -388,7 +389,7 @@ class RepairsMeetingEvidenceProvider(ObjectiveWorkProvider):
             return result
         self.meeting_requests.append(request)
         if len(self.meeting_requests) == 1 or not self.repair_succeeds:
-            result.cards[0].detail.core_conclusions[0].evidence_segment_ids = [
+            result.cards[0].detail.key_facts[0].evidence_segment_ids = [
                 "seg_missing"
             ]
         return result
@@ -867,7 +868,7 @@ async def test_runner_retries_invalid_scene_evidence_once(tmp_path) -> None:
     meeting = next(
         result for result in publisher.results if result.scene_id == "meeting"
     )
-    assert meeting.cards[0].detail.core_conclusions[0].evidence_segment_ids == [
+    assert meeting.cards[0].detail.key_facts[0].evidence_segment_ids == [
         "seg_0_0"
     ]
     await database.dispose()

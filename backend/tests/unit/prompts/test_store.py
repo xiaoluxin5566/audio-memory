@@ -5,6 +5,7 @@ import json
 import pytest
 
 from audio_memory.prompts.store import (
+    KNOWN_LEGACY_DEFAULT_HASHES,
     PROMPT_SCENES,
     PromptConflictError,
     PromptStore,
@@ -106,7 +107,7 @@ def test_new_install_records_packaged_default_provenance(tmp_path: Path) -> None
     assert document.version == 1
     assert metadata == {
         "version": 1,
-        "packaged_default_version": 3,
+        "packaged_default_version": 4,
         "current_source": "packaged",
     }
 
@@ -129,7 +130,7 @@ def test_untouched_known_legacy_default_is_archived_then_upgraded(tmp_path: Path
     assert archives[0].read_text() == legacy
     assert metadata == {
         "version": 5,
-        "packaged_default_version": 3,
+        "packaged_default_version": 4,
         "current_source": "packaged",
     }
 
@@ -148,7 +149,7 @@ def test_user_edited_legacy_prompt_is_preserved_byte_for_byte(tmp_path: Path) ->
     assert list((tmp_path / "meeting" / "versions").iterdir()) == []
     assert metadata == {
         "version": 7,
-        "packaged_default_version": 3,
+        "packaged_default_version": 4,
         "current_source": "user",
     }
 
@@ -194,6 +195,13 @@ def test_packaged_meeting_v2_upgrades_once_without_touching_user_edits(
     assert archives[0].read_text() == PACKAGED_MEETING_V2
     assert metadata == {
         "version": 9,
-        "packaged_default_version": 3,
+        "packaged_default_version": 4,
         "current_source": "packaged",
     }
+
+
+def test_packaged_meeting_v3_is_recognized_for_one_time_v4_upgrade() -> None:
+    assert (
+        "8e1cf25d9ce1dc777cccf10605914c7c4f4f6a343d8619d8b077420f72c9b6ea"
+        in KNOWN_LEGACY_DEFAULT_HASHES["meeting"]
+    )
