@@ -7,6 +7,7 @@ from hashlib import sha256
 from importlib.resources import files
 
 from audio_memory.analysis.clusters import TranscriptCluster
+from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
@@ -138,6 +139,7 @@ class PromptComposer:
         *,
         transcript: list[dict[str, object]],
         event_map: EventMap,
+        dossiers: list[SceneDossier] | None = None,
         profile: list[dict[str, object]],
         prompt: PromptDocument,
         schema: dict[str, object],
@@ -145,10 +147,25 @@ class PromptComposer:
         if scene_id not in PROMPT_SCENES or prompt.scene_id != scene_id:
             raise ValueError("Prompt scene does not match request scene")
         policy = MODEL_REQUEST_POLICIES["scene"]
-        scene_transcript = self._scene_transcript(transcript, event_map)
-        assigned_segment_count = sum(
-            len(event["segments"]) for event in scene_transcript["events"]
-        )
+        if dossiers is None:
+            scene_transcript = self._scene_transcript(transcript, event_map)
+            event_packet = event_map.model_dump(mode="json")
+            assigned_segment_count = sum(
+                len(event["segments"]) for event in scene_transcript["events"]
+            )
+        else:
+            routed_dossiers = dossiers_for_scene(dossiers, scene_id)
+            if not routed_dossiers:
+                raise ValueError("scene request requires at least one routed dossier")
+            scene_transcript = self._scene_dossiers(transcript, routed_dossiers)
+            event_packet = self._event_map_without_compatibility(event_map)
+            assigned_segment_count = len(
+                {
+                    segment_id
+                    for dossier in routed_dossiers
+                    for segment_id in dossier.allowed_segment_ids
+                }
+            )
         return ModelRequest(
             scene_id=scene_id,
             prompt_version=prompt.version,
@@ -160,7 +177,7 @@ class PromptComposer:
                 [
                     self._untrusted_packet("transcript_data", scene_transcript),
                     self._untrusted_packet(
-                        "event_map", event_map.model_dump(mode="json")
+                        "event_map", event_packet
                     ),
                     self._untrusted_packet("profile_data", profile),
                 ]
@@ -259,6 +276,40 @@ class PromptComposer:
                 }
             )
         return {"events": events}
+
+    @staticmethod
+    def _scene_dossiers(
+        transcript: list[dict[str, object]],
+        dossiers: list[SceneDossier],
+    ) -> dict[str, list[dict[str, object]]]:
+        segments = {str(item["segment_id"]): item for item in transcript}
+        projected: list[dict[str, object]] = []
+        for dossier in dossiers:
+            projected_segments: list[dict[str, object]] = []
+            for segment_id in dossier.allowed_segment_ids:
+                item = segments.get(segment_id)
+                if item is None:
+                    raise ValueError("Dossier references unavailable transcript evidence")
+                projected_segments.append(
+                    {
+                        "id": segment_id,
+                        "start_ms": item["start_ms"],
+                        "end_ms": item["end_ms"],
+                        "speaker_id": item["speaker_id"],
+                        "text": item["text"],
+                    }
+                )
+            metadata = dossier.model_dump(mode="json")
+            metadata["segments"] = projected_segments
+            projected.append(metadata)
+        return {"dossiers": projected}
+
+    @staticmethod
+    def _event_map_without_compatibility(event_map: EventMap) -> dict[str, object]:
+        return {
+            "user_speaker": event_map.user_speaker.model_dump(mode="json"),
+            "events": [event.model_dump(mode="json") for event in event_map.events],
+        }
 
     @staticmethod
     def _untrusted_packet(name: str, payload: object) -> str:

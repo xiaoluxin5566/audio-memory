@@ -541,7 +541,9 @@ def test_real_provider_path_uses_injected_keychain_and_mock_transport_only(
     case = evaluator._EvaluationCase.model_validate(payload["cases"][0])
     responses = iter(
         [
-            case.event_map.model_dump(mode="json"),
+            case.event_map.model_dump(
+                mode="json", exclude={"unassigned_segment_ids"}
+            ),
             *[
                 result.model_dump(mode="json")
                 for result in case.scene_results

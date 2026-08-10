@@ -5,8 +5,10 @@ import json
 import pytest
 
 from audio_memory.analysis.clusters import build_transcript_clusters
+from audio_memory.analysis.director import AnchoredSelection
+from audio_memory.analysis.dossiers import build_scene_dossiers
 from audio_memory.prompts.composer import PromptComposer
-from audio_memory.prompts.director_schema import DirectorResult
+from audio_memory.prompts.director_schema import DirectorResult, DirectorSelection
 from audio_memory.prompts.event_schema import Event, EventMap, UserSpeaker
 from audio_memory.prompts.store import PromptDocument
 
@@ -226,6 +228,92 @@ def test_director_rules_participate_in_fixed_rules_hash(monkeypatch) -> None:
     )
 
     assert PromptComposer.fixed_rules_hash() != baseline
+
+
+def sample_dossier(transcript: list[dict[str, object]]):
+    cluster = build_transcript_clusters(transcript)[0]
+    selection = DirectorSelection.model_validate(
+        {
+            "selection_id": "selection_1234567890abcdefabcd",
+            "cluster_ids": [cluster.cluster_id],
+            "source_event_ids": ["event_001"],
+            "candidate_scenes": ["meeting", "todo"],
+            "title": "评审一期范围",
+            "selection_reason": "讨论包含明确范围和行动。",
+            "value_signals": ["explicit_decision", "follow_up_needed"],
+            "priority": "high",
+            "context_before_clusters": 0,
+            "context_after_clusters": 0,
+        }
+    )
+    return build_scene_dossiers(
+        selections=[AnchoredSelection(selection, "event_001", ("event_001",))],
+        clusters=[cluster],
+    )[0]
+
+
+def test_scene_composition_uses_dossier_allowed_unassigned_segments() -> None:
+    transcript = transcript_with_injection()
+    transcript.append(
+        {
+            **transcript[0],
+            "segment_id": "seg_002",
+            "start_ms": 10_001,
+            "end_ms": 12_000,
+            "speaker_id": "speaker_B",
+            "text": "Event did not assign this bounded context",
+        }
+    )
+    event_map = sample_event_map().model_copy(
+        update={"unassigned_segment_ids": ["seg_002"]}
+    )
+    dossier = sample_dossier(transcript)
+
+    request = PromptComposer().compose_scene(
+        "meeting",
+        transcript=transcript,
+        event_map=event_map,
+        dossiers=[dossier],
+        profile=[],
+        prompt=PromptDocument("meeting", 1, "关注完整讨论"),
+        schema=strict_schema(),
+    )
+
+    projected = decode_untrusted_packet(request.user_data, "transcript_data")
+    assert projected["dossiers"][0]["dossier_id"] == dossier.dossier_id
+    assert [
+        item["id"] for item in projected["dossiers"][0]["segments"]
+    ] == ["seg_001", "seg_002"]
+    assert "Event did not assign this bounded context" in request.user_data
+    assert "unassigned_segment_ids" not in request.user_data
+    assert request.segment_count == 2
+
+
+def test_scene_composition_rejects_empty_or_unrouted_dossiers() -> None:
+    transcript = transcript_with_injection()
+    dossier = sample_dossier(transcript)
+    composer = PromptComposer()
+
+    with pytest.raises(ValueError, match="dossier"):
+        composer.compose_scene(
+            "meeting",
+            transcript=transcript,
+            event_map=sample_event_map(),
+            dossiers=[],
+            profile=[],
+            prompt=PromptDocument("meeting", 1, "关注完整讨论"),
+            schema=strict_schema(),
+        )
+    with pytest.raises(ValueError, match="dossier"):
+        composer.compose_scene(
+            "content",
+            transcript=transcript,
+            event_map=sample_event_map(),
+            dossiers=[dossier],
+            profile=[],
+            prompt=PromptDocument("content", 1, "关注内容"),
+            schema={"type": "object"},
+        )
 
 
 def test_scene_composition_uses_frozen_output_bound_and_timeout() -> None:
