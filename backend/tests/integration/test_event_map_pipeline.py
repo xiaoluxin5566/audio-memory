@@ -154,6 +154,56 @@ class InvalidOutputProvider(RecordingProvider):
         raise SceneOutputError("second response still violates schema")
 
 
+def assigned_event_map(*, evidence_id: str) -> EventMap:
+    return EventMap.model_validate(
+        {
+            "user_speaker": {
+                "speaker_id": None,
+                "confidence": 0,
+                "reasoning": "无法可靠识别用户",
+                "evidence_segment_ids": [],
+            },
+            "events": [
+                {
+                    "event_id": "event_001",
+                    "parent_event_id": None,
+                    "event_type": "conversation",
+                    "title": "普通讨论",
+                    "start_ms": 0,
+                    "end_ms": 1_000,
+                    "speaker_ids": ["unknown"],
+                    "user_role": None,
+                    "user_role_confidence": 0,
+                    "factual_summary": "发生了一段普通讨论。",
+                    "topics": ["普通讨论"],
+                    "candidate_scenes": [],
+                    "evidence_segment_ids": [evidence_id],
+                    "boundary_confidence": 0.8,
+                    "local_date": None,
+                    "timezone": None,
+                }
+            ],
+        }
+    )
+
+
+class AssignedOnlyProvider(RecordingProvider):
+    def __init__(self, evidence_id: str = "seg_0_0") -> None:
+        super().__init__()
+        self.evidence_id = evidence_id
+
+    async def analyze_event_map(self, request, provider_snapshot):
+        self.calls.append("event-map")
+        return assigned_event_map(evidence_id=self.evidence_id)
+
+
+class SpecificFailureProvider(RecordingProvider):
+    async def analyze_event_map(self, request, provider_snapshot):
+        raise ProviderAnalysisError(
+            "schema invalid", code="event_map_schema_invalid"
+        )
+
+
 class ChangesAfterProviderFailure(StableGeneration):
     def __init__(self) -> None:
         self.calls = 0
@@ -310,6 +360,109 @@ async def seed_version(
                 )
             )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_runner_completes_unassigned_segment_ids_before_checkpoint(tmp_path) -> None:
+    database = Database(tmp_path / "local-coverage.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    async with database.session() as session:
+        session.add(
+            Transcript(
+                id="transcript-2",
+                job_file_id="file-1",
+                segment_index=1,
+                segment_uid="file-1:1",
+                speaker_id="unknown",
+                start_ms=1_000,
+                end_ms=2_000,
+                text="第二段普通转写内容",
+                words_json="[]",
+                risk_classified=True,
+            )
+        )
+        await session.commit()
+    runner = AnalysisRunner(
+        database=database,
+        provider=AssignedOnlyProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+    version = await runner._version("version-1", None)
+    transcript = await runner._transcript("job-1")
+
+    completed = await runner._event_map(
+        version,
+        transcript,
+        [],
+        {"provider_id": "kimi", "model_id": "kimi-k2.5"},
+        None,
+    )
+
+    assert completed.unassigned_segment_ids == ["seg_0_1"]
+    async with database.session() as session:
+        stored = await session.get(AnalysisVersion, "version-1")
+    assert stored is not None
+    assert EventMap.model_validate_json(stored.event_map_json).unassigned_segment_ids == [
+        "seg_0_1"
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_unknown_event_evidence_without_checkpoint(tmp_path) -> None:
+    database = Database(tmp_path / "unknown-coverage.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    publisher = RecordingPublisher()
+    runner = AnalysisRunner(
+        database=database,
+        provider=AssignedOnlyProvider("seg_missing"),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=publisher,
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1")
+
+    assert raised.value.code == "event_map_unknown_segment"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert version is not None and version.error_code == "event_map_unknown_segment"
+    assert version.event_map_json is None
+    assert json.loads(version.staged_results_json) == {}
+    assert job is not None and job.error_code == "event_map_unknown_segment"
+    assert publisher.results is None
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_specific_event_map_schema_error(tmp_path) -> None:
+    database = Database(tmp_path / "schema-error.sqlite3")
+    await database.create_schema()
+    await seed_version(database, tmp_path)
+    runner = AnalysisRunner(
+        database=database,
+        provider=SpecificFailureProvider(),
+        profile_extractor=EmptyProfileExtractor(),
+        publisher=RecordingPublisher(),
+        generation_source=StableGeneration(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1")
+
+    assert raised.value.code == "event_map_schema_invalid"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        job = await session.get(AnalysisJob, "job-1")
+    assert version is not None and version.error_code == "event_map_schema_invalid"
+    assert job is not None and job.error_code == "event_map_schema_invalid"
+    await database.dispose()
 
 
 @pytest.mark.asyncio

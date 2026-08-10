@@ -83,7 +83,9 @@ class PromptComposer:
             scene_prompt="",
             user_data="\n".join(
                 [
-                    self._untrusted_packet("transcript_data", transcript),
+                    self._untrusted_packet(
+                        "transcript_data", self._event_map_transcript(transcript)
+                    ),
                     self._untrusted_packet("profile_data", profile),
                 ]
             ),
@@ -135,6 +137,32 @@ class PromptComposer:
     @staticmethod
     def _schema_json(schema: dict[str, object]) -> str:
         return json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _event_map_transcript(
+        transcript: list[dict[str, object]],
+    ) -> dict[str, list[dict[str, object]]]:
+        files_by_id: dict[str, dict[str, object]] = {}
+        segments: list[dict[str, object]] = []
+        for item in transcript:
+            file_id = str(item["file_id"])
+            if file_id not in files_by_id:
+                files_by_id[file_id] = {
+                    "id": file_id,
+                    "name": item["file_name"],
+                    "recording_started_at": item.get("recording_started_at"),
+                    "local_date": item.get("local_date"),
+                    "timezone": item.get("timezone"),
+                }
+            segments.append(
+                {
+                    "id": str(item["segment_id"]),
+                    "start_ms": item["start_ms"],
+                    "end_ms": item["end_ms"],
+                    "text": item["text"],
+                }
+            )
+        return {"files": list(files_by_id.values()), "segments": segments}
 
     @staticmethod
     def _untrusted_packet(name: str, payload: object) -> str:

@@ -6,7 +6,7 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, select, update
 
 from audio_memory.analysis.profile import validate_profile_delta
@@ -233,23 +233,46 @@ class AnalysisRunner:
         generated = await self.provider.analyze_event_map(request, provider_snapshot)
         await self._require_ownership(version.id, worker_owner_id)
         await self._require_generation(version, worker_owner_id)
-        event_map = EventMap.model_validate(
+        raw_event_map = (
             generated.model_dump(mode="python")
             if hasattr(generated, "model_dump")
             else generated
         )
+        try:
+            event_map = EventMap.model_validate(raw_event_map)
+        except ValidationError as exc:
+            raise ProviderAnalysisError(
+                "Event map violates the required schema",
+                code="event_map_schema_invalid",
+            ) from exc
         transcript_ids = {str(item["segment_id"]) for item in transcript}
-        covered = {
+        assigned = {
             segment_id
             for event in event_map.events
             for segment_id in event.evidence_segment_ids
-        } | set(event_map.unassigned_segment_ids)
-        unknown = covered - transcript_ids
-        missing = transcript_ids - covered
-        if unknown or missing:
-            raise ValueError(
-                f"Event map coverage mismatch; unknown={sorted(unknown)}, "
-                f"missing={sorted(missing)}"
+        }
+        referenced = assigned | set(event_map.user_speaker.evidence_segment_ids)
+        if referenced - transcript_ids:
+            raise ProviderAnalysisError(
+                "Event map references unknown transcript evidence",
+                code="event_map_unknown_segment",
+            )
+        completed_payload = event_map.model_dump(mode="python")
+        completed_payload["unassigned_segment_ids"] = sorted(
+            transcript_ids - assigned
+        )
+        try:
+            event_map = EventMap.model_validate(completed_payload)
+        except ValidationError as exc:
+            raise ProviderAnalysisError(
+                "Event map coverage is invalid",
+                code="event_map_coverage_invalid",
+            ) from exc
+        covered = assigned | set(event_map.unassigned_segment_ids)
+        if covered != transcript_ids:
+            raise ProviderAnalysisError(
+                "Event map coverage is incomplete",
+                code="event_map_coverage_invalid",
             )
         serialized = json.dumps(
             event_map.model_dump(mode="json"),

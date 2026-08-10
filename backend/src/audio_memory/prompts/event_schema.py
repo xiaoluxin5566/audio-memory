@@ -123,7 +123,7 @@ class Event(StrictModel):
 class EventMap(StrictModel):
     user_speaker: UserSpeaker
     events: list[Event]
-    unassigned_segment_ids: list[str]
+    unassigned_segment_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_event_graph(self) -> EventMap:

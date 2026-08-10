@@ -11,6 +11,22 @@ from audio_memory.prompts.event_schema import (
 )
 
 
+def test_event_map_allows_model_to_omit_server_owned_unassigned_ids() -> None:
+    event_map = EventMap.model_validate(
+        {
+            "user_speaker": {
+                "speaker_id": None,
+                "confidence": 0,
+                "reasoning": "无法判断",
+                "evidence_segment_ids": [],
+            },
+            "events": [],
+        }
+    )
+
+    assert event_map.unassigned_segment_ids == []
+
+
 def event(
     event_id: str,
     *,
