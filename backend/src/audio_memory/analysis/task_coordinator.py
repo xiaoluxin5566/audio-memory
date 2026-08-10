@@ -440,6 +440,9 @@ class AnalysisTaskCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # AnalysisRunner normally persists its typed failure first. This
+                # fenced fallback only handles exceptions that leave the version
+                # running, so it cannot overwrite a concrete runner error code.
                 async with self.database.session() as session:
                     await session.execute(
                         update(AnalysisVersion)

@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
 
+from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
 from audio_memory.prompts.store import PROMPT_SCENES
@@ -276,12 +277,10 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    retryable_errors = {
-        "model_analysis_failed",
-        "credential_changed",
-        "fixed_rules_changed",
-    }
-    if job.stage != JobStage.FAILED.value or job.error_code not in retryable_errors:
+    if (
+        job.stage != JobStage.FAILED.value
+        or job.error_code not in ANALYSIS_RETRYABLE_ERROR_CODES
+    ):
         raise HTTPException(
             status_code=409,
             detail="Only a failed model analysis can be retried",

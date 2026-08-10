@@ -49,7 +49,7 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   expect(resumed).toBe(true)
 })
 
-for (const errorCode of ['credential_changed', 'fixed_rules_changed']) {
+for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment']) {
   test(`a failed ${errorCode} analysis retries without returning to Whisper`, async ({ page }) => {
     let retried = false
     await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
@@ -84,6 +84,7 @@ for (const errorCode of ['credential_changed', 'fixed_rules_changed']) {
 
     await page.goto('/')
     await expect(page.getByText('模型分析失败')).toBeVisible()
+    await expect(page.getByText(errorCode, { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '重新分析', exact: true }).click()
     await expect(page.getByText('模型正在分析内容')).toBeVisible()
     await expect(page.getByText('本地 Whisper 转写中')).toHaveCount(0)
