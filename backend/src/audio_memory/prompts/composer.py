@@ -6,6 +6,7 @@ from html import escape
 from hashlib import sha256
 from importlib.resources import files
 
+from audio_memory.analysis.clusters import TranscriptCluster
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
@@ -18,6 +19,7 @@ class ModelRequestPolicy:
 
 MODEL_REQUEST_POLICIES = {
     "event-map": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=180),
+    "director": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=120),
     "scene": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=120),
     "profile": ModelRequestPolicy(max_tokens=8_192, timeout_seconds=120),
 }
@@ -62,7 +64,12 @@ class PromptComposer:
     def fixed_rules_hash(cls) -> str:
         fixed = "\n\n".join(
             cls._fixed_prompt(name)
-            for name in ("system.md", "event-map.md", "common-scene.md")
+            for name in (
+                "system.md",
+                "event-map.md",
+                "director.md",
+                "common-scene.md",
+            )
         )
         return sha256(fixed.encode("utf-8")).hexdigest()
 
@@ -94,6 +101,35 @@ class PromptComposer:
             max_tokens=policy.max_tokens,
             timeout_seconds=policy.timeout_seconds,
             segment_count=len(transcript),
+        )
+
+    def compose_director(
+        self,
+        *,
+        cluster: TranscriptCluster,
+        event_hints: list[dict[str, object]],
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["director"]
+        return ModelRequest(
+            scene_id=f"director:{cluster.cluster_id}",
+            prompt_version=0,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._fixed_prompt("system.md"),
+            common_rules=self._fixed_prompt("director.md"),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet(
+                        "transcript_clusters", [self._director_cluster(cluster)]
+                    ),
+                    self._untrusted_packet("event_hints", event_hints),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(cluster.segments),
         )
 
     def compose_scene(
@@ -168,6 +204,26 @@ class PromptComposer:
                 }
             )
         return {"files": list(files_by_id.values()), "segments": segments}
+
+    @staticmethod
+    def _director_cluster(cluster: TranscriptCluster) -> dict[str, object]:
+        return {
+            "cluster_id": cluster.cluster_id,
+            "file_id": cluster.file_id,
+            "file_name": cluster.file_name,
+            "start_ms": cluster.start_ms,
+            "end_ms": cluster.end_ms,
+            "segments": [
+                {
+                    "segment_id": str(item["segment_id"]),
+                    "start_ms": item["start_ms"],
+                    "end_ms": item["end_ms"],
+                    "speaker_id": item["speaker_id"],
+                    "text": item["text"],
+                }
+                for item in cluster.segments
+            ],
+        }
 
     @staticmethod
     def _scene_transcript(

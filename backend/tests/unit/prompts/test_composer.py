@@ -4,7 +4,9 @@ import json
 
 import pytest
 
+from audio_memory.analysis.clusters import build_transcript_clusters
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.event_schema import Event, EventMap, UserSpeaker
 from audio_memory.prompts.store import PromptDocument
 
@@ -150,6 +152,80 @@ def test_local_event_map_composition_exposes_safe_window_diagnostic_id() -> None
     assert request.segment_count == 1
     assert [item["id"] for item in projected["segments"]] == ["seg_001"]
     assert projected["segments"][0]["text"] == transcript_with_injection()[0]["text"]
+
+
+def test_director_composition_sends_complete_cluster_and_event_hints() -> None:
+    cluster = build_transcript_clusters(transcript_with_injection())[0]
+    hints = [
+        {
+            "event_id": "event_001",
+            "event_type": "meeting",
+            "title": "评审一期范围",
+            "factual_summary": "团队评审一期范围。",
+            "start_ms": 0,
+            "end_ms": 10_000,
+            "candidate_scenes": ["meeting", "todo"],
+        }
+    ]
+
+    request = PromptComposer().compose_director(
+        cluster=cluster,
+        event_hints=hints,
+        schema=DirectorResult.model_json_schema(),
+    )
+
+    projected_clusters = decode_untrusted_packet(
+        request.user_data, "transcript_clusters"
+    )
+    projected_hints = decode_untrusted_packet(request.user_data, "event_hints")
+    assert request.scene_id == f"director:{cluster.cluster_id}"
+    assert request.prompt_version == 0
+    assert request.max_tokens == 16_384
+    assert request.timeout_seconds == 120
+    assert request.segment_count == 1
+    assert request.scene_prompt == ""
+    assert "场景导演" in request.common_rules
+    assert "只负责“选场景和划范围”" in request.common_rules
+    assert projected_clusters == [
+        {
+            "cluster_id": cluster.cluster_id,
+            "file_id": "file_001",
+            "file_name": "meeting.mp3",
+            "start_ms": 0,
+            "end_ms": 10_000,
+            "segments": [
+                {
+                    "segment_id": "seg_001",
+                    "start_ms": 0,
+                    "end_ms": 10_000,
+                    "speaker_id": "speaker_A",
+                    "text": transcript_with_injection()[0]["text"],
+                }
+            ],
+        }
+    ]
+    assert projected_hints == hints
+    assert "unassigned_segment_ids" not in request.user_data
+    assert "profile_data" not in request.user_data
+
+
+def test_director_rules_participate_in_fixed_rules_hash(monkeypatch) -> None:
+    original = PromptComposer._fixed_prompt
+    baseline = PromptComposer.fixed_rules_hash()
+
+    monkeypatch.setattr(
+        PromptComposer,
+        "_fixed_prompt",
+        staticmethod(
+            lambda name: (
+                original(name) + "\nsynthetic director rule"
+                if name == "director.md"
+                else original(name)
+            )
+        ),
+    )
+
+    assert PromptComposer.fixed_rules_hash() != baseline
 
 
 def test_scene_composition_uses_frozen_output_bound_and_timeout() -> None:

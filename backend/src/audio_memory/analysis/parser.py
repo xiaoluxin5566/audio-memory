@@ -4,6 +4,7 @@ import json
 
 from pydantic import TypeAdapter, ValidationError
 
+from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.event_schema import EventMapDraft
 from audio_memory.prompts.schemas import SceneResultBase, StrictSceneResult
 
@@ -28,6 +29,13 @@ def _json_payload(raw: str) -> object:
 def parse_event_map_output(raw: str) -> EventMapDraft:
     try:
         return EventMapDraft.model_validate(_json_payload(raw))
+    except ValidationError as exc:
+        raise SceneOutputError(str(exc)) from exc
+
+
+def parse_director_output(raw: str) -> DirectorResult:
+    try:
+        return DirectorResult.model_validate(_json_payload(raw))
     except ValidationError as exc:
         raise SceneOutputError(str(exc)) from exc
 

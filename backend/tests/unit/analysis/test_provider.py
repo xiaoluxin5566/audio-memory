@@ -7,8 +7,13 @@ import pytest
 
 from audio_memory.analysis import provider as provider_module
 from audio_memory.analysis import windows as windows_module
-from audio_memory.analysis.provider import ProviderAnalysisClient, ProviderAnalysisError
+from audio_memory.analysis.provider import (
+    ProviderAnalysisClient,
+    ProviderAnalysisError,
+    RemoteSceneAnalyzer,
+)
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
 
@@ -16,6 +21,32 @@ from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
 class ConfiguredKeychain:
     def read(self, provider_id: str) -> KeychainReadResult:
         return KeychainReadResult(KeychainStatus.CONFIGURED, b"test-only-secret")
+
+
+class DirectorClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        self.calls.append({"provider_id": provider_id, **kwargs})
+        return json.dumps(
+            {
+                "selections": [
+                    {
+                        "selection_id": "selection_001",
+                        "cluster_ids": ["cluster_1234567890abcdefabcd"],
+                        "source_event_ids": [],
+                        "candidate_scenes": ["meeting"],
+                        "title": "Synthetic work discussion",
+                        "selection_reason": "Contains a bounded work decision.",
+                        "value_signals": ["explicit_decision"],
+                        "priority": "high",
+                        "context_before_clusters": 0,
+                        "context_after_clusters": 0,
+                    }
+                ]
+            }
+        )
 
 
 def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
@@ -50,6 +81,35 @@ def transcript() -> list[dict[str, object]]:
             "reliability_weight": 1.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_remote_analyzer_parses_director_result_through_strict_boundary() -> None:
+    client = DirectorClient()
+    analyzer = RemoteSceneAnalyzer(client)
+    request = type(
+        "Request",
+        (),
+        {
+            "rendered_instructions": "rules",
+            "user_data": "data",
+            "scene_id": "director:cluster_1234567890abcdefabcd",
+            "max_tokens": 16_384,
+            "timeout_seconds": 120,
+            "segment_count": 1,
+            "schema_json": json.dumps(DirectorResult.model_json_schema()),
+        },
+    )()
+
+    result = await analyzer.analyze_director(
+        request,
+        {"provider_id": "deepseek", "model_id": "deepseek-v4-flash"},
+    )
+
+    assert isinstance(result, DirectorResult)
+    assert result.selections[0].candidate_scenes == ["meeting"]
+    assert client.calls[0]["scene_id"] == request.scene_id
+    assert client.calls[0]["repair_attempted"] is False
 
 
 @pytest.mark.asyncio

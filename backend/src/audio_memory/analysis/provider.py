@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.events import request_with_one_repair
-from audio_memory.analysis.parser import parse_event_map_output, parse_scene_output
+from audio_memory.analysis.parser import (
+    parse_director_output,
+    parse_event_map_output,
+    parse_scene_output,
+)
 from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
@@ -423,6 +427,15 @@ class RemoteSceneAnalyzer:
             provider_snapshot=provider_snapshot,
             parse=parse_event_map_output,
             invalid_code="event_map_schema_invalid",
+        )
+
+    async def analyze_director(self, request, provider_snapshot):
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_director_output,
+            invalid_code="director_schema_invalid",
         )
 
     async def analyze_scene(self, scene_id, request, provider_snapshot):

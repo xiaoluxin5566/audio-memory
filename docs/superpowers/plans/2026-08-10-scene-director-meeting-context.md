@@ -125,7 +125,7 @@ git commit -m "feat: build stable full transcript clusters"
 
 **Interfaces:**
 - Produces: `DirectorSelection` and `DirectorResult(selections: list[DirectorSelection])` with strict extra-field rejection, allowed scenes/value signals/priorities, unique non-empty IDs, and context counts limited to `0..1`.
-- Produces: `PromptComposer.compose_director(*, cluster, event_hints, profile, schema) -> ModelRequest` using `scene_id=f"director:{cluster.cluster_id}"`, `16_384` tokens, `120s`, fixed `director.md`, and no editable scene layer content.
+- Produces: `PromptComposer.compose_director(*, cluster, event_hints, schema) -> ModelRequest` using `scene_id=f"director:{cluster.cluster_id}"`, `16_384` tokens, `120s`, fixed `director.md`, and no editable scene layer or profile input.
 - Produces: `RemoteSceneAnalyzer.analyze_director(request, provider_snapshot) -> DirectorResult` using the existing one-repair function.
 - Changes: `PromptComposer.fixed_rules_hash()` includes `director.md`.
 
@@ -135,7 +135,7 @@ Assert legal multi-scene selection validates; illegal scene/value signal/priorit
 
 - [ ] **Step 2: Write failing composition tests**
 
-Compose one request and assert the untrusted packet contains the complete cluster segments (`segment_id`, `start_ms`, `end_ms`, `speaker_id`, `text`), cluster/file bounds, Event hints, profile snapshot, no `unassigned_segment_ids`, and the full approved Appendix A rules in the fixed layer. Assert the request's `segment_count` is the cluster size and editable Prompt markup is empty.
+Compose one request and assert the untrusted packet contains the complete cluster segments (`segment_id`, `start_ms`, `end_ms`, `speaker_id`, `text`), cluster/file bounds, Event hints, no profile or `unassigned_segment_ids`, and the full approved Appendix A rules in the fixed layer. Assert the request's `segment_count` is the cluster size and editable Prompt markup is empty.
 
 - [ ] **Step 3: Verify RED**
 
