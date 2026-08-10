@@ -41,3 +41,17 @@ test('detail renders common blocks rather than strict scene payload keys', () =>
   assert.match(detail, /card\.detailSections\.map/)
   assert.doesNotMatch(detail, /inferred_title_hint|evidence_segment_ids|generation_reason|finding_id|case_id/)
 });
+
+test('detail exposes bounded evidence playback without transcript text', () => {
+  const detail = appSource.slice(
+    appSource.indexOf('function CardDetail'),
+    appSource.indexOf('function History'),
+  );
+
+  assert.match(detail, /<EvidencePlayback evidence=\{card\.evidence\}/)
+  assert.match(appSource, /<summary>回听证据 · \{evidence\.length\} 段<\/summary>/)
+  assert.match(appSource, /<audio key=\{source\} controls preload="metadata" src=\{source\}/)
+  assert.match(appSource, /#t=\$\{\(active\.startMs \/ 1000\)\.toFixed\(3\)\},/)
+  assert.doesNotMatch(appSource, /active\.text|evidence\.text/)
+  assert.match(styles, /\.evidence-playback\{/)
+});

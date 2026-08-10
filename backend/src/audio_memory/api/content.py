@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from audio_memory.content.clear import HistoryBusyError
@@ -73,6 +73,18 @@ async def ask_card(card_id: str, payload: QuestionInput, request: Request):
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"messages": messages}
+
+
+@router.get("/cards/{card_id}/evidence/{segment_id}/audio")
+async def play_card_evidence(card_id: str, segment_id: str, request: Request):
+    try:
+        path = await request.app.state.content_service.evidence_audio(
+            card_id, segment_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    media_type = "audio/aac" if path.suffix.lower() == ".aac" else "audio/mpeg"
+    return FileResponse(path, media_type=media_type)
 
 
 @router.post("/cards/{card_id}/feedback", status_code=201)

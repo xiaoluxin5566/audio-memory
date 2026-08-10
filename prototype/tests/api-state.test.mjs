@@ -71,6 +71,10 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
   const normalized = normalizeFeed({ days: [{ date: '2026-08-06', cards: [
     {
       id: 'analysis-meeting', batch_id: 'batch-1', scene_id: 'meeting', uploaded_at: '2026-08-06T10:00:00Z', qa: [],
+      evidence: [
+        { card_index: 0, segments: [{ segment_id: 'seg_0_1', start_ms: 1000, end_ms: 2400, playback_url: '/api/cards/analysis-meeting/evidence/seg_0_1/audio' }] },
+        { card_index: 1, segments: [{ segment_id: 'seg_0_2', start_ms: 3000, end_ms: 4500, playback_url: '/api/cards/analysis-meeting/evidence/seg_0_2/audio' }] },
+      ],
       payload: { scene_id: 'meeting', cards: [
         { card: { title: '产品评审', summary: '确定范围' }, detail: { topic: '一期范围', background: '团队评审', participants: [], core_conclusions: [{ content: '先做桌面端' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
         { card: { title: '预算复盘', summary: '控制成本' }, detail: { topic: 'Q3 预算', background: '财务会议', participants: [], core_conclusions: [{ content: '压缩外包' }], decisions: [], open_questions: [], meeting_todos: [], discussion_topics: [] } },
@@ -95,6 +99,8 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
 
   const cards = normalized.feed[0].cards
   assert.equal(cards.filter((card) => card.sceneId === 'meeting').length, 2)
+  assert.deepEqual(cards[0].evidence, [{ segmentId: 'seg_0_1', startMs: 1000, endMs: 2400, playbackUrl: '/api/cards/analysis-meeting/evidence/seg_0_1/audio' }])
+  assert.deepEqual(cards[1].evidence, [{ segmentId: 'seg_0_2', startMs: 3000, endMs: 4500, playbackUrl: '/api/cards/analysis-meeting/evidence/seg_0_2/audio' }])
   const contentCard = cards.find((card) => card.sceneId === 'content')
   assert.equal(contentCard.details.consumedItems.length, 2)
   assert.equal(contentCard.detailSections.filter((section) => section.eventTitle).length, 2)

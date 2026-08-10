@@ -339,7 +339,24 @@ function CardDetail({ card, batch, onClose, onToast }) {
   function closeFeedback() {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.detailSections.map((section, index) => <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.detailSections.map((section, index) => <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}<EvidencePlayback evidence={card.evidence} />{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+}
+
+function evidenceTimeLabel(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function EvidencePlayback({ evidence = [] }) {
+  const [active, setActive] = useState(evidence[0] ?? null);
+  if (!active || evidence.length === 0) return null;
+  const source = `${active.playbackUrl}#t=${(active.startMs / 1000).toFixed(3)},${(active.endMs / 1000).toFixed(3)}`;
+  return <details className="evidence-playback" open><summary>回听证据 · {evidence.length} 段</summary><p>选择片段后播放原音频；播放器会从对应时间开始。</p><div className="evidence-segments">{evidence.map((item, index) => <button key={item.segmentId} className={item.segmentId === active.segmentId ? 'active' : ''} aria-pressed={item.segmentId === active.segmentId} onClick={() => setActive(item)}>证据 {index + 1} · {evidenceTimeLabel(item.startMs)}</button>)}</div><audio key={source} controls preload="metadata" src={source}>当前浏览器无法播放这段音频。</audio></details>;
 }
 
 function History({ state }) {

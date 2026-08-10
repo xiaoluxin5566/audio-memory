@@ -196,6 +196,14 @@ function normalizeStrictCards(item, batch) {
       meta: '查看 AI 分析详情',
       detailSections: strictBlocks(item.scene_id, detail),
       details: strictCardDetails(item.scene_id, detail),
+      evidence: (item.evidence ?? [])
+        .find((group) => group.card_index === index)?.segments
+        ?.map((segment) => ({
+          segmentId: segment.segment_id,
+          startMs: segment.start_ms,
+          endMs: segment.end_ms,
+          playbackUrl: segment.playback_url,
+        })) ?? [],
     }
   })
 }
