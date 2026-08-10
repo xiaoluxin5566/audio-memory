@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from audio_memory.analysis import provider as provider_module
+from audio_memory.analysis import windows as windows_module
 from audio_memory.analysis.provider import ProviderAnalysisClient, ProviderAnalysisError
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.event_schema import EventMap
@@ -15,6 +16,22 @@ from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
 class ConfiguredKeychain:
     def read(self, provider_id: str) -> KeychainReadResult:
         return KeychainReadResult(KeychainStatus.CONFIGURED, b"test-only-secret")
+
+
+def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
+    monkeypatch,
+) -> None:
+    baseline = provider_module._analysis_parameter_fingerprint()
+
+    monkeypatch.setattr(
+        windows_module,
+        "ANALYSIS_WINDOW_GAP_MS",
+        windows_module.ANALYSIS_WINDOW_GAP_MS + 1,
+    )
+
+    changed = provider_module._analysis_parameter_fingerprint()
+    assert changed != baseline
+    assert "PRIVATE_FIXTURE_TEXT" not in changed
 
 
 def transcript() -> list[dict[str, object]]:

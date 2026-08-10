@@ -13,6 +13,12 @@ from sqlalchemy import delete, select, update
 from audio_memory.analysis.profile import validate_profile_delta
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
+from audio_memory.analysis.windows import (
+    AnalysisWindowError,
+    build_analysis_windows,
+    complete_window_event_map,
+    merge_window_event_maps,
+)
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisJob,
@@ -228,50 +234,57 @@ class AnalysisRunner:
     ) -> EventMap:
         if version.event_map_json:
             return EventMap.model_validate_json(version.event_map_json)
-        request = self.composer.compose_event_map(
-            transcript=transcript,
-            profile=profile,
-            schema=EventMap.model_json_schema(),
-        )
-        await self._require_ownership(version.id, worker_owner_id)
-        generated = await self.provider.analyze_event_map(request, provider_snapshot)
-        await self._require_ownership(version.id, worker_owner_id)
-        await self._require_generation(version, worker_owner_id)
-        raw_event_map = (
-            generated.model_dump(mode="python")
-            if hasattr(generated, "model_dump")
-            else generated
-        )
+        windows = build_analysis_windows(transcript)
+        completed_maps: list[EventMap] = []
+        for window in windows:
+            request = self.composer.compose_event_map(
+                transcript=list(window.segments),
+                profile=profile,
+                schema=EventMap.model_json_schema(),
+                window_id=window.window_id,
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            generated = await self.provider.analyze_event_map(
+                request, provider_snapshot
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            raw_event_map = (
+                generated.model_dump(mode="python")
+                if hasattr(generated, "model_dump")
+                else generated
+            )
+            try:
+                local_map = EventMap.model_validate(raw_event_map)
+            except ValidationError as exc:
+                raise ProviderAnalysisError(
+                    "Event map violates the required schema",
+                    code="event_map_schema_invalid",
+                ) from exc
+            try:
+                completed_maps.append(
+                    complete_window_event_map(window, local_map)
+                )
+            except AnalysisWindowError as exc:
+                raise ProviderAnalysisError(
+                    "Local event map evidence is invalid",
+                    code=exc.code,
+                ) from exc
         try:
-            event_map = EventMap.model_validate(raw_event_map)
-        except ValidationError as exc:
+            event_map = merge_window_event_maps(windows, completed_maps)
+        except AnalysisWindowError as exc:
             raise ProviderAnalysisError(
-                "Event map violates the required schema",
-                code="event_map_schema_invalid",
+                "Merged event map evidence is invalid",
+                code=exc.code,
             ) from exc
+
         transcript_ids = {str(item["segment_id"]) for item in transcript}
         assigned = {
             segment_id
             for event in event_map.events
             for segment_id in event.evidence_segment_ids
         }
-        referenced = assigned | set(event_map.user_speaker.evidence_segment_ids)
-        if referenced - transcript_ids:
-            raise ProviderAnalysisError(
-                "Event map references unknown transcript evidence",
-                code="event_map_unknown_segment",
-            )
-        completed_payload = event_map.model_dump(mode="python")
-        completed_payload["unassigned_segment_ids"] = sorted(
-            transcript_ids - assigned
-        )
-        try:
-            event_map = EventMap.model_validate(completed_payload)
-        except ValidationError as exc:
-            raise ProviderAnalysisError(
-                "Event map coverage is invalid",
-                code="event_map_coverage_invalid",
-            ) from exc
         covered = assigned | set(event_map.unassigned_segment_ids)
         if covered != transcript_ids:
             raise ProviderAnalysisError(
@@ -279,7 +292,10 @@ class AnalysisRunner:
                 code="event_map_coverage_invalid",
             )
         logger.info(
-            "event_map_coverage known=%d assigned=%d unassigned=%d unknown=0",
+            "event_map_coverage windows=%d events=%d known=%d assigned=%d "
+            "unassigned=%d unknown=0",
+            len(windows),
+            len(event_map.events),
             len(transcript_ids),
             len(assigned),
             len(event_map.unassigned_segment_ids),

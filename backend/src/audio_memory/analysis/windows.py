@@ -11,7 +11,14 @@ ANALYSIS_WINDOW_MAX_SEGMENTS = 400
 
 
 class AnalysisWindowError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "event_map_coverage_invalid",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +126,10 @@ def complete_window_event_map(
     }
     referenced_ids = assigned_ids | set(event_map.user_speaker.evidence_segment_ids)
     if referenced_ids - known_ids:
-        raise AnalysisWindowError("local event map contains unknown evidence")
+        raise AnalysisWindowError(
+            "local event map contains unknown evidence",
+            code="event_map_unknown_segment",
+        )
 
     for event in event_map.events:
         evidence = [segments[segment_id] for segment_id in event.evidence_segment_ids]
@@ -181,7 +191,10 @@ def merge_window_event_maps(
         for segment_id in event.evidence_segment_ids
     }
     if assigned_ids - known_ids:
-        raise AnalysisWindowError("merged event map contains unknown evidence")
+        raise AnalysisWindowError(
+            "merged event map contains unknown evidence",
+            code="event_map_unknown_segment",
+        )
 
     support: dict[str, list[tuple[str, UserSpeaker]]] = {}
     for window, event_map in zip(windows, maps, strict=True):

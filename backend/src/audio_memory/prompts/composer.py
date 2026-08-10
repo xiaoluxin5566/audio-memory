@@ -72,10 +72,11 @@ class PromptComposer:
         transcript: list[dict[str, object]],
         profile: list[dict[str, object]],
         schema: dict[str, object],
+        window_id: str | None = None,
     ) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["event-map"]
         return ModelRequest(
-            scene_id="event-map",
+            scene_id=(f"event-map:{window_id}" if window_id else "event-map"),
             prompt_version=0,
             schema_version=self.SCHEMA_VERSION,
             system_rules=self._fixed_prompt("system.md"),
@@ -108,6 +109,10 @@ class PromptComposer:
         if scene_id not in PROMPT_SCENES or prompt.scene_id != scene_id:
             raise ValueError("Prompt scene does not match request scene")
         policy = MODEL_REQUEST_POLICIES["scene"]
+        scene_transcript = self._scene_transcript(transcript, event_map)
+        assigned_segment_count = sum(
+            len(event["segments"]) for event in scene_transcript["events"]
+        )
         return ModelRequest(
             scene_id=scene_id,
             prompt_version=prompt.version,
@@ -117,7 +122,7 @@ class PromptComposer:
             scene_prompt=prompt.content,
             user_data="\n".join(
                 [
-                    self._untrusted_packet("transcript_data", transcript),
+                    self._untrusted_packet("transcript_data", scene_transcript),
                     self._untrusted_packet(
                         "event_map", event_map.model_dump(mode="json")
                     ),
@@ -127,7 +132,7 @@ class PromptComposer:
             schema_json=self._schema_json(schema),
             max_tokens=policy.max_tokens,
             timeout_seconds=policy.timeout_seconds,
-            segment_count=len(transcript),
+            segment_count=assigned_segment_count,
         )
 
     @staticmethod
@@ -163,6 +168,41 @@ class PromptComposer:
                 }
             )
         return {"files": list(files_by_id.values()), "segments": segments}
+
+    @staticmethod
+    def _scene_transcript(
+        transcript: list[dict[str, object]],
+        event_map: EventMap,
+    ) -> dict[str, list[dict[str, object]]]:
+        segments = {
+            str(item["segment_id"]): item
+            for item in transcript
+        }
+        events: list[dict[str, object]] = []
+        for event in event_map.events:
+            projected_segments: list[dict[str, object]] = []
+            for segment_id in event.evidence_segment_ids:
+                item = segments.get(segment_id)
+                if item is None:
+                    raise ValueError("Event map references unavailable transcript evidence")
+                projected_segments.append(
+                    {
+                        "id": segment_id,
+                        "start_ms": item["start_ms"],
+                        "end_ms": item["end_ms"],
+                        "speaker_id": item["speaker_id"],
+                        "text": item["text"],
+                    }
+                )
+            events.append(
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "title": event.title,
+                    "segments": projected_segments,
+                }
+            )
+        return {"events": events}
 
     @staticmethod
     def _untrusted_packet(name: str, payload: object) -> str:

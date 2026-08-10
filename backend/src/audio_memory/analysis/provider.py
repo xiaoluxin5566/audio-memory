@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.events import request_with_one_repair
 from audio_memory.analysis.parser import parse_event_map_output, parse_scene_output
+from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
@@ -55,6 +56,14 @@ def _analysis_parameter_fingerprint() -> str:
         "transient_total_attempts": 2,
         "schema_total_attempts": 2,
         "scene_concurrency": 1,
+        "analysis_windows": {
+            "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
+            "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
+            "max_segments": analysis_windows.ANALYSIS_WINDOW_MAX_SEGMENTS,
+            "split_on_file_boundary": True,
+            "identity_min_windows": 2,
+            "identity_confidence": 0.85,
+        },
     }
     encoded = json.dumps(
         policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")
