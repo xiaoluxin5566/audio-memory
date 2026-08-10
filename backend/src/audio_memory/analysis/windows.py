@@ -137,14 +137,25 @@ def complete_window_event_map(
             code="event_map_unknown_segment",
         )
 
+    event_bounds: dict[str, tuple[int, int]] = {}
     for event in event_map.events:
         evidence = [segments[segment_id] for segment_id in event.evidence_segment_ids]
         evidence_start = min(int(item["start_ms"]) for item in evidence)
         evidence_end = max(int(item["end_ms"]) for item in evidence)
-        if event.start_ms > evidence_start or event.end_ms < evidence_end:
-            raise AnalysisWindowError("local event time range must contain its evidence")
-        if event.start_ms < window.start_ms or event.end_ms > window.end_ms:
-            raise AnalysisWindowError("local event time range must stay inside its window")
+        event_bounds[event.event_id] = (evidence_start, evidence_end)
+    for _ in range(len(event_map.events)):
+        changed = False
+        for event in event_map.events:
+            if event.parent_event_id is None:
+                continue
+            parent_start, parent_end = event_bounds[event.parent_event_id]
+            child_start, child_end = event_bounds[event.event_id]
+            expanded = (min(parent_start, child_start), max(parent_end, child_end))
+            if expanded != (parent_start, parent_end):
+                event_bounds[event.parent_event_id] = expanded
+                changed = True
+        if not changed:
+            break
 
     window_suffix = window.window_id.removeprefix("window_")
     event_ids = {
@@ -162,6 +173,8 @@ def complete_window_event_map(
                     if event.parent_event_id is not None
                     else None
                 ),
+                "start_ms": event_bounds[event.event_id][0],
+                "end_ms": event_bounds[event.event_id][1],
             }
         )
         for event in event_map.events

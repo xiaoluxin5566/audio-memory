@@ -190,33 +190,36 @@ def test_complete_window_event_map_fills_server_owned_unassigned_ids() -> None:
     assert completed.unassigned_segment_ids == ["seg_0_1"]
 
 
-@pytest.mark.parametrize(
-    ("event_map", "message"),
-    [
-        (local_event_map(evidence_ids=["seg_missing"]), "unknown evidence"),
-        (
-            local_event_map(
-                evidence_ids=["seg_0_0"],
-                start_ms=100,
-                end_ms=900,
-            ),
-            "contain its evidence",
-        ),
-    ],
-)
-def test_complete_window_event_map_rejects_invalid_local_evidence(
-    event_map: EventMap,
-    message: str,
-) -> None:
+def test_complete_window_event_map_rejects_unknown_local_evidence() -> None:
     window = build_analysis_windows(
         [segment("seg_0_0", "file-a", 0, 1_000)]
     )[0]
 
-    with pytest.raises(AnalysisWindowError, match=message) as captured:
-        complete_window_event_map(window, event_map)
+    with pytest.raises(AnalysisWindowError, match="unknown evidence") as captured:
+        complete_window_event_map(
+            window,
+            local_event_map(evidence_ids=["seg_missing"]),
+        )
 
     assert "seg_missing" not in str(captured.value)
     assert "seg_0_0" not in str(captured.value)
+
+
+def test_complete_window_event_map_derives_bounds_from_verified_evidence() -> None:
+    window = build_analysis_windows(
+        [segment("seg_0_0", "file-a", 100, 1_000)]
+    )[0]
+
+    completed = complete_window_event_map(
+        window,
+        local_event_map(
+            evidence_ids=["seg_0_0"],
+            start_ms=200,
+            end_ms=900,
+        ),
+    )
+
+    assert (completed.events[0].start_ms, completed.events[0].end_ms) == (100, 1_000)
 
 
 def test_merge_window_event_maps_namespaces_duplicate_model_event_ids() -> None:
