@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Literal
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
+from audio_memory.db import Database
+from audio_memory.models import AnalysisVersion, Batch, Card, JobFile, Transcript
 from audio_memory.prompts.autonomous_schema import (
     AutonomousAnalysisResult,
     AutonomousCard,
@@ -169,3 +174,96 @@ def convert_external_analysis(
             )
         )
     return AutonomousAnalysisResult(cards=converted)
+
+
+async def import_latest_analysis(
+    database: Database, payload: dict[str, object]
+) -> str:
+    now = datetime.now(UTC).isoformat()
+    async with database.session() as session:
+        async with session.begin():
+            batch = await session.scalar(
+                select(Batch).order_by(Batch.uploaded_at.desc()).limit(1)
+            )
+            if batch is None:
+                raise LookupError("no completed batch is available for import")
+            files = list(
+                await session.scalars(
+                    select(JobFile)
+                    .where(JobFile.job_id == batch.job_id)
+                    .order_by(JobFile.position)
+                )
+            )
+            transcript: dict[str, str] = {}
+            for file in files:
+                rows = list(
+                    await session.scalars(
+                        select(Transcript)
+                        .where(
+                            Transcript.job_file_id == file.id,
+                            Transcript.risk_classified.is_(True),
+                            Transcript.is_reliable.is_(True),
+                        )
+                        .order_by(Transcript.segment_index)
+                    )
+                )
+                transcript.update(
+                    {
+                        f"seg_{file.position}_{row.segment_index}": row.text
+                        for row in rows
+                    }
+                )
+            result = convert_external_analysis(payload, transcript)
+            version_id = str(uuid4())
+            version = AnalysisVersion(
+                id=version_id,
+                source_job_id=batch.job_id,
+                batch_id=batch.id,
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+                credential_generation=0,
+                prompt_snapshot_json=json.dumps(
+                    {"source": "custom_prompt_import", "version": 1},
+                    separators=(",", ":"),
+                ),
+                profile_snapshot_json="[]",
+                fixed_rules_hash="custom-prompt-import",
+                staged_results_json=json.dumps(
+                    {"autonomous": result.model_dump(mode="json")},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                published_card_count=len(result.cards),
+                published_todo_count=0,
+                status="completed",
+                completed_at=now,
+            )
+            session.add(version)
+            await session.flush()
+            for position, card in enumerate(result.cards):
+                card_id = str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"audio-memory-card:{version_id}:analysis:{position}",
+                    )
+                )
+                session.add(
+                    Card(
+                        id=card_id,
+                        batch_id=batch.id,
+                        analysis_version_id=version_id,
+                        scene_id="analysis",
+                        position=position,
+                        payload_json=json.dumps(
+                            {
+                                "scene_id": "analysis",
+                                "cards": [card.model_dump(mode="json")],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                )
+            batch.current_analysis_version_id = version_id
+            batch.provider_id = "deepseek"
+            batch.model_id = "deepseek-v4-pro"
+    return version_id
