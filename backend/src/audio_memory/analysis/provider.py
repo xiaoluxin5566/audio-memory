@@ -13,12 +13,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.events import request_with_one_repair
 from audio_memory.analysis.parser import (
+    parse_autonomous_retrieval_plan,
+    parse_autonomous_output,
     parse_director_output,
     parse_event_map_output,
     parse_scene_output,
+    parse_information_notebook,
+)
+from audio_memory.prompts.autonomous_schema import (
+    AutonomousAnalysisResult,
+    AutonomousRetrievalPlan,
+    InformationNotebook,
 )
 from audio_memory.analysis import windows as analysis_windows
-from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest
+from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest, PromptComposer
 from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
@@ -48,7 +56,7 @@ class ProviderRequestDiagnostic:
 def _analysis_parameter_fingerprint() -> str:
     policy = {
         "model": PROVIDER_CONFIGS["deepseek"].model_id,
-        "thinking": {"type": "disabled"},
+        "thinking": {"type": "enabled"},
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "requests": {
@@ -451,6 +459,48 @@ class RemoteSceneAnalyzer:
             parse=lambda raw: parse_scene_output(raw, expected_scene=scene_id),
         )
 
+    async def analyze_autonomous(self, request, provider_snapshot) -> AutonomousAnalysisResult:
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_autonomous_output,
+            invalid_code="autonomous_schema_invalid",
+        )
+
+    async def analyze_autonomous_notes(
+        self, request, provider_snapshot
+    ) -> InformationNotebook:
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_information_notebook,
+            invalid_code="autonomous_notes_schema_invalid",
+        )
+
+    async def analyze_autonomous_retrieval_plan(
+        self, request, provider_snapshot
+    ) -> AutonomousRetrievalPlan:
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_autonomous_retrieval_plan,
+            invalid_code="autonomous_retrieval_schema_invalid",
+        )
+
+    async def analyze_autonomous_final(
+        self, request, provider_snapshot
+    ) -> AutonomousAnalysisResult:
+        return await request_with_one_repair(
+            client=self.client,
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=parse_autonomous_output,
+            invalid_code="autonomous_final_schema_invalid",
+        )
+
 
 class ProfileItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -471,20 +521,27 @@ class RemoteProfileExtractor:
     def __init__(self, client: ProviderAnalysisClient) -> None:
         self.client = client
 
-    async def extract(self, transcript, existing, provider_snapshot):
+    async def extract(self, transcript, cards, existing, provider_snapshot):
         schema = json.dumps(ProfileEnvelope.model_json_schema(), ensure_ascii=False)
         request = ModelRequest(
             scene_id="profile",
             prompt_version=0,
             schema_version=1,
-            system_rules=(
-                "从音频转写中提取属于用户本人的长期画像事实。不要把其他说话人的属性归给用户。"
-                "只返回符合 Schema 的 JSON；证据不足则 facts 为空。"
-            ),
-            common_rules="画像仅可来源于结构化转写证据，不得猜测。",
+            system_rules=PromptComposer._fixed_prompt("system.md"),
+            common_rules=PromptComposer._approved_prompt("Prompt B", None),
             scene_prompt="提取长期画像候选",
             user_data=json.dumps(
-                {"existing_profile": existing, "transcript_data": transcript},
+                {
+                    "existing_profile": existing,
+                    "final_cards": [
+                        card.model_dump(mode="json") if hasattr(card, "model_dump") else card
+                        for card in cards
+                    ],
+                    "transcript_data": [
+                        {key: value for key, value in item.items() if key != "speaker_id"}
+                        for item in transcript
+                    ],
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),

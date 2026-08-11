@@ -122,6 +122,12 @@ def convert_external_analysis(
         )
         content = [
             AutonomousSection(
+                type="scene_reconstruction",
+                title="场景还原",
+                body=source.summary,
+                evidence_segment_ids=_evidence_union(source),
+            ),
+            AutonomousSection(
                 type="external_meta",
                 title="分析类型",
                 body=metadata,
@@ -129,7 +135,7 @@ def convert_external_analysis(
         ]
         content.extend(
             AutonomousSection(
-                type=f"finding:{finding.type}:{finding.confidence}",
+                type="analysis",
                 title="关键发现",
                 body=finding.content,
                 evidence_segment_ids=finding.evidence_segment_ids,

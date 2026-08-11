@@ -18,7 +18,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 cd "$PROJECT_ROOT/backend"
-env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync uvicorn audio_memory.main:app \
+env PYTHONPATH="$PROJECT_ROOT/backend/src" UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync uvicorn audio_memory.main:app \
   --host 127.0.0.1 --port "$PORT" &
 SERVER_PID=$!
 cleanup() { kill "$SERVER_PID" >/dev/null 2>&1 || true; }

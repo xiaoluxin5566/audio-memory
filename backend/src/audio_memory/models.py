@@ -88,6 +88,9 @@ class JobFile(Base):
     speech_mapping_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"
     )
+    compact_checkpoint_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
     vad_speech_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     vad_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     vad_energy_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

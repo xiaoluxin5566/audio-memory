@@ -64,12 +64,13 @@ def test_convert_external_analysis_preserves_meaning_and_metadata() -> None:
     card = result.cards[0]
     assert card.title == "目标不清正在消耗执行力"
     assert card.evidence_segment_ids == ["seg_0_1", "seg_0_2"]
-    assert card.content[0].type == "external_meta"
-    assert card.content[0].body == '{"card_kind":"event","scene_types":["meeting","work_conversation"]}'
-    assert card.content[1].type == "finding:fact:high"
-    assert card.content[1].body == "主要成人说话者明确表示目标没有确定。"
+    assert card.content[0].type == "scene_reconstruction"
+    assert card.content[1].type == "external_meta"
+    assert card.content[1].body == '{"card_kind":"event","scene_types":["meeting","work_conversation"]}'
     assert card.content[2].type == "analysis"
-    assert card.content[2].title == "问题如何形成"
+    assert card.content[2].body == "主要成人说话者明确表示目标没有确定。"
+    assert card.content[3].type == "analysis"
+    assert card.content[3].title == "问题如何形成"
     assert card.quotes[0].quote == "目标一直没有明确下来"
     assert card.quotes[0].analysis == "这是问题的直接表述。"
     assert card.recommendations[0].actions == ["会前写出目标和验收标准"]

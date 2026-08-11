@@ -35,6 +35,7 @@ from audio_memory.models import (
     TodoTombstone,
 )
 from audio_memory.prompts.schemas import SceneResultBase, StrictTodoDraft
+from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
 from audio_memory.prompts.store import PROMPT_SCENES
 
 
@@ -81,18 +82,23 @@ class VersionPublisher:
     async def publish(
         self,
         version_id: str,
-        results: list[SceneResultBase],
+        results: list[SceneResultBase] | AutonomousAnalysisResult,
         profile_candidates: list[ProfileDelta],
         *,
         worker_owner_id: str | None = None,
     ) -> AnalysisOutcome:
-        by_scene = self._validated_scenes(results)
-        visible = [
-            by_scene[scene_id]
-            for scene_id in CARD_ORDER
-            if by_scene[scene_id].should_generate
-        ]
-        drafts = [todo for result in results for todo in result.todos]
+        autonomous = isinstance(results, AutonomousAnalysisResult)
+        if autonomous:
+            visible = list(results.cards)
+            drafts: list[StrictTodoDraft] = []
+        else:
+            by_scene = self._validated_scenes(results)
+            visible = [
+                by_scene[scene_id]
+                for scene_id in CARD_ORDER
+                if by_scene[scene_id].should_generate
+            ]
+            drafts = [todo for result in results for todo in result.todos]
         now = datetime.now(UTC)
         async with self.database.session() as session:
             version = await session.get(AnalysisVersion, version_id)
@@ -156,7 +162,10 @@ class VersionPublisher:
                 await self._finalize_audio_rows(
                     session, job.id, files, destinations
                 )
-                await self._insert_cards(session, version, batch, visible)
+                if autonomous:
+                    await self._insert_autonomous_cards(session, version, batch, visible)
+                else:
+                    await self._insert_cards(session, version, batch, visible)
                 candidates = await self._insert_todo_candidates(
                     session, version, drafts
                 )
@@ -288,6 +297,33 @@ class VersionPublisher:
                         position=position,
                         payload_json=json.dumps(
                             result.model_dump_for_frontend(), ensure_ascii=False
+                        ),
+                    )
+                )
+
+    @staticmethod
+    async def _insert_autonomous_cards(session, version, batch, cards) -> None:
+        for position, card in enumerate(cards):
+            card_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"audio-memory-card:{version.id}:analysis:{position}",
+                )
+            )
+            if await session.get(Card, card_id) is None:
+                session.add(
+                    Card(
+                        id=card_id,
+                        batch_id=batch.id,
+                        analysis_version_id=version.id,
+                        scene_id="analysis",
+                        position=position,
+                        payload_json=json.dumps(
+                            {
+                                "scene_id": "analysis",
+                                "cards": [card.model_dump(mode="json")],
+                            },
+                            ensure_ascii=False,
                         ),
                     )
                 )

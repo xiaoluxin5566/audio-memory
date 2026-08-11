@@ -89,8 +89,8 @@ class MeetingKeyFact(MeetingEvidenceItem):
 class MeetingQuoteAnalysis(MeetingEvidenceItem):
     speaker: str = Field(min_length=1, max_length=160)
     quote: str = Field(min_length=1, max_length=500)
-    context: str = Field(min_length=1, max_length=1_200)
-    surface_meaning: str = Field(min_length=1, max_length=1_200)
+    context: str | None = Field(default=None, min_length=1, max_length=1_200)
+    surface_meaning: str | None = Field(default=None, min_length=1, max_length=1_200)
     deeper_analysis: str = Field(min_length=1, max_length=2_000)
     interaction_effect: str | None = Field(default=None, max_length=1_200)
 
@@ -99,20 +99,20 @@ class MeetingArgument(MeetingEvidenceItem):
     speaker: str = Field(min_length=1, max_length=160)
     position: str = Field(min_length=1, max_length=1_200)
     reasoning: str = Field(min_length=1, max_length=2_000)
-    supporting_facts: list[str]
-    assumptions: list[str]
+    supporting_facts: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
     response_from_others: str | None = Field(default=None, max_length=1_200)
-    counterpoints: list[str]
-    assessment: str = Field(min_length=1, max_length=2_000)
+    counterpoints: list[str] = Field(default_factory=list)
+    assessment: str | None = Field(default=None, min_length=1, max_length=2_000)
 
 
 class MeetingRecommendation(MeetingEvidenceItem):
     target: str = Field(min_length=1, max_length=300)
     observed_issue: str = Field(min_length=1, max_length=1_200)
     evidence_basis: str = Field(min_length=1, max_length=1_200)
-    why_it_matters: str = Field(min_length=1, max_length=1_200)
+    why_it_matters: str | None = Field(default=None, min_length=1, max_length=1_200)
     recommendation: str = Field(min_length=1, max_length=2_000)
-    actions: list[str] = Field(min_length=1)
+    actions: list[str] = Field(default_factory=list)
     suggested_language: str | None = Field(default=None, max_length=1_200)
     expected_result: str | None = Field(default=None, max_length=1_200)
     caveat: str | None = Field(default=None, max_length=1_200)
@@ -122,7 +122,7 @@ class MeetingAdaptiveSection(MeetingEvidenceItem):
     section_type: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=200)
     narrative: str = Field(min_length=1, max_length=4_000)
-    key_points: list[str]
+    key_points: list[str] = Field(default_factory=list)
 
 
 class MeetingUncertainty(MeetingEvidenceItem):
@@ -143,18 +143,28 @@ class MeetingDetail(StrictModel):
     event_ids: list[str] = Field(min_length=1)
     analysis_angle: str = Field(min_length=1, max_length=500)
     context_summary: str = Field(min_length=1, max_length=3_000)
-    participants: list[MeetingParticipant]
-    key_facts: list[MeetingKeyFact]
-    quote_analyses: list[MeetingQuoteAnalysis]
-    arguments: list[MeetingArgument]
-    recommendations: list[MeetingRecommendation]
-    sections: list[MeetingAdaptiveSection]
-    uncertainties: list[MeetingUncertainty]
+    participants: list[MeetingParticipant] = Field(default_factory=list)
+    key_facts: list[MeetingKeyFact] = Field(default_factory=list)
+    quote_analyses: list[MeetingQuoteAnalysis] = Field(default_factory=list)
+    arguments: list[MeetingArgument] = Field(default_factory=list)
+    recommendations: list[MeetingRecommendation] = Field(default_factory=list)
+    sections: list[MeetingAdaptiveSection] = Field(default_factory=list)
+    uncertainties: list[MeetingUncertainty] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_event_ids(self) -> MeetingDetail:
         if len(self.event_ids) != len(set(self.event_ids)):
             raise ValueError("meeting detail event_ids must be unique")
+        if not any(
+            (
+                self.key_facts,
+                self.quote_analyses,
+                self.arguments,
+                self.recommendations,
+                self.sections,
+            )
+        ):
+            raise ValueError("meeting detail requires at least one evidenced analysis")
         return self
 
 

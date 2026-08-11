@@ -107,6 +107,9 @@ def classify_segments(
         if invalid_reason is not None:
             decisions[original_position] = _rejected(segment.index, invalid_reason)
             continue
+        if original_position in conflicting_positions:
+            decisions[original_position] = _medium_risk(segment.index, "timestamp_conflict")
+            continue
 
         normalized_text = normalize_transcript_text(segment.text)
         prior_window = [
@@ -115,7 +118,7 @@ def classify_segments(
             if segment.start_ms - item[0].start_ms <= NEARBY_REPEAT_WINDOW_MS
         ]
         if len(normalized_text) > MAX_COMPARISON_TEXT_CHARS:
-            decisions[original_position] = _rejected(
+            decisions[original_position] = _medium_risk(
                 segment.index, "comparison_text_too_long"
             )
             prior_window.append((segment, normalized_text))
@@ -138,7 +141,7 @@ def classify_segments(
                 )
             ]
             if len(approximate_candidates) > MAX_NEARBY_COMPARISONS:
-                decisions[original_position] = _rejected(
+                decisions[original_position] = _medium_risk(
                     segment.index, "similarity_comparison_budget_exhausted"
                 )
                 prior_window.append((segment, normalized_text))
@@ -155,17 +158,19 @@ def classify_segments(
         light_repetition = nearby_match_count > 0 or phrase_repetitions >= 2
 
         if nearby_match_count >= 2:
-            decisions[original_position] = _high_risk(segment.index, "repeated_nearby")
+            decisions[original_position] = _medium_risk(segment.index, "repeated_nearby")
         elif phrase_repetitions >= 3:
-            decisions[original_position] = _high_risk(segment.index, "repeated_phrase")
+            decisions[original_position] = _medium_risk(segment.index, "repeated_phrase")
         elif _is_post_silence_repeat(segment, previous, energy_intervals):
-            decisions[original_position] = _high_risk(segment.index, "post_silence_repeat")
+            decisions[original_position] = _medium_risk(segment.index, "post_silence_repeat")
         elif light_repetition and _has_implausible_speech_rate(segment, speech_intervals):
-            decisions[original_position] = _high_risk(segment.index, "implausible_speech_rate")
+            decisions[original_position] = _medium_risk(segment.index, "implausible_speech_rate")
         elif light_repetition:
             decisions[original_position] = _medium_risk(segment.index, "light_repetition")
         elif not vad_available:
             decisions[original_position] = _medium_risk(segment.index, "vad_unavailable")
+        elif _has_low_vad_support(segment, speech_intervals):
+            decisions[original_position] = _medium_risk(segment.index, "no_vad_support")
         else:
             decisions[original_position] = _normal(segment.index)
 
@@ -353,20 +358,19 @@ def _hard_rejection_reason(
         return "invalid_timing"
     if not segment.text.strip():
         return "blank_text"
-    if has_time_conflict:
-        return "timestamp_conflict"
-    if not vad_available:
-        return None
+    return None
 
+
+def _has_low_vad_support(
+    segment: TranscriptSegment, speech_intervals: Sequence[TimeInterval]
+) -> bool:
     duration = segment.end_ms - segment.start_ms
     expanded = [
         TimeInterval(max(0, interval.start_ms - VAD_GRACE_MS), interval.end_ms + VAD_GRACE_MS)
         for interval in speech_intervals
     ]
     overlap = _union_overlap_ms(segment.start_ms, segment.end_ms, expanded)
-    if overlap < MIN_VAD_OVERLAP_MS and overlap / duration < MIN_VAD_COVERAGE:
-        return "no_vad_support"
-    return None
+    return overlap < MIN_VAD_OVERLAP_MS and overlap / duration < MIN_VAD_COVERAGE
 
 
 def _is_post_silence_repeat(

@@ -113,7 +113,7 @@ async def test_remote_analyzer_parses_director_result_through_strict_boundary() 
 
 
 @pytest.mark.asyncio
-async def test_deepseek_event_map_request_is_bounded_and_disables_thinking() -> None:
+async def test_deepseek_request_is_bounded_and_enables_thinking() -> None:
     captured: dict[str, object] = {}
 
     async def handle(request: httpx.Request) -> httpx.Response:
@@ -138,7 +138,7 @@ async def test_deepseek_event_map_request_is_bounded_and_disables_thinking() -> 
             "deepseek",
             system=request.rendered_instructions,
             user=request.user_data,
-            model_id="deepseek-v4-flash",
+            model_id="deepseek-v4-pro",
             scene_id=request.scene_id,
             max_tokens=request.max_tokens,
             timeout_seconds=request.timeout_seconds,
@@ -148,7 +148,7 @@ async def test_deepseek_event_map_request_is_bounded_and_disables_thinking() -> 
     assert result == "{}"
     payload = captured["payload"]
     assert isinstance(payload, dict)
-    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["thinking"] == {"type": "enabled"}
     assert payload["max_tokens"] == 32_768
     assert payload["temperature"] == 0
     assert payload["response_format"] == {"type": "json_object"}

@@ -57,13 +57,15 @@ test('feed groups cards by natural day and upload batch', () => {
 })
 
 
-test('history and prompts preserve backend versions', () => {
+test('history and prompts preserve runtime prompt metadata', () => {
   const history = normalizeHistory({ days: [{ date: '2026-08-05', audio: [{ id: 'f1', original_name: '录音.mp3', duration_ms: 65000, uploaded_at: '2026-08-05T10:00:00Z' }] }] })
-  const prompts = normalizePrompts({ prompts: [{ scene_id: 'todo', version: 4, content: '识别待办' }] })
+  const prompts = normalizePrompts({ prompts: [{ scene_id: 'autonomous-analysis', label: '自主分析', version: 2, content: '完整分析', editable: false, source: 'versioned-code' }] })
 
   assert.equal(history[0].files[0].duration, '1分05秒')
-  assert.equal(prompts.todo.version, 4)
-  assert.equal(prompts.todo.current, '识别待办')
+  assert.equal(prompts['autonomous-analysis'].version, 2)
+  assert.equal(prompts['autonomous-analysis'].current, '完整分析')
+  assert.equal(prompts['autonomous-analysis'].label, '自主分析')
+  assert.equal(prompts['autonomous-analysis'].editable, false)
 })
 
 
@@ -141,7 +143,8 @@ test('imported event and insight cards expose native labels and finding metadata
       content: [
         { type: 'external_meta', title: '分析类型', body: metadata, items: [] },
         { type: 'finding:fact:high', title: '关键发现', body: '目标没有明确。', items: [] },
-        { type: 'analysis', title: '问题如何形成', body: '目标缺失让取舍失去依据。', items: [] },
+        { type: 'scene_reconstruction', title: '场景还原与核心观点', body: '午间交流逐渐从资源问题转向组织机制。\n\n- 目标持续摇摆\n- 关键资源需要等待', items: [] },
+        { type: 'analysis', title: '问题如何形成', body: '**危险循环**\n\n1. 不认同方向\n2. 说服失败\n3. 降低投入\n\n不认同方向 → 说服失败 → 降低投入 → 结果变差\n\n**三个并列风险**\n\n1. 行业脱节：需要补课\n2. 逃离投射：可能美化机会\n3. 经验错配：方法不能直接复用\n\n**双方真正关心的事**\n\n| 维度 | 其中一方 | 另一方 |\n| --- | --- | --- |\n| 核心诉求 | 产品目标清晰 | 尽快推进 |', items: [] },
       ],
       quotes: [{ quote: '目标一直没有明确下来', context: '', analysis: '这是直接证据。' }],
       recommendations: [{ title: '先确认目标', reason: '保护执行质量', actions: ['写出成功标准'], suggested_language: null, success_signal: null, caveat: null }],
@@ -152,12 +155,38 @@ test('imported event and insight cards expose native labels and finding metadata
   assert.equal(card.label, '事件分析')
   assert.equal(card.title, '午餐深谈')
   assert.equal(card.summary, '系统性问题正在影响投入。')
+  assert.equal(card.showEvidencePlayback, false)
   assert.equal(card.cardKind, 'event')
   assert.deepEqual(card.sceneTypes, ['meeting', 'work_conversation'])
-  assert.deepEqual(card.detailSections.map((item) => item.kind), ['autonomous-finding', 'analysis', 'autonomous-quotes', 'autonomous-recommendations'])
+  assert.deepEqual(card.detailSections.map((item) => item.kind), ['autonomous-finding', 'analysis', 'analysis', 'autonomous-quotes', 'autonomous-recommendations'])
   assert.equal(card.detailSections[0].findingType, 'fact')
   assert.equal(card.detailSections[0].confidence, 'high')
   assert.equal(card.detailSections[0].content, '目标没有明确。')
+  assert.deepEqual(card.detailSections[1].blocks.map((block) => block.kind), ['paragraph', 'bullet-list'])
+  assert.deepEqual(card.detailSections[2].blocks.map((block) => block.kind), ['heading', 'timeline', 'cause-chain', 'heading', 'numbered-list', 'heading', 'matrix'])
+  assert.deepEqual(card.detailSections[2].blocks[1].items, ['不认同方向', '说服失败', '降低投入'])
+  assert.deepEqual(card.detailSections[2].blocks[2].items, ['不认同方向', '说服失败', '降低投入', '结果变差'])
+  assert.deepEqual(card.detailSections[2].blocks[4].items, ['行业脱节：需要补课', '逃离投射：可能美化机会', '经验错配：方法不能直接复用'])
+  assert.deepEqual(card.detailSections[2].blocks[6].rows, [
+    ['维度', '其中一方', '另一方'],
+    ['核心诉求', '产品目标清晰', '尽快推进'],
+  ])
+})
+
+test('all analysis cards hide evidence playback without autonomous metadata', () => {
+  const state = normalizeFeed({ days: [{ date: '2026-08-11', cards: [{
+    id: 'analysis-without-meta',
+    batch_id: 'batch',
+    scene_id: 'analysis',
+    uploaded_at: '2026-08-11T10:00:00+08:00',
+    qa: [],
+    payload: { scene_id: 'analysis', cards: [{ title: '分析', summary: '结论', content: [], quotes: [], recommendations: [] }] },
+    evidence: [{ card_index: 0, segments: [{ segment_id: 'seg-1', start_ms: 0, end_ms: 1000, playback_url: '/audio' }] }],
+  }] }] })
+  const card = state.feed[0].cards[0]
+
+  assert.equal(card.sceneId, 'analysis')
+  assert.equal(card.showEvidencePlayback, false)
 })
 
 

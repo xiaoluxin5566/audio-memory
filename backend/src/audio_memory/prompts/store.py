@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 PROMPT_SCENES = ("todo", "meeting", "parenting", "content", "growth", "inspiration")
-PACKAGED_DEFAULT_VERSION = 4
+PACKAGED_DEFAULT_VERSION = 7
 
 KNOWN_LEGACY_DEFAULT_HASHES = {
     "todo": frozenset(
@@ -28,6 +28,10 @@ KNOWN_LEGACY_DEFAULT_HASHES = {
             "dbd507a9b89e50ba747d0c7ad222f3234a9430fc3704530dec5f76c92bcbc776",
             "dccf15ecdaf6f604bc15aa12734e141738429b123c1fa297a619f4d3f19b74e0",
             "8e1cf25d9ce1dc777cccf10605914c7c4f4f6a343d8619d8b077420f72c9b6ea",
+            "b6b6f33ebf646c88dc831fc9e369cec0a9003478e9395b9fbb30cf73f8236027",
+            "f757f8b528024667007e504d20c656ab70a01d1390e12402b8682c641afd09c4",
+            "eeda3298fd08eccd3696ea2039d7ebf0bc5ddcc911e406f6d8c8abe3b587ea2d",
+            "d3404a107e74c3ba38f202184c3778c6cf614a76a30c6a1c4bdebe31dbb61b8a",
         }
     ),
     "parenting": frozenset(

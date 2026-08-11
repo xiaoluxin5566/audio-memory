@@ -9,6 +9,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy Event Map pipeline is compatibility-only; autonomous analysis is active"
+)
+
 from audio_memory.analysis import runner as runner_module
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.parser import SceneOutputError

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SCENES } from './defaults.js';
 import {
   createInitialState,
   formatJobEta,
@@ -44,8 +43,7 @@ export function App() {
   const [selectedCard, setSelectedCard] = useState(null);
   const [toast, setToast] = useState('');
   const [editingTodo, setEditingTodo] = useState(null);
-  const [promptScene, setPromptScene] = useState('todo');
-  const [promptEditing, setPromptEditing] = useState(false);
+  const [promptScene, setPromptScene] = useState('autonomous-analysis');
   const [promptDraft, setPromptDraft] = useState('');
   const fileInput = useRef(null);
   const pendingUploadFiles = useRef([]);
@@ -66,7 +64,8 @@ export function App() {
   const refreshPrompts = useCallback(async () => {
     const prompts = normalizePrompts(await api.prompts());
     setState((current) => ({ ...current, prompts: { ...current.prompts, ...prompts } }));
-    setPromptDraft((current) => current || prompts.todo?.current || '');
+    setPromptScene((current) => prompts[current] ? current : Object.keys(prompts)[0] || current);
+    setPromptDraft((current) => current || prompts['autonomous-analysis']?.current || Object.values(prompts)[0]?.current || '');
   }, []);
 
   useEffect(() => {
@@ -86,7 +85,7 @@ export function App() {
       if (!job) return;
       setState((current) => ({
         ...current,
-        job: { ...job, progress: job.stage === 'analyzing' ? 80 : (job.progress_percent ?? 0) },
+        job: { ...job, progress: job.progress_percent ?? 0 },
         upload: {
           files: (job.files ?? []).map((file) => ({
             id: file.id,
@@ -200,7 +199,7 @@ export function App() {
   }
 
   const onJobUpdate = useCallback((job) => {
-    const progress = job.stage === 'transcribing' ? (job.progress_percent ?? 0) : job.stage === 'analyzing' ? 80 : 0;
+    const progress = job.progress_percent ?? 0;
     setState((current) => ({ ...current, job: { ...current.job, ...job, progress } }));
   }, []);
   const onJobComplete = useCallback(async () => {
@@ -261,7 +260,7 @@ export function App() {
         </div>
       )}
       {route === 'history' && <History state={state} />}
-      {route === 'prompts' && <PromptSettings state={state} refresh={refreshPrompts} scene={promptScene} setScene={(id) => { setPromptScene(id); setPromptDraft(state.prompts[id]?.current || ''); setPromptEditing(false); }} draft={promptDraft} setDraft={setPromptDraft} editing={promptEditing} setEditing={setPromptEditing} onToast={setToast} />}
+      {route === 'prompts' && <PromptSettings state={state} scene={promptScene} setScene={(id) => { setPromptScene(id); setPromptDraft(state.prompts[id]?.current || ''); }} draft={promptDraft} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
@@ -282,11 +281,12 @@ function JobPanel({ job, onRetry, onCancel }) {
   if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
   if (job.stage === 'failed') return <div className="job-card error"><b>模型分析失败</b>{job.error_code && <code>{job.error_code}</code>}<p>已保留完整转写；可修改当前厂商后重新分析，不会再次执行 Whisper。</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>重新分析</button></div></div>;
   const transcribing = job.stage === 'transcribing';
-  return <div className="job-card"><div className="job-title"><b>{transcribing ? '本地 Whisper 转写中' : '模型正在分析内容'}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />Whisper 转写<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />场景分析与结果生成<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
+  const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : '生成深度分析';
+  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />自主分析、隐藏画像与发布<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {
-  if (!state.feed.length && !state.todos.length) return <div className="empty-feed"><div className="empty-mark">AM</div><h2>先上传音频</h2><p>分析完成后，待办、会议、家庭教育、内容推荐与成长建议会出现在这里。</p></div>;
+  if (!state.feed.length && !state.todos.length) return <div className="empty-feed"><div className="empty-mark">AM</div><h2>先上传音频</h2><p>分析完成后，系统会自主判断值得关注的内容，并生成深度分析卡片。</p></div>;
   const incomplete = state.todos.filter((todo) => !todo.completed);
   const completed = state.todos.filter((todo) => todo.completed);
   return <div className="feed-content">{state.todos.length > 0 && <section className="todo-card"><div className="todo-head"><h2>全局待办</h2><span>{incomplete.length} 项未完成</span></div>{incomplete.map((todo) => <TodoRow key={todo.id} todo={todo} refresh={refresh} editingTodo={editingTodo} setEditingTodo={setEditingTodo} />)}{completed.length > 0 && <><div className="completed-label">已完成 · {completed.length}</div>{completed.map((todo) => <TodoRow key={todo.id} todo={todo} refresh={refresh} editingTodo={editingTodo} setEditingTodo={setEditingTodo} />)}</>}</section>}{state.feed.map((batch) => <section className="day-block" key={batch.id}><div className="date-divider"><b>{batch.date}</b><span>最新更新 {batch.uploadedAt}</span></div><div className="batch-line"><div className="batch-title"><b>{batch.uploadedAt} 上传</b><span>分析完成</span></div>{orderCards(batch.cards).map((card) => <article className="result-card" key={card.id} onClick={() => onOpenCard(card, batch)}><div className="result-head"><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><small>{card.timeLabel}</small></div><h3>{card.title}</h3><p>{card.summary}</p><div className="result-foot"><span>{card.meta}</span><button>查看完整结果 ›</button></div></article>)}</div></section>)}</div>;
@@ -339,7 +339,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
   function closeFeedback() {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}<EvidencePlayback evidence={card.evidence} />{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
 }
 
 function Field({ label, children }) {
@@ -366,8 +366,25 @@ function AutonomousDetailSection({ section }) {
     return <section className="detail-section autonomous-section autonomous-finding"><div className="finding-meta"><span>{findingLabels[section.findingType] || '关键发现'}</span><small>{confidenceLabels[section.confidence] || section.confidence}</small></div>{section.content && <p>{section.content}</p>}</section>;
   }
   if (section.kind === 'autonomous-quotes') return <section className="detail-section autonomous-section"><h2>{section.title}</h2>{section.entries.map((item, index) => <article className="meeting-quote" key={`${item.quote}-${index}`}><blockquote>“{item.quote}”</blockquote><Field label="当时语境">{item.context}</Field><Field label="分析">{item.analysis}</Field></article>)}</section>;
-  if (section.kind === 'autonomous-recommendations') return <section className="detail-section autonomous-section"><h2>{section.title}</h2>{section.entries.map((item, index) => <article className="meeting-recommendation" key={`${item.title}-${index}`}><h3>{item.title}</h3><Field label="为什么提出这条建议">{item.reason}</Field><Field label="可以这样做">{item.actions}</Field><Field label="可以这样说">{item.suggested_language}</Field><Field label="有效的信号">{item.success_signal}</Field><Field label="适用边界">{item.caveat}</Field></article>)}</section>;
-  return <section className="detail-section autonomous-section"><div className="section-kicker">{section.sectionType || '深度分析'}</div><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items?.length > 0 && <ul className="meeting-points">{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}</section>;
+  if (section.kind === 'autonomous-recommendations') return <section className="detail-section autonomous-section analysis-recommendations"><div className="section-kicker">03 · 下一步建议</div><h2>{section.title}</h2><div className="analysis-recommendation-list">{section.entries.map((item, index) => <article className="meeting-recommendation" key={`${item.title}-${index}`}><div className="recommendation-number">{index + 1}</div><div><h3>{item.title}</h3><Field label="为什么提出这条建议">{item.reason}</Field><Field label="可以这样做">{item.actions}</Field><Field label="可以这样说">{item.suggested_language}</Field><Field label="有效的信号">{item.success_signal}</Field><Field label="适用边界">{item.caveat}</Field></div></article>)}</div></section>;
+  const isScene = /scene|context|reconstruction|场景|还原/i.test(`${section.sectionType} ${section.title}`);
+  return <section className={`detail-section autonomous-section autonomous-editorial ${isScene ? 'editorial-scene' : 'editorial-analysis'}`}><div className="section-kicker">{isScene ? '01 · 场景还原与核心观点' : '02 · 分析、问题与点评'}</div><h2>{section.title}</h2>{section.blocks?.length ? <AnalysisBlocks blocks={section.blocks} /> : section.content && <p>{section.content}</p>}{section.items?.length > 0 && <ul className="meeting-points">{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}</section>;
+}
+
+function RichInline({ text = '' }) {
+  return String(text).split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) => /^\*\*[^*]+\*\*$/.test(part) ? <strong key={index}>{part.slice(2, -2)}</strong> : <span key={index}>{part}</span>);
+}
+
+function AnalysisBlocks({ blocks = [] }) {
+  return <div className="analysis-blocks">{blocks.map((block, index) => {
+    if (block.kind === 'heading') return <h3 className="analysis-subheading" key={index}>{block.text}</h3>;
+    if (block.kind === 'bullet-list') return <ul className="analysis-key-points" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ul>;
+    if (block.kind === 'timeline') return <ol className="analysis-timeline" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ol>;
+    if (block.kind === 'cause-chain') return <div className="analysis-cause-chain" key={index}>{block.items.map((item, itemIndex) => <div className="cause-step" key={`${item}-${itemIndex}`}><span><RichInline text={item} /></span>{itemIndex < block.items.length - 1 && <b aria-hidden="true">→</b>}</div>)}</div>;
+    if (block.kind === 'numbered-list') return <div className="analysis-insight-grid" key={index}>{block.items.map((item, itemIndex) => { const parts = item.split(/[：:]/); const label = parts.length > 1 ? parts.shift() : `${itemIndex + 1}`; return <article key={item}><span>{String(itemIndex + 1).padStart(2, '0')}</span><h4>{label}</h4><p><RichInline text={parts.length ? parts.join('：') : item} /></p></article>; })}</div>;
+    if (block.kind === 'matrix') return <div className="analysis-matrix-wrap" key={index}><table className="analysis-matrix"><thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}>{cell}</th>)}</tr></thead><tbody>{block.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><RichInline text={cell} /></td>)}</tr>)}</tbody></table></div>;
+    return <p className="analysis-paragraph" key={index}><RichInline text={block.text} /></p>;
+  })}</div>;
 }
 
 function evidenceTimeLabel(milliseconds) {
@@ -391,12 +408,10 @@ function History({ state }) {
   return <main className="page-container"><div className="page-heading"><h1>音频历史</h1><p>已完成分析的音频会自动保存在本机。</p></div>{state.history.length === 0 ? <div className="page-empty"><h2>还没有历史音频</h2><p>完成一次整批分析后，音频会出现在这里。</p></div> : state.history.map((batch) => <section className="history-day" key={batch.id}><div className="date-divider"><b>{batch.date}</b></div><div className="history-batch"><div className="history-batch-title"><b>{batch.uploadedAt} 上传</b><span>{batch.files.length} 个音频</span></div><div className="audio-list">{batch.files.map((file, index) => <div className="audio-row" key={`${file.name}-${index}`}><div className="audio-type">{file.type}</div><div><b>{file.name}</b><span>{file.size} · {file.duration}</span></div><div className="audio-time"><b>{file.time}</b><span>本地文件</span></div></div>)}</div></div></section>)}</main>;
 }
 
-function PromptSettings({ state, refresh, scene, setScene, draft, setDraft, editing, setEditing, onToast }) {
-  const active = SCENES.find((item) => item.id === scene);
-  async function save() {
-    try { await api.savePrompt(scene, state.prompts[scene].version, draft); await refresh(); setEditing(false); onToast('Prompt 已保存，新分析将使用该版本'); } catch (error) { onToast(error.message); }
-  }
-  return <main className="page-container prompt-page"><div className="page-heading"><h1>Prompt 设置</h1><p>修改后只影响之后新分析的音频，历史结果不会重新生成。</p></div><div className="prompt-workspace"><aside><h2>分析场景</h2>{SCENES.map((item) => <button key={item.id} className={scene === item.id ? 'active' : ''} onClick={() => setScene(item.id)}><span>{item.name}</span><small>v{state.prompts[item.id]?.version ?? 1}</small></button>)}</aside><section className="prompt-editor"><div className="prompt-editor-head"><div><h2>{active.name}</h2><p>本地文件：prompts/{scene}/current.md</p></div><button className="secondary" disabled={editing} onClick={() => setEditing(true)}>{editing ? '编辑中' : '编辑'}</button></div><div className="prompt-info">可自由修改完整自然语言 Prompt。系统基础规则和输出 Schema 由程序维护，不会随此内容变化。</div><textarea className="prompt-textarea" readOnly={!editing} value={draft} onChange={(event) => setDraft(event.target.value)} /><div className="prompt-actions"><span>{editing ? '修改后点击保存才会生效' : '当前为只读状态'}</span><button className="primary" disabled={!editing || !draft.trim()} onClick={save}>保存</button></div></section></div></main>;
+function PromptSettings({ state, scene, setScene, draft }) {
+  const prompts = Object.entries(state.prompts).filter(([, prompt]) => prompt.source === 'versioned-code');
+  const active = state.prompts[scene] ?? prompts[0]?.[1];
+  return <main className="page-container prompt-page"><div className="page-heading"><h1>Prompt 设置</h1><p>这里展示当前分析流程实际使用的生产 Prompt。</p></div><div className="prompt-workspace"><aside><h2>生产 Prompt</h2>{prompts.map(([id, prompt]) => <button key={id} className={scene === id ? 'active' : ''} onClick={() => setScene(id)}><span>{prompt.label}</span><small>v{prompt.version}</small></button>)}</aside><section className="prompt-editor"><div className="prompt-editor-head"><div><h2>{active?.label ?? '正在加载'}</h2><p>版本化来源：自主分析规范</p></div></div><div className="prompt-info">当前生产 Prompt，由程序版本化维护。修改需通过代码、测试与重新发布；旧六场景仅保留历史兼容，不参与新分析。</div><textarea className="prompt-textarea" readOnly value={draft} /><div className="prompt-actions"><span>当前为只读状态</span></div></section></div></main>;
 }
 
 function ProviderModal({ state, refresh, onClose, onToast }) {

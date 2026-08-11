@@ -145,6 +145,36 @@ def meeting_card(event_id: str, *extra_event_ids: str) -> MeetingCard:
     )
 
 
+def test_meeting_detail_allows_model_selected_analysis_fields() -> None:
+    detail = MeetingDetail(
+        event_ids=["event_001"],
+        analysis_angle="候选人的案例回答是否形成完整证据链",
+        context_summary="面试官围绕项目经历连续追问。",
+        quote_analyses=[
+            MeetingQuoteAnalysis(
+                event_ids=["event_001"],
+                evidence_segment_ids=["seg_001"],
+                speaker="候选人",
+                quote="我先访谈了十位用户。",
+                deeper_analysis="回答提供了行动和样本规模，但尚未解释筛选方式。",
+            )
+        ],
+    )
+
+    assert detail.participants == []
+    assert detail.arguments == []
+    assert detail.quote_analyses[0].context is None
+
+
+def test_meeting_detail_rejects_summary_without_any_evidenced_analysis() -> None:
+    with pytest.raises(ValidationError, match="at least one evidenced analysis"):
+        MeetingDetail(
+            event_ids=["event_001"],
+            analysis_angle="泛化摘要",
+            context_summary="只有摘要。",
+        )
+
+
 def test_todo_scene_never_emits_cards_and_only_publishes_user_owned_todos() -> None:
     valid = TodoSceneResult(
         scene_id="todo",

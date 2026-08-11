@@ -50,10 +50,8 @@ class TranscriptionService:
                 async for segment in engine.transcribe_file(file, resume_from):
                     await self._save_segment(segment)
             bulk_elapsed_seconds = time.monotonic() - bulk_started
-            if self.risk_gate is None or self.refiner is None:
-                raise RuntimeError(
-                    "Transcription risk gate and segment refiner are required"
-                )
+            if self.risk_gate is None:
+                raise RuntimeError("Transcription risk gate is required")
             await self.risk_gate.apply(
                 job_id,
                 self.refiner,
@@ -148,7 +146,7 @@ class TranscriptionService:
                     ),
                     no_speech_prob=segment.no_speech_prob,
                     avg_logprob=segment.avg_logprob,
-                    speaker_id=getattr(segment, "speaker_id", None),
+                    speaker_id=getattr(segment, "speaker_id", "unknown") or "unknown",
                     risk_state=segment.risk_state,
                     risk_classified=False,
                     is_reliable=segment.is_reliable,

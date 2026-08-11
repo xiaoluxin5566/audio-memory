@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from html import escape
 from hashlib import sha256
 from importlib.resources import files
+from pathlib import Path
 
 from audio_memory.analysis import dossiers as dossier_policy
 from audio_memory.analysis import windows as analysis_windows
@@ -26,6 +27,11 @@ MODEL_REQUEST_POLICIES = {
     "director": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=120),
     "scene": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=120),
     "profile": ModelRequestPolicy(max_tokens=8_192, timeout_seconds=120),
+    "autonomous": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
+    "autonomous-notes": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
+    "autonomous-retrieval-plan": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
+    "autonomous-final": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
+    "autonomous-profile": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=180),
 }
 
 
@@ -62,7 +68,25 @@ class ModelRequest:
 
 
 class PromptComposer:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
+
+    @classmethod
+    def autonomous_prompt_documents(cls) -> tuple[dict[str, object], ...]:
+        """Return the versioned prompts used by the active production path."""
+        return (
+            {
+                "scene_id": "autonomous-analysis",
+                "label": "自主分析",
+                "version": 2,
+                "content": cls._approved_prompt("Prompt A", "Prompt B"),
+            },
+            {
+                "scene_id": "autonomous-profile",
+                "label": "隐藏画像",
+                "version": 1,
+                "content": cls._approved_prompt("Prompt B", None),
+            },
+        )
 
     @classmethod
     def fixed_rules_hash(cls) -> str:
@@ -75,6 +99,10 @@ class PromptComposer:
                     "director.md",
                     "common-scene.md",
                 )
+            },
+            "autonomous_prompts": {
+                "analysis": cls._approved_prompt("Prompt A", "Prompt B"),
+                "profile": cls._approved_prompt("Prompt B", None),
             },
             "schema_version": cls.SCHEMA_VERSION,
             "cluster_policy": {
@@ -146,6 +174,139 @@ class PromptComposer:
             timeout_seconds=policy.timeout_seconds,
             segment_count=len(transcript),
         )
+
+    def compose_autonomous_analysis(
+        self,
+        *,
+        transcript: list[dict[str, object]],
+        profile: list[dict[str, object]],
+        schema: dict[str, object],
+        semantic_retry: bool = False,
+    ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["autonomous"]
+        rules = self._approved_prompt("Prompt A", "Prompt B")
+        if semantic_retry:
+            rules += (
+                "\n\n服务端校验反馈：上一轮 JSON 或证据未通过校验。"
+                "只引用 transcript_data 中逐字存在的 segment_id；原句必须逐字出现在引用句段中。"
+                "删除无法由原文支持的内容，不要构造 ID。"
+            )
+        return ModelRequest(
+            scene_id="autonomous",
+            prompt_version=2,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._fixed_prompt("system.md"),
+            common_rules=rules,
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet(
+                        "transcript_data", self._autonomous_transcript(transcript)
+                    ),
+                    self._untrusted_packet("hidden_profile_data", profile),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(transcript),
+        )
+
+    def compose_autonomous_notes(self, *, window, profile, schema) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["autonomous-notes"]
+        return ModelRequest(
+            scene_id=f"autonomous-notes:{window.window_id}", prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._fixed_prompt("system.md"),
+            common_rules=(
+                "你正在为超长录音建立高保真信息索引。只记录当前窗口明确出现的信息，"
+                "每条 note 必须锚定当前窗口的 segment_id；不做最终评价、不生成卡片、"
+                "不补写原文没有的信息。window_id 必须原样返回。"
+            ),
+            scene_prompt="",
+            user_data="\n".join([
+                self._untrusted_packet("transcript_window", self._autonomous_transcript(list(window.segments))),
+                self._untrusted_packet("hidden_profile_data", profile),
+                self._untrusted_packet("window_metadata", {"window_id": window.window_id}),
+            ]),
+            schema_json=self._schema_json(schema), max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds, segment_count=len(window.segments),
+        )
+
+    def compose_autonomous_retrieval_plan(self, *, notebooks, profile, schema) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["autonomous-retrieval-plan"]
+        return ModelRequest(
+            scene_id="autonomous-retrieval-plan", prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._fixed_prompt("system.md"),
+            common_rules=(
+                "根据全部高保真信息笔记规划具有独立用户价值的最终卡片。"
+                "每张卡只请求完成该分析任务确实需要核验的原文 segment_id；"
+                "ID 必须来自笔记证据，禁止构造。完整面试通常保持为一张卡。"
+            ), scene_prompt="",
+            user_data="\n".join([
+                self._untrusted_packet("information_notebooks", notebooks),
+                self._untrusted_packet("hidden_profile_data", profile),
+            ]), schema_json=self._schema_json(schema), max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=sum(len(note.get("notes", [])) for note in notebooks),
+        )
+
+    def compose_autonomous_final(self, *, transcript, notebooks, retrieval_plan, profile, schema, semantic_retry=False) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["autonomous-final"]
+        rules = self._approved_prompt("Prompt A", "Prompt B") + (
+            "\n\n这是超长录音的最终分析。信息笔记用于建立全局脉络；事实、引用和证据 ID"
+            "只能来自 retrieved_transcript_data 中回取的完整原文。"
+        )
+        if semantic_retry:
+            rules += "\n服务端校验反馈：删除所有不在回取原文中的证据或引语，不要构造 ID。"
+        return ModelRequest(
+            scene_id="autonomous-final", prompt_version=2,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._fixed_prompt("system.md"), common_rules=rules,
+            scene_prompt="",
+            user_data="\n".join([
+                self._untrusted_packet("information_notebooks", notebooks),
+                self._untrusted_packet("retrieval_plan", retrieval_plan),
+                self._untrusted_packet("retrieved_transcript_data", self._autonomous_transcript(transcript)),
+                self._untrusted_packet("hidden_profile_data", profile),
+            ]), schema_json=self._schema_json(schema), max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds, segment_count=len(transcript),
+        )
+
+    @staticmethod
+    def _approved_prompt(start: str, end: str | None = None) -> str:
+        root = Path(__file__).resolve().parents[4]
+        path = root / "docs/superpowers/specs/2026-08-11-autonomous-analysis-prompts.md"
+        text = path.read_text(encoding="utf-8")
+        start_marker = f"## {start}"
+        start_at = text.index(start_marker) + len(start_marker)
+        if end is None:
+            return text[start_at:].strip()
+        end_at = text.index(f"## {end}", start_at)
+        return text[start_at:end_at].strip()
+
+    @staticmethod
+    def _autonomous_transcript(
+        transcript: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Project reliable source text without implying speaker identity."""
+        allowed = (
+            "segment_id",
+            "file_id",
+            "file_name",
+            "recording_started_at",
+            "local_date",
+            "timezone",
+            "start_ms",
+            "end_ms",
+            "text",
+            "reliability_weight",
+        )
+        return [
+            {key: item[key] for key in allowed if key in item}
+            for item in transcript
+        ]
 
     def compose_director(
         self,

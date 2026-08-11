@@ -196,8 +196,12 @@ class ContentService:
         card: Card,
         version: AnalysisVersion,
     ) -> list[dict[str, object]]:
-        staged = self._staged_scene(version, card.scene_id)
-        source_cards = staged.get("cards", [])
+        if card.scene_id == "analysis":
+            payload = json.loads(card.payload_json)
+            source_cards = payload.get("cards", []) if isinstance(payload, dict) else []
+        else:
+            staged = self._staged_scene(version, card.scene_id)
+            source_cards = staged.get("cards", [])
         if not isinstance(source_cards, list) or not source_cards:
             return []
         requested_ids = {
@@ -271,6 +275,14 @@ class ContentService:
     def _scene_evidence_ids(
         cls, version: AnalysisVersion, scene_id: str
     ) -> list[str]:
+        if scene_id == "analysis":
+            try:
+                staged = json.loads(version.staged_results_json)
+            except (TypeError, json.JSONDecodeError):
+                return []
+            return cls._collect_evidence_ids(
+                staged.get("autonomous", {}) if isinstance(staged, dict) else {}
+            )
         return cls._collect_evidence_ids(cls._staged_scene(version, scene_id))
 
     @classmethod

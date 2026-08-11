@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from hashlib import sha256
 from typing import Protocol
 from uuid import uuid4
@@ -11,6 +12,11 @@ from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, select, update
 
 from audio_memory.analysis.profile import validate_profile_delta
+from audio_memory.analysis.autonomous_context import (
+    DirectContext,
+    LongContextPlan,
+    plan_autonomous_context,
+)
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
 from audio_memory.analysis.clusters import (
@@ -49,6 +55,11 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.autonomous_schema import (
+    AutonomousAnalysisResult,
+    AutonomousRetrievalPlan,
+    InformationNotebook,
+)
 from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.evidence import (
     EvidenceIntegrityError,
@@ -85,6 +96,22 @@ class LeaseLostError(RuntimeError):
 
 
 class StrictAnalysisProvider(Protocol):
+    async def analyze_autonomous(
+        self, request, provider_snapshot
+    ) -> AutonomousAnalysisResult: ...
+
+    async def analyze_autonomous_notes(
+        self, request, provider_snapshot
+    ) -> InformationNotebook: ...
+
+    async def analyze_autonomous_retrieval_plan(
+        self, request, provider_snapshot
+    ) -> AutonomousRetrievalPlan: ...
+
+    async def analyze_autonomous_final(
+        self, request, provider_snapshot
+    ) -> AutonomousAnalysisResult: ...
+
     async def analyze_event_map(self, request, provider_snapshot) -> EventMapDraft: ...
 
     async def analyze_director(self, request, provider_snapshot) -> DirectorResult: ...
@@ -95,7 +122,7 @@ class StrictAnalysisProvider(Protocol):
 
 
 class ProfileExtractor(Protocol):
-    async def extract(self, transcript, existing, provider_snapshot): ...
+    async def extract(self, transcript, cards, existing, provider_snapshot): ...
 
 
 class Publisher(Protocol):
@@ -158,143 +185,28 @@ class AnalysisRunner:
         transcript = await self._transcript(version.source_job_id)
         segment_ids = {str(item["segment_id"]) for item in transcript}
         profile = self._json_list(version.profile_snapshot_json)
-        prompts = self._json_object(version.prompt_snapshot_json)
         staged = self._json_object(version.staged_results_json)
         try:
             await self._require_generation(version, worker_owner_id)
-            event_map = await self._event_map(
-                version,
-                transcript,
-                profile,
-                provider_snapshot,
-                worker_owner_id,
-            )
-            event_map, dossiers = await self._scene_context(
-                version,
-                transcript,
-                event_map,
-                provider_snapshot,
-                staged,
-                worker_owner_id,
-            )
-            segment_lookup = {
-                str(item["segment_id"]): item for item in transcript
-            }
-            results: list[SceneResultBase] = []
-            for scene_id in PROMPT_SCENES:
-                adapter = _SCENE_ADAPTERS[scene_id]
-                scene_dossiers = dossiers_for_scene(dossiers, scene_id)
-                if scene_id in staged:
-                    result = adapter.validate_python(staged[scene_id])
-                    if not scene_dossiers and result.should_generate:
-                        raise ProviderAnalysisError(
-                            "Staged scene result has no routed dossier",
-                            code="scene_dossier_invalid",
-                        )
-                else:
-                    if not scene_dossiers:
-                        result = adapter.validate_python(
-                            {
-                                "scene_id": scene_id,
-                                "should_generate": False,
-                                "generation_reason": "no_selected_dossier",
-                                "confidence": 0,
-                                "cards": [],
-                                "todos": [],
-                            }
-                        )
-                    else:
-                        prompt = self._prompt_from_snapshot(scene_id, prompts)
-                        for attempt in range(SCENE_SEMANTIC_REPAIR_ATTEMPTS + 1):
-                            request = self.composer.compose_scene(
-                                scene_id,
-                                transcript=transcript,
-                                event_map=event_map,
-                                dossiers=scene_dossiers,
-                                profile=profile,
-                                prompt=prompt,
-                                schema=_SCENE_MODELS[scene_id].model_json_schema(),
-                                semantic_retry=attempt > 0,
-                            )
-                            await self._require_ownership(
-                                version.id, worker_owner_id
-                            )
-                            await self._require_generation(
-                                version, worker_owner_id
-                            )
-                            generated = await self.provider.analyze_scene(
-                                scene_id, request, provider_snapshot
-                            )
-                            await self._require_ownership(
-                                version.id, worker_owner_id
-                            )
-                            await self._require_generation(
-                                version, worker_owner_id
-                            )
-                            result = adapter.validate_python(
-                                generated.model_dump(mode="python")
-                                if hasattr(generated, "model_dump")
-                                else generated
-                            )
-                            try:
-                                validate_evidence_integrity(
-                                    result,
-                                    event_map,
-                                    segment_ids,
-                                    dossiers=scene_dossiers,
-                                    segment_lookup=segment_lookup,
-                                )
-                            except EvidenceIntegrityError as exc:
-                                if attempt < SCENE_SEMANTIC_REPAIR_ATTEMPTS:
-                                    logger.warning(
-                                        "scene_semantic_repair scene_id=%s "
-                                        "attempt=%d dossiers=%d",
-                                        scene_id,
-                                        attempt + 1,
-                                        len(scene_dossiers),
-                                    )
-                                    continue
-                                raise ProviderAnalysisError(
-                                    "Scene result evidence is invalid",
-                                    code="scene_evidence_invalid",
-                                ) from exc
-                            break
-                        else:
-                            raise AssertionError(
-                                "scene semantic repair loop exhausted"
-                            )
-                    staged[scene_id] = result.model_dump(mode="json")
-                    await self._save_staged(version.id, staged, worker_owner_id)
-                if scene_dossiers:
-                    validate_evidence_integrity(
-                        result,
-                        event_map,
-                        segment_ids,
-                        dossiers=scene_dossiers,
-                        segment_lookup=segment_lookup,
-                    )
-                else:
-                    validate_evidence_integrity(result, event_map, segment_ids)
-                results.append(result)
-
-            try:
-                validate_analysis_quality(transcript, event_map, results)
-            except AnalysisQualityError as exc:
-                raise ProviderAnalysisError(
-                    "Analysis result did not pass the semantic quality gate",
-                    code="analysis_quality_insufficient",
-                ) from exc
+            context = plan_autonomous_context(transcript)
+            if isinstance(context, DirectContext):
+                result = await self._direct_autonomous(
+                    version, transcript, profile, provider_snapshot, staged, worker_owner_id
+                )
+                profile_transcript = transcript
+            else:
+                result, profile_transcript = await self._long_autonomous(
+                    version, context, transcript, profile, provider_snapshot, staged,
+                    worker_owner_id,
+                )
 
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)
-            if event_map.user_speaker.is_reliable:
-                raw_delta = await self.profile_extractor.extract(
-                    transcript, profile, provider_snapshot
-                )
-                await self._require_ownership(version.id, worker_owner_id)
-                await self._require_generation(version, worker_owner_id)
-            else:
-                raw_delta = []
+            raw_delta = await self.profile_extractor.extract(
+                profile_transcript, result.cards, profile, provider_snapshot
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
             verified_delta = await self._save_profile_candidates(
                 version.id, raw_delta, segment_ids, worker_owner_id
             )
@@ -307,7 +219,7 @@ class AnalysisRunner:
                     await self._mark_credential_changed(version, worker_owner_id)
                 outcome = await self.publisher.publish(
                     version.id,
-                    results,
+                    result,
                     delta,
                     worker_owner_id=worker_owner_id,
                 )
@@ -335,6 +247,208 @@ class AnalysisRunner:
             await self._require_generation(version, worker_owner_id)
             await self._mark_failed(version.id, worker_owner_id)
             raise
+
+    async def _direct_autonomous(
+        self, version, transcript, profile, provider_snapshot, staged, worker_owner_id
+    ) -> AutonomousAnalysisResult:
+        if "autonomous" in staged:
+            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+        else:
+            for attempt in range(2):
+                request = self.composer.compose_autonomous_analysis(
+                    transcript=transcript, profile=profile,
+                    schema=AutonomousAnalysisResult.model_json_schema(),
+                    semantic_retry=attempt > 0,
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+                result = await self.provider.analyze_autonomous(request, provider_snapshot)
+                try:
+                    result = self._sanitize_autonomous_evidence(result, transcript)
+                    self._validate_autonomous_evidence(result, transcript)
+                except ValueError as exc:
+                    if attempt == 0:
+                        continue
+                    raise ProviderAnalysisError(
+                        "Autonomous result evidence is invalid",
+                        code="autonomous_evidence_invalid",
+                    ) from exc
+                break
+            staged["autonomous"] = result.model_dump(mode="json")
+            await self._save_staged(version.id, staged, worker_owner_id)
+        result = self._sanitize_autonomous_evidence(result, transcript)
+        self._validate_autonomous_evidence(result, transcript)
+        return result
+
+    async def _long_autonomous(
+        self, version, context: LongContextPlan, transcript, profile,
+        provider_snapshot, staged, worker_owner_id,
+    ) -> tuple[AutonomousAnalysisResult, list[dict[str, object]]]:
+        raw_notes = staged.get("autonomous_notes")
+        note_payloads = (
+            dict(raw_notes)
+            if isinstance(raw_notes, dict)
+            else self._json_object(raw_notes)
+        )
+        notebooks: list[InformationNotebook] = []
+        for window in context.windows:
+            note_was_staged = window.window_id in note_payloads
+            if note_was_staged:
+                notebook = InformationNotebook.model_validate(note_payloads[window.window_id])
+            else:
+                request = self.composer.compose_autonomous_notes(
+                    window=window, profile=profile,
+                    schema=InformationNotebook.model_json_schema(),
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+                notebook = await self.provider.analyze_autonomous_notes(
+                    request, provider_snapshot
+                )
+            allowed = {str(item["segment_id"]) for item in window.segments}
+            if notebook.window_id != window.window_id or any(
+                not note.evidence_segment_ids
+                or not set(note.evidence_segment_ids).issubset(allowed)
+                for note in notebook.notes
+            ):
+                raise ProviderAnalysisError(
+                    "Information notebook evidence is invalid",
+                    code="autonomous_notes_evidence_invalid",
+                )
+            if not note_was_staged:
+                note_payloads[window.window_id] = notebook.model_dump(mode="json")
+                staged["autonomous_notes"] = note_payloads
+                await self._save_staged(version.id, staged, worker_owner_id)
+            notebooks.append(notebook)
+
+        retrieval_was_staged = "autonomous_retrieval_plan" in staged
+        if retrieval_was_staged:
+            retrieval = AutonomousRetrievalPlan.model_validate(
+                staged["autonomous_retrieval_plan"]
+            )
+        else:
+            notebook_payloads = [item.model_dump(mode="json") for item in notebooks]
+            request = self.composer.compose_autonomous_retrieval_plan(
+                notebooks=notebook_payloads, profile=profile,
+                schema=AutonomousRetrievalPlan.model_json_schema(),
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            retrieval = await self.provider.analyze_autonomous_retrieval_plan(
+                request, provider_snapshot
+            )
+        note_ids = {
+            segment_id for notebook in notebooks for note in notebook.notes
+            for segment_id in note.evidence_segment_ids
+        }
+        requested_ids = {
+            segment_id for card in retrieval.cards
+            for segment_id in card.required_segment_ids
+        }
+        if not requested_ids or not requested_ids.issubset(note_ids):
+            raise ProviderAnalysisError(
+                "Autonomous retrieval plan requested invalid evidence",
+                code="autonomous_retrieval_evidence_invalid",
+            )
+        if not retrieval_was_staged:
+            staged["autonomous_retrieval_plan"] = retrieval.model_dump(mode="json")
+            await self._save_staged(version.id, staged, worker_owner_id)
+        retrieved = [
+            item for item in transcript if str(item["segment_id"]) in requested_ids
+        ]
+        if "autonomous" in staged:
+            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+        else:
+            notebook_payloads = [item.model_dump(mode="json") for item in notebooks]
+            for attempt in range(2):
+                request = self.composer.compose_autonomous_final(
+                    transcript=retrieved, notebooks=notebook_payloads,
+                    retrieval_plan=retrieval.model_dump(mode="json"), profile=profile,
+                    schema=AutonomousAnalysisResult.model_json_schema(),
+                    semantic_retry=attempt > 0,
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+                result = await self.provider.analyze_autonomous_final(
+                    request, provider_snapshot
+                )
+                try:
+                    result = self._sanitize_autonomous_evidence(result, retrieved)
+                    self._validate_autonomous_evidence(result, retrieved)
+                except ValueError as exc:
+                    if attempt == 0:
+                        continue
+                    raise ProviderAnalysisError(
+                        "Autonomous final evidence is invalid",
+                        code="autonomous_final_evidence_invalid",
+                    ) from exc
+                break
+            staged["autonomous"] = result.model_dump(mode="json")
+            await self._save_staged(version.id, staged, worker_owner_id)
+        result = self._sanitize_autonomous_evidence(result, retrieved)
+        self._validate_autonomous_evidence(result, retrieved)
+        return result, retrieved
+    @staticmethod
+    def _validate_autonomous_evidence(
+        result: AutonomousAnalysisResult,
+        transcript: list[dict[str, object]],
+    ) -> None:
+        if sum(len(str(item["text"])) for item in transcript) >= 1_000 and not result.cards:
+            raise ValueError("large transcript produced no autonomous cards")
+        lookup = {str(item["segment_id"]): str(item["text"]) for item in transcript}
+        for card in result.cards:
+            evidenced = [card, *card.content, *card.quotes, *card.recommendations]
+            for item in evidenced:
+                if not set(item.evidence_segment_ids).issubset(lookup):
+                    raise ValueError("unknown autonomous evidence segment")
+            for quote in card.quotes:
+                source = "".join(lookup[item] for item in quote.evidence_segment_ids)
+                normalized_quote = re.sub(r"[^\w\u4e00-\u9fff]", "", quote.quote)
+                normalized_source = re.sub(r"[^\w\u4e00-\u9fff]", "", source)
+                if not normalized_quote or normalized_quote not in normalized_source:
+                    raise ValueError("autonomous quote is not verbatim evidence")
+
+    @staticmethod
+    def _sanitize_autonomous_evidence(
+        result: AutonomousAnalysisResult,
+        transcript: list[dict[str, object]],
+    ) -> AutonomousAnalysisResult:
+        lookup = {str(item["segment_id"]): str(item["text"]) for item in transcript}
+        cleaned = result.model_copy(deep=True)
+        retained_cards = []
+        for card in cleaned.cards:
+            card.evidence_segment_ids = [
+                item for item in card.evidence_segment_ids if item in lookup
+            ]
+            for item in [*card.content, *card.recommendations]:
+                item.evidence_segment_ids = [
+                    segment_id
+                    for segment_id in item.evidence_segment_ids
+                    if segment_id in lookup
+                ]
+            retained_quotes = []
+            for quote in card.quotes:
+                quote.evidence_segment_ids = [
+                    item for item in quote.evidence_segment_ids if item in lookup
+                ]
+                source = "".join(lookup[item] for item in quote.evidence_segment_ids)
+                normalized_quote = re.sub(r"[^\w\u4e00-\u9fff]", "", quote.quote)
+                normalized_source = re.sub(r"[^\w\u4e00-\u9fff]", "", source)
+                if normalized_quote and normalized_quote in normalized_source:
+                    retained_quotes.append(quote)
+            card.quotes = retained_quotes
+            supported = {
+                evidence_id
+                for item in [card, *card.content, *card.quotes, *card.recommendations]
+                for evidence_id in item.evidence_segment_ids
+            }
+            if supported:
+                card.evidence_segment_ids = list(
+                    dict.fromkeys([*card.evidence_segment_ids, *supported])
+                )
+                retained_cards.append(card)
+        cleaned.cards = retained_cards
+        return cleaned
 
     async def _event_map(
         self,
@@ -728,7 +842,6 @@ class AnalysisRunner:
                     "timezone": file.timezone,
                     "start_ms": row.start_ms,
                     "end_ms": row.end_ms,
-                    "speaker_id": row.speaker_id or "unknown",
                     "text": row.text,
                     "reliability_weight": row.reliability_weight,
                 }

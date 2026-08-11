@@ -300,6 +300,7 @@ async def test_invalid_profile_schema_makes_exactly_one_repair_request() -> None
         facts = await extractor.extract(
             [{"segment_id": "seg_0_0", "text": "我是产品经理"}],
             [],
+            [],
             {"provider_id": "kimi", "model_id": "kimi-k2.5"},
         )
 

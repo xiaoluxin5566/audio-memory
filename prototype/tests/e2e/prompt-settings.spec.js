@@ -1,16 +1,10 @@
 import { expect, test } from '@playwright/test'
 
-test('editing a fixed scene saves a new prompt version for future analysis', async ({ page }) => {
-  let version = 1
-  let content = '识别会议并输出核心结论。'
-  let savedBody = null
-  const prompts = () => ({
-    prompts: ['todo', 'meeting', 'parenting', 'content', 'growth', 'inspiration'].map((scene_id) => ({
-      scene_id,
-      version: scene_id === 'meeting' ? version : 1,
-      content: scene_id === 'meeting' ? content : `${scene_id} 默认提示词`,
-    })),
-  })
+test('prompt settings exposes only the two versioned runtime prompts as read-only', async ({ page }) => {
+  const prompts = { prompts: [
+    { scene_id: 'autonomous-analysis', label: '自主分析', version: 2, content: '自主分析生产规则', editable: false, source: 'versioned-code' },
+    { scene_id: 'autonomous-profile', label: '隐藏画像', version: 1, content: '隐藏画像生产规则', editable: false, source: 'versioned-code' },
+  ] }
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
@@ -19,25 +13,21 @@ test('editing a fixed scene saves a new prompt version for future analysis', asy
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
-    if (pathname === '/api/prompts/meeting' && request.method() === 'PUT') {
-      savedBody = request.postDataJSON()
-      content = savedBody.content
-      version += 1
-      return route.fulfill({ json: { scene_id: 'meeting', version, content } })
-    }
-    if (pathname === '/api/prompts') return route.fulfill({ json: prompts() })
+    if (pathname === '/api/prompts') return route.fulfill({ json: prompts })
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
   await page.goto('/')
 
   await page.getByRole('button', { name: 'Prompt 设置' }).click()
-  await page.getByRole('button', { name: /会议纪要/ }).click()
-  await page.getByRole('button', { name: '编辑' }).click()
-  const editor = page.locator('.prompt-textarea')
-  await editor.fill('识别会议，重点输出决策与待办。')
-  await page.getByRole('button', { name: '保存' }).click()
+  await expect(page.getByRole('button', { name: /自主分析/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /隐藏画像/ })).toBeVisible()
+  await expect(page.getByText('会议纪要')).toHaveCount(0)
+  await expect(page.getByText('当前生产 Prompt，由程序版本化维护。')).toBeVisible()
+  await expect(page.locator('.prompt-textarea')).toHaveValue('自主分析生产规则')
+  await expect(page.locator('.prompt-textarea')).toHaveAttribute('readonly', '')
+  await expect(page.getByRole('button', { name: '编辑' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '保存' })).toHaveCount(0)
 
-  await expect(page.getByText('Prompt 已保存，新分析将使用该版本')).toBeVisible()
-  await expect(page.getByRole('button', { name: /会议纪要/ })).toContainText('v2')
-  expect(savedBody).toEqual({ expected_version: 1, content: '识别会议，重点输出决策与待办。' })
+  await page.getByRole('button', { name: /隐藏画像/ }).click()
+  await expect(page.locator('.prompt-textarea')).toHaveValue('隐藏画像生产规则')
 })

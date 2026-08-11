@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from audio_memory.reanalysis.preview import (
 
 NEW_UPLOAD_PRIORITY = 0
 HISTORY_REANALYSIS_PRIORITY = 10
+logger = logging.getLogger("uvicorn.error")
 _PAUSED_HISTORY_STATES = {
     "stopped",
     "stopping",
@@ -440,6 +442,10 @@ class AnalysisTaskCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                logger.exception(
+                    "Analysis task failed version_id=%s without a typed provider error",
+                    version_id,
+                )
                 # AnalysisRunner normally persists its typed failure first. This
                 # fenced fallback only handles exceptions that leave the version
                 # running, so it cannot overwrite a concrete runner error code.

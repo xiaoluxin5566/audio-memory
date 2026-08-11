@@ -406,7 +406,14 @@ def test_dossier_rejects_card_event_without_authorized_scope() -> None:
                     analysis_angle="错误事件为何没有档案授权",
                     context_summary="没有档案授权。",
                     participants=[],
-                    key_facts=[],
+                    key_facts=[
+                        MeetingKeyFact(
+                            event_ids=["event_002"],
+                            evidence_segment_ids=["seg_002"],
+                            fact="该事件没有会议档案授权。",
+                            interpretation=None,
+                        )
+                    ],
                     quote_analyses=[],
                     arguments=[],
                     recommendations=[],

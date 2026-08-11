@@ -57,3 +57,12 @@ test('detail exposes bounded evidence playback without transcript text', () => {
   assert.doesNotMatch(appSource, /active\.text|evidence\.text/)
   assert.match(styles, /\.evidence-playback\{/)
 });
+
+test('analysis detail permanently suppresses evidence playback', () => {
+  const detail = appSource.slice(
+    appSource.indexOf('function CardDetail'),
+    appSource.indexOf('function History'),
+  );
+
+  assert.match(detail, /card\.sceneId !== 'analysis' && card\.showEvidencePlayback !== false/)
+});

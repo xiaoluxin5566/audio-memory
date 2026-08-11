@@ -54,7 +54,7 @@ export function normalizeProviders(payload) {
 
 
 function normalizeSection(section) {
-  if (section.kind === 'text') return { title: section.title, content: section.text ?? '' }
+  if (section.kind === 'text') return { kind: 'adaptive', title: section.title, content: section.text ?? '', items: [] }
   if (section.kind === 'grouped_items') {
     return {
       title: section.title,
@@ -192,7 +192,7 @@ function autonomousPresentation(source = {}) {
     ...(source.content ?? []).filter((item) => item.type !== 'external_meta').map((item) => {
       const finding = /^finding:([^:]+):([^:]+)$/.exec(item.type ?? '')
       if (finding) return { kind: 'autonomous-finding', findingType: finding[1], confidence: finding[2], title: item.title, content: item.body ?? '', items: item.items ?? [] }
-      return { kind: 'analysis', sectionType: item.type, title: item.title, content: item.body ?? '', items: item.items ?? [] }
+      return { kind: 'analysis', sectionType: item.type, title: item.title, content: item.body ?? '', items: item.items ?? [], blocks: analysisBlocks(item.body, item.type, item.title) }
     }),
     ...((source.quotes ?? []).length ? [{ kind: 'autonomous-quotes', title: '关键原句分析', entries: source.quotes }] : []),
     ...((source.recommendations ?? []).length ? [{ kind: 'autonomous-recommendations', title: '针对性建议', entries: source.recommendations }] : []),
@@ -201,6 +201,88 @@ function autonomousPresentation(source = {}) {
     { cardKind, sceneTypes, label: cardKind === 'event' ? '事件分析' : cardKind === 'insight' ? '深度洞察' : SCENE_LABELS.analysis },
     blocks,
   ]
+}
+
+function tableCells(line) {
+  return line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
+}
+
+function isTableDivider(line) {
+  const cells = tableCells(line)
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+}
+
+function analysisBlocks(body = '', sectionType = '', title = '') {
+  const lines = String(body).replace(/\r\n/g, '\n').split('\n')
+  const blocks = []
+  let currentHeading = ''
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index].trim()
+    if (!line) { index += 1; continue }
+
+    if (/^\*\*[^*]+\*\*$/.test(line) || /^#{2,4}\s+/.test(line)) {
+      currentHeading = line.replace(/^#{2,4}\s+/, '').replace(/^\*\*|\*\*$/g, '')
+      blocks.push({ kind: 'heading', text: currentHeading })
+      index += 1
+      continue
+    }
+
+    if (line.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1])) {
+      const rows = [tableCells(line)]
+      index += 2
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(tableCells(lines[index]))
+        index += 1
+      }
+      blocks.push({ kind: 'matrix', rows })
+      continue
+    }
+
+    const bullet = /^[-*]\s+(.+)$/.exec(line)
+    if (bullet) {
+      const items = []
+      while (index < lines.length) {
+        const match = /^[-*]\s+(.+)$/.exec(lines[index].trim())
+        if (!match) break
+        items.push(match[1])
+        index += 1
+      }
+      blocks.push({ kind: 'bullet-list', items })
+      continue
+    }
+
+    const numbered = /^\d+[.)]\s+(.+)$/.exec(line)
+    if (numbered) {
+      const items = []
+      while (index < lines.length) {
+        const match = /^\d+[.)]\s+(.+)$/.exec(lines[index].trim())
+        if (!match) break
+        items.push(match[1])
+        index += 1
+      }
+      const timelineContext = /(推进|过程|时间线|转折|循环|链条|路径|阶段|如何形成)/i.test(currentHeading || `${sectionType} ${title}`)
+      blocks.push({ kind: timelineContext ? 'timeline' : 'numbered-list', items })
+      continue
+    }
+
+    if ((line.match(/(?:→|->)/g) ?? []).length >= 2) {
+      blocks.push({ kind: 'cause-chain', items: line.split(/\s*(?:→|->)\s*/).filter(Boolean) })
+      index += 1
+      continue
+    }
+
+    const paragraph = [line]
+    index += 1
+    while (index < lines.length && lines[index].trim()) {
+      const next = lines[index].trim()
+      if (/^(?:[-*]\s+|\d+[.)]\s+|#{2,4}\s+)/.test(next) || /^\*\*[^*]+\*\*$/.test(next) || (next.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1]))) break
+      paragraph.push(next)
+      index += 1
+    }
+    blocks.push({ kind: 'paragraph', text: paragraph.join(' ') })
+  }
+  return blocks
 }
 
 function normalizeStrictCards(item, batch) {
@@ -217,6 +299,7 @@ function normalizeStrictCards(item, batch) {
       label: autonomousMeta.label ?? SCENE_LABELS[item.scene_id] ?? item.scene_id,
       cardKind: autonomousMeta.cardKind ?? '',
       sceneTypes: autonomousMeta.sceneTypes ?? [],
+      showEvidencePlayback: item.scene_id !== 'analysis',
       title: (item.scene_id === 'analysis' ? source.title : shell.title) || '未命名结果',
       summary: (item.scene_id === 'analysis' ? source.summary : shell.summary) ?? '',
       timeLabel: timeLabel(item.uploaded_at),
@@ -332,6 +415,9 @@ export function normalizePrompts(payload) {
   return Object.fromEntries((payload?.prompts ?? []).map((item) => [item.scene_id, {
     current: item.content,
     version: item.version,
+    label: item.label ?? item.scene_id,
+    editable: item.editable !== false,
+    source: item.source ?? '',
   }]))
 }
 

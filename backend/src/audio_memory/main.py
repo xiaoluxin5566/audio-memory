@@ -31,7 +31,7 @@ from audio_memory.repositories import ProviderMetadataRepository
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
-from audio_memory.transcription.engine import MLXWhisperEngine, SelectiveRefiner
+from audio_memory.transcription.engine import MLXWhisperEngine
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 from audio_memory.prompts.store import PromptStore
@@ -103,7 +103,6 @@ def create_app(
                 database,
                 eta_tracker=eta_tracker,
                 risk_gate=TranscriptionRiskGateService(database),
-                refiner=SelectiveRefiner(database),
             )
             await transcription_service.mark_abandoned_work_interrupted()
             app.state.transcription_service = transcription_service

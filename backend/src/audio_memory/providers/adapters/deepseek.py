@@ -3,7 +3,10 @@ from audio_memory.providers.adapters.base import ChatCompletionsAdapter
 
 class DeepSeekAdapter(ChatCompletionsAdapter):
     def analysis_payload(self, payload: dict[str, object]) -> dict[str, object]:
-        return {**payload, "thinking": {"type": "disabled"}}
+        return {
+            **payload,
+            "thinking": payload.get("thinking", {"type": "enabled"}),
+        }
 
     def validation_payload(self) -> dict[str, object]:
         payload = super().validation_payload()

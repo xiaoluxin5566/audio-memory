@@ -140,6 +140,41 @@ def test_event_map_composition_uses_fixed_event_rules_without_editable_scene_pro
     assert request.segment_count == 1
 
 
+def test_autonomous_composition_uses_approved_advisor_contract() -> None:
+    request = PromptComposer().compose_autonomous_analysis(
+        transcript=transcript_with_injection(),
+        profile=[],
+        schema={"type": "object"},
+    )
+
+    assert "全文默认直接称呼“你”" in request.common_rules
+    assert "场景还原与核心观点" in request.common_rules
+    assert "分析、问题与点评" in request.common_rules
+    assert "针对性建议" in request.common_rules
+    assert "有关联不等于属于同一张卡" in request.common_rules
+    assert "同一次完整面试通常是一张卡" in request.common_rules
+    assert "当前工作系统与职业状态诊断" in request.common_rules
+    assert "完整教育公司面试不得与多家公司求职市场观察合并" in request.common_rules
+    assert "不得在建议话术中发明数字" in request.common_rules
+    assert "quotes" in request.common_rules
+    assert "必须始终返回空数组" in request.common_rules
+    assert '"content"' in request.common_rules
+    assert '"recommendations"' in request.common_rules
+
+
+def test_autonomous_transcript_never_sends_speaker_id() -> None:
+    request = PromptComposer().compose_autonomous_analysis(
+        transcript=transcript_with_injection(),
+        profile=[],
+        schema={"type": "object"},
+    )
+
+    projected = decode_untrusted_packet(request.user_data, "transcript_data")
+    assert projected[0]["segment_id"] == "seg_001"
+    assert projected[0]["text"] == transcript_with_injection()[0]["text"]
+    assert "speaker_id" not in projected[0]
+
+
 def test_local_event_map_composition_exposes_safe_window_diagnostic_id() -> None:
     request = PromptComposer().compose_event_map(
         transcript=transcript_with_injection(),

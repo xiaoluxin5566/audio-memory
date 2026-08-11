@@ -861,16 +861,22 @@ class FailingAnalysisProvider:
     def __init__(self, error) -> None:
         self.error = error
 
-    async def analyze_event_map(self, request, provider_snapshot):
+    async def analyze_autonomous(self, request, provider_snapshot):
         raise self.error
 
+    async def analyze_event_map(self, request, provider_snapshot):
+        raise AssertionError("history reanalysis must not call the legacy event map")
+
+    async def analyze_director(self, request, provider_snapshot):
+        raise AssertionError("history reanalysis must not call the legacy director")
+
     async def analyze_scene(self, scene_id, request, provider_snapshot):
-        raise AssertionError("event-map failure must stop scene calls")
+        raise AssertionError("history reanalysis must not call fixed scenes")
 
 
 class NeverProfileExtractor:
-    async def extract(self, transcript, existing, provider_snapshot):
-        raise AssertionError("event-map failure must stop profile extraction")
+    async def extract(self, transcript, cards, existing, provider_snapshot):
+        raise AssertionError("autonomous failure must stop profile extraction")
 
 
 class NeverPublisher:

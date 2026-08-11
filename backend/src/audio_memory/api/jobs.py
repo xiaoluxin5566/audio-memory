@@ -44,6 +44,9 @@ class JobView(BaseModel):
     progress_percent: int = 0
     eta_state: str = "unavailable"
     eta_seconds: int | None = None
+    local_phase: str | None = None
+    batch_current: int = 0
+    batch_total: int = 0
 
 
 def service_from(request: Request) -> UploadService:

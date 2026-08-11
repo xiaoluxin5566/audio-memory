@@ -165,12 +165,11 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert preview.source_batch_count == 3
     assert preview.audio_file_count == 7
     assert preview.transcript_character_count == 28
-    # Seven Event windows plus seven full-cluster director calls. Scenes are
-    # routed only after selection, so the minimum does not guess six calls.
-    assert preview.estimated_calls_min == 14
-    # The upper bound includes six routed scenes and one optional profile call
-    # per source, with one Schema-repair attempt for every logical call.
-    assert preview.estimated_calls_max == 70
+    # Each source has one autonomous card request plus one hidden-profile call.
+    assert preview.estimated_calls_min == 6
+    # Autonomous semantic retry and one schema repair per request bound the
+    # remote work without estimating legacy Event Map/director/scene calls.
+    assert preview.estimated_calls_max == 18
     assert preview.whisper_calls == 0
     assert preview.diarization_calls == 0
     assert preview.provider_id == "kimi"
@@ -185,25 +184,18 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     await database.dispose()
 
 
-def test_fixed_rule_hashes_cover_director_schema_and_dossier_limits(
-    monkeypatch,
-) -> None:
-    from audio_memory.analysis import dossiers as dossier_module
+def test_fixed_rule_hashes_cover_only_active_autonomous_analysis() -> None:
     from audio_memory.reanalysis.preview import current_fixed_rule_hashes
 
     baseline = current_fixed_rule_hashes()
 
-    assert "director.md" in baseline
+    assert "autonomous_analysis_prompt" in baseline
+    assert "autonomous_profile_prompt" in baseline
+    assert "event-map.md" not in baseline
+    assert "director.md" not in baseline
+    assert "common-scene.md" not in baseline
     assert len(baseline["analysis_schemas"]) == 64
     assert len(baseline["analysis_parameters"]) == 64
-    monkeypatch.setattr(
-        dossier_module,
-        "DOSSIER_MAX_SEGMENTS",
-        dossier_module.DOSSIER_MAX_SEGMENTS + 1,
-    )
-
-    changed = current_fixed_rule_hashes()
-    assert changed["analysis_parameters"] != baseline["analysis_parameters"]
 
 
 @pytest.mark.asyncio

@@ -107,7 +107,7 @@ def test_new_install_records_packaged_default_provenance(tmp_path: Path) -> None
     assert document.version == 1
     assert metadata == {
         "version": 1,
-        "packaged_default_version": 4,
+        "packaged_default_version": 7,
         "current_source": "packaged",
     }
 
@@ -130,7 +130,7 @@ def test_untouched_known_legacy_default_is_archived_then_upgraded(tmp_path: Path
     assert archives[0].read_text() == legacy
     assert metadata == {
         "version": 5,
-        "packaged_default_version": 4,
+        "packaged_default_version": 7,
         "current_source": "packaged",
     }
 
@@ -149,7 +149,7 @@ def test_user_edited_legacy_prompt_is_preserved_byte_for_byte(tmp_path: Path) ->
     assert list((tmp_path / "meeting" / "versions").iterdir()) == []
     assert metadata == {
         "version": 7,
-        "packaged_default_version": 4,
+        "packaged_default_version": 7,
         "current_source": "user",
     }
 
@@ -195,7 +195,7 @@ def test_packaged_meeting_v2_upgrades_once_without_touching_user_edits(
     assert archives[0].read_text() == PACKAGED_MEETING_V2
     assert metadata == {
         "version": 9,
-        "packaged_default_version": 4,
+        "packaged_default_version": 7,
         "current_source": "packaged",
     }
 

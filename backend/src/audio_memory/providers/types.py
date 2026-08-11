@@ -74,7 +74,7 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         ProviderId.DEEPSEEK,
         "DeepSeek",
         "https://api.deepseek.com/chat/completions",
-        "deepseek-v4-flash",
+        "deepseek-v4-pro",
     ),
     "openai": ProviderConfig(
         ProviderId.OPENAI,

@@ -174,7 +174,7 @@ class TranscriptionRiskGateService:
     async def apply(
         self,
         job_id: str,
-        refiner: SegmentRefiner,
+        refiner: SegmentRefiner | None = None,
         *,
         bulk_elapsed_seconds: float | None = None,
     ) -> RiskGateMetrics:
@@ -328,6 +328,10 @@ class TranscriptionRiskGateService:
         failed = 0
         admitted = 0
         for position, candidate in enumerate(queued):
+            if refiner is None:
+                await self._downgrade_pending(queued[position:])
+                overflowed.extend(queued[position:])
+                break
             if budget is not None and not budget.allows_next(
                 queued_elapsed_seconds=time.monotonic() - started
             ):
