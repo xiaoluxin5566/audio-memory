@@ -1,5 +1,6 @@
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI' }
 const SCENE_LABELS = {
+  analysis: 'AI 深度分析',
   meeting: '会议纪要',
   parenting: '家庭教育',
   content: '内容推荐',
@@ -179,22 +180,48 @@ function strictBlocks(sceneId, detail) {
   return []
 }
 
+function autonomousPresentation(source = {}) {
+  const metadataSection = (source.content ?? []).find((item) => item.type === 'external_meta')
+  let metadata = {}
+  if (metadataSection?.body) {
+    try { metadata = JSON.parse(metadataSection.body) } catch { metadata = {} }
+  }
+  const cardKind = ['event', 'insight'].includes(metadata.card_kind) ? metadata.card_kind : ''
+  const sceneTypes = Array.isArray(metadata.scene_types) ? metadata.scene_types.filter((item) => typeof item === 'string') : []
+  const blocks = [
+    ...(source.content ?? []).filter((item) => item.type !== 'external_meta').map((item) => {
+      const finding = /^finding:([^:]+):([^:]+)$/.exec(item.type ?? '')
+      if (finding) return { kind: 'autonomous-finding', findingType: finding[1], confidence: finding[2], title: item.title, content: item.body ?? '', items: item.items ?? [] }
+      return { kind: 'analysis', sectionType: item.type, title: item.title, content: item.body ?? '', items: item.items ?? [] }
+    }),
+    ...((source.quotes ?? []).length ? [{ kind: 'autonomous-quotes', title: '关键原句分析', entries: source.quotes }] : []),
+    ...((source.recommendations ?? []).length ? [{ kind: 'autonomous-recommendations', title: '针对性建议', entries: source.recommendations }] : []),
+  ]
+  return [
+    { cardKind, sceneTypes, label: cardKind === 'event' ? '事件分析' : cardKind === 'insight' ? '深度洞察' : SCENE_LABELS.analysis },
+    blocks,
+  ]
+}
+
 function normalizeStrictCards(item, batch) {
   const payload = item.payload
   if (!payload?.scene_id || !Array.isArray(payload.cards)) return null
   return payload.cards.map((source, index) => {
     const shell = source.card ?? {}
     const detail = source.detail ?? {}
+    const [autonomousMeta, autonomousSections] = item.scene_id === 'analysis' ? autonomousPresentation(source) : [{}, []]
     return {
       id: `${item.id}:${index}`,
       apiId: item.id,
       sceneId: item.scene_id,
-      label: SCENE_LABELS[item.scene_id] ?? item.scene_id,
+      label: autonomousMeta.label ?? SCENE_LABELS[item.scene_id] ?? item.scene_id,
+      cardKind: autonomousMeta.cardKind ?? '',
+      sceneTypes: autonomousMeta.sceneTypes ?? [],
       title: shell.title || '未命名结果',
       summary: shell.summary ?? '',
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',
-      detailSections: strictBlocks(item.scene_id, detail),
+      detailSections: item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail),
       details: strictCardDetails(item.scene_id, detail),
       evidence: (item.evidence ?? [])
         .find((group) => group.card_index === index)?.segments

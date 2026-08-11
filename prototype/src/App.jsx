@@ -18,7 +18,7 @@ import './styles.css';
 
 const ROUTES = { '/': 'feed', '/history': 'history', '/settings/prompts': 'prompts' };
 const ROUTE_PATHS = { feed: '/', history: '/history', prompts: '/settings/prompts' };
-const sceneClass = { meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
+const sceneClass = { analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
 const providerStateLabel = {
   initializing: '正在读取本地配置',
   unconfigured: '等待填写 API Key',
@@ -339,7 +339,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
   function closeFeedback() {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.detailSections.map((section, index) => card.sceneId === 'meeting' ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}<EvidencePlayback evidence={card.evidence} />{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}<EvidencePlayback evidence={card.evidence} />{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
 }
 
 function Field({ label, children }) {
@@ -348,6 +348,7 @@ function Field({ label, children }) {
 }
 
 function MeetingDetailSection({ section }) {
+  if (section.kind === 'analysis' || section.kind?.startsWith('autonomous-')) return <AutonomousDetailSection section={section} />;
   if (section.kind === 'overview' || section.kind === 'adaptive') return <section className={`detail-section meeting-section meeting-${section.kind}`}><div className="section-kicker">{section.sectionType || '深度分析'}</div><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items?.length > 0 && <ul className="meeting-points">{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}</section>;
   if (section.kind === 'participants') return <section className="detail-section meeting-section"><h2>{section.title}</h2><div className="participant-list">{section.entries.map((item) => <span key={`${item.name}-${item.role}`}>{item.name}{item.role && <small>{item.role}</small>}</span>)}</div></section>;
   if (section.kind === 'facts') return <section className="detail-section meeting-section"><h2>{section.title}</h2><div className="meeting-facts">{section.entries.map((item) => <article key={item.fact}><strong>{item.fact}</strong>{item.interpretation && <p>{item.interpretation}</p>}</article>)}</div></section>;
@@ -356,6 +357,17 @@ function MeetingDetailSection({ section }) {
   if (section.kind === 'recommendations') return <section className="detail-section meeting-section"><h2>{section.title}</h2>{section.entries.map((item, index) => <article className="meeting-recommendation" key={`${item.target}-${index}`}><div className="recommendation-target">给 {item.target}</div><h3>{item.recommendation}</h3><Field label="观察到的问题">{item.observedIssue}</Field><Field label="证据依据">{item.evidenceBasis}</Field><Field label="为什么重要">{item.whyItMatters}</Field><Field label="可以这样做">{item.actions}</Field><Field label="可以这样说">{item.suggestedLanguage}</Field><Field label="预期结果">{item.expectedResult}</Field><Field label="注意边界">{item.caveat}</Field></article>)}</section>;
   if (section.kind === 'uncertainties') return <section className="detail-section meeting-section meeting-uncertainties"><h2>{section.title}</h2>{section.entries.map((item) => <article key={item.question}><strong>{item.question}</strong><p>{item.whyUncertain}</p></article>)}</section>;
   return null;
+}
+
+function AutonomousDetailSection({ section }) {
+  if (section.kind === 'autonomous-finding') {
+    const findingLabels = { fact: '明确事实', inference: '分析判断', pattern: '重复模式', strength: '能力优势', risk: '值得警惕', uncertainty: '仍需确认' };
+    const confidenceLabels = { high: '高置信度', medium: '中等置信度', low: '低置信度' };
+    return <section className="detail-section autonomous-section autonomous-finding"><div className="finding-meta"><span>{findingLabels[section.findingType] || '关键发现'}</span><small>{confidenceLabels[section.confidence] || section.confidence}</small></div>{section.content && <p>{section.content}</p>}</section>;
+  }
+  if (section.kind === 'autonomous-quotes') return <section className="detail-section autonomous-section"><h2>{section.title}</h2>{section.entries.map((item, index) => <article className="meeting-quote" key={`${item.quote}-${index}`}><blockquote>“{item.quote}”</blockquote><Field label="当时语境">{item.context}</Field><Field label="分析">{item.analysis}</Field></article>)}</section>;
+  if (section.kind === 'autonomous-recommendations') return <section className="detail-section autonomous-section"><h2>{section.title}</h2>{section.entries.map((item, index) => <article className="meeting-recommendation" key={`${item.title}-${index}`}><h3>{item.title}</h3><Field label="为什么提出这条建议">{item.reason}</Field><Field label="可以这样做">{item.actions}</Field><Field label="可以这样说">{item.suggested_language}</Field><Field label="有效的信号">{item.success_signal}</Field><Field label="适用边界">{item.caveat}</Field></article>)}</section>;
+  return <section className="detail-section autonomous-section"><div className="section-kicker">{section.sectionType || '深度分析'}</div><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items?.length > 0 && <ul className="meeting-points">{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}</section>;
 }
 
 function evidenceTimeLabel(milliseconds) {

@@ -115,6 +115,49 @@ test('strict scene payloads become safe, event-grouped presentation cards', () =
   assert.equal(JSON.stringify(contentCard).includes('generation_reason'), false)
 })
 
+test('autonomous cards preserve free sections, quote analysis, and recommendations', () => {
+  const state = normalizeFeed({ days: [{ date: '2026-08-11', cards: [{
+    id: 'analysis-1', batch_id: 'batch-1', scene_id: 'analysis', uploaded_at: '2026-08-11T10:00:00Z', qa: [], evidence: [],
+    payload: { scene_id: 'analysis', cards: [{
+      title: '目标与资源不匹配正在消耗投入', summary: '跨片段分析',
+      content: [{ type: 'causal_pattern', title: '危险循环', body: '不认同方向会降低投入。', items: ['先书面确认方向'] }],
+      quotes: [{ quote: '我不知道最终要到哪里。', context: '讨论目标时', analysis: '指向目标缺失。' }],
+      recommendations: [{ title: '建立最小闭环', reason: '保护交付质量', actions: ['写清约束'], suggested_language: '请确认方向。', success_signal: '得到书面确认', caveat: '不含机密' }],
+    }] },
+  }] }] })
+  const card = state.feed[0].cards[0]
+  assert.equal(card.label, 'AI 深度分析')
+  assert.deepEqual(card.detailSections.map((item) => item.kind), ['analysis', 'autonomous-quotes', 'autonomous-recommendations'])
+  assert.equal(card.detailSections[1].entries[0].analysis, '指向目标缺失。')
+})
+
+
+test('imported event and insight cards expose native labels and finding metadata', () => {
+  const metadata = JSON.stringify({ card_kind: 'event', scene_types: ['meeting', 'work_conversation'] })
+  const state = normalizeFeed({ days: [{ date: '2026-08-11', cards: [{
+    id: 'analysis-imported', batch_id: 'batch-1', scene_id: 'analysis', uploaded_at: '2026-08-11T10:00:00Z', qa: [], evidence: [],
+    payload: { scene_id: 'analysis', cards: [{
+      title: '午餐深谈', summary: '系统性问题正在影响投入。',
+      content: [
+        { type: 'external_meta', title: '分析类型', body: metadata, items: [] },
+        { type: 'finding:fact:high', title: '关键发现', body: '目标没有明确。', items: [] },
+        { type: 'analysis', title: '问题如何形成', body: '目标缺失让取舍失去依据。', items: [] },
+      ],
+      quotes: [{ quote: '目标一直没有明确下来', context: '', analysis: '这是直接证据。' }],
+      recommendations: [{ title: '先确认目标', reason: '保护执行质量', actions: ['写出成功标准'], suggested_language: null, success_signal: null, caveat: null }],
+    }] },
+  }] }] })
+
+  const card = state.feed[0].cards[0]
+  assert.equal(card.label, '事件分析')
+  assert.equal(card.cardKind, 'event')
+  assert.deepEqual(card.sceneTypes, ['meeting', 'work_conversation'])
+  assert.deepEqual(card.detailSections.map((item) => item.kind), ['autonomous-finding', 'analysis', 'autonomous-quotes', 'autonomous-recommendations'])
+  assert.equal(card.detailSections[0].findingType, 'fact')
+  assert.equal(card.detailSections[0].confidence, 'high')
+  assert.equal(card.detailSections[0].content, '目标没有明确。')
+})
+
 
 test('strict scene cards preserve the server QA attached to their analysis item', () => {
   const normalized = normalizeFeed({ days: [{ date: '2026-08-06', cards: [{
