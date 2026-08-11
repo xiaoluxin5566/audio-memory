@@ -328,19 +328,34 @@ class AnalysisRunner:
             )
         else:
             notebook_payloads = [item.model_dump(mode="json") for item in notebooks]
-            request = self.composer.compose_autonomous_retrieval_plan(
-                notebooks=notebook_payloads, profile=profile,
-                schema=AutonomousRetrievalPlan.model_json_schema(),
-            )
-            await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version, worker_owner_id)
-            retrieval = await self.provider.analyze_autonomous_retrieval_plan(
-                request, provider_snapshot
-            )
         note_ids = {
             segment_id for notebook in notebooks for note in notebook.notes
             for segment_id in note.evidence_segment_ids
         }
+        if not retrieval_was_staged:
+            for attempt in range(2):
+                request = self.composer.compose_autonomous_retrieval_plan(
+                    notebooks=notebook_payloads, profile=profile,
+                    schema=AutonomousRetrievalPlan.model_json_schema(),
+                    allowed_segment_ids=sorted(note_ids),
+                    semantic_retry=attempt > 0,
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+                retrieval = await self.provider.analyze_autonomous_retrieval_plan(
+                    request, provider_snapshot
+                )
+                requested = {
+                    segment_id for card in retrieval.cards
+                    for segment_id in card.required_segment_ids
+                }
+                if requested and requested.issubset(note_ids):
+                    break
+                if attempt == 1:
+                    raise ProviderAnalysisError(
+                        "Autonomous retrieval plan requested invalid evidence",
+                        code="autonomous_retrieval_evidence_invalid",
+                    )
         requested_ids = {
             segment_id for card in retrieval.cards
             for segment_id in card.required_segment_ids

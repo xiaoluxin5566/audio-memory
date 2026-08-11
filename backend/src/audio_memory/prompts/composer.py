@@ -233,19 +233,29 @@ class PromptComposer:
             timeout_seconds=policy.timeout_seconds, segment_count=len(window.segments),
         )
 
-    def compose_autonomous_retrieval_plan(self, *, notebooks, profile, schema) -> ModelRequest:
+    def compose_autonomous_retrieval_plan(
+        self, *, notebooks, profile, schema, allowed_segment_ids,
+        semantic_retry=False,
+    ) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["autonomous-retrieval-plan"]
+        rules = (
+            "根据全部高保真信息笔记规划具有独立用户价值的最终卡片。"
+            "每张卡只请求完成该分析任务确实需要核验的原文 segment_id；"
+            "ID 必须逐字取自 allowed_segment_ids，禁止构造。"
+        )
+        if semantic_retry:
+            rules += (
+                "\n\n服务端校验反馈：上一轮包含不被允许的 ID。"
+                "本轮删除或替换所有非法 ID，只能逐字复制 allowed_segment_ids 中的值。"
+            )
         return ModelRequest(
             scene_id="autonomous-retrieval-plan", prompt_version=1,
             schema_version=self.SCHEMA_VERSION,
             system_rules=self._fixed_prompt("system.md"),
-            common_rules=(
-                "根据全部高保真信息笔记规划具有独立用户价值的最终卡片。"
-                "每张卡只请求完成该分析任务确实需要核验的原文 segment_id；"
-                "ID 必须来自笔记证据，禁止构造。完整面试通常保持为一张卡。"
-            ), scene_prompt="",
+            common_rules=rules + "完整面试通常保持为一张卡。", scene_prompt="",
             user_data="\n".join([
                 self._untrusted_packet("information_notebooks", notebooks),
+                self._untrusted_packet("allowed_segment_ids", allowed_segment_ids),
                 self._untrusted_packet("hidden_profile_data", profile),
             ]), schema_json=self._schema_json(schema), max_tokens=policy.max_tokens,
             timeout_seconds=policy.timeout_seconds,

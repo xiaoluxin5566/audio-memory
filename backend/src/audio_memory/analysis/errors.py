@@ -18,6 +18,14 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "event_map_unknown_segment",
         "event_map_coverage_invalid",
         "analysis_quality_insufficient",
+        "autonomous_schema_invalid",
+        "autonomous_evidence_invalid",
+        "autonomous_notes_schema_invalid",
+        "autonomous_notes_evidence_invalid",
+        "autonomous_retrieval_schema_invalid",
+        "autonomous_retrieval_evidence_invalid",
+        "autonomous_final_schema_invalid",
+        "autonomous_final_evidence_invalid",
     }
 )
 

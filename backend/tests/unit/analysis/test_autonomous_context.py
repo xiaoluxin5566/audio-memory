@@ -128,6 +128,31 @@ class IsolatedLongRunner(AnalysisRunner):
         self.saved.append(copy.deepcopy(staged))
 
 
+class InvalidRetrievalOnceProvider(LongRouteProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.retrieval_attempts = 0
+
+    async def analyze_autonomous_retrieval_plan(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        self.retrieval_attempts += 1
+        if self.retrieval_attempts == 1:
+            return AutonomousRetrievalPlan.model_validate({
+                "cards": [{
+                    "title": "非法首轮",
+                    "analysis_task": "需要语义修复",
+                    "required_segment_ids": ["invented-segment"],
+                }]
+            })
+        return AutonomousRetrievalPlan.model_validate({
+            "cards": [{
+                "title": "完整任务",
+                "analysis_task": "形成一张可独立行动的分析卡",
+                "required_segment_ids": ["seg_1", "seg_4"],
+            }]
+        })
+
+
 @pytest.mark.asyncio
 async def test_long_route_stages_notes_retrieves_exact_source_in_order_and_resumes() -> None:
     transcript = [segment(index, "录" * 6_000) for index in range(6)]
@@ -184,3 +209,21 @@ async def test_long_route_rejects_invalid_staged_note_before_resume() -> None:
         )
 
     assert raised.value.code == "autonomous_notes_evidence_invalid"
+
+
+@pytest.mark.asyncio
+async def test_long_route_repairs_invalid_retrieval_ids_once() -> None:
+    transcript = [segment(index, "录" * 6_000) for index in range(6)]
+    context = plan_autonomous_context(transcript)
+    assert isinstance(context, LongContextPlan)
+    provider = InvalidRetrievalOnceProvider()
+    runner = IsolatedLongRunner(provider)
+    version = type("Version", (), {"id": "version-1"})()
+
+    result, retrieved = await runner._long_autonomous(
+        version, context, transcript, [], {"provider_id": "deepseek"}, {}, None
+    )
+
+    assert provider.retrieval_attempts == 2
+    assert [item["segment_id"] for item in retrieved] == ["seg_1", "seg_4"]
+    assert result.cards

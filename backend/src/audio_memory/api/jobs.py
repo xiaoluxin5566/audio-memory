@@ -309,6 +309,18 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
             },
         ) from exc
 
+    if job.error_code.startswith("autonomous_"):
+        resumed_version = (
+            await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
+                source_job_id=job_id,
+                provider_id=provider.provider_id,
+                model_id=provider.model_id,
+                credential_generation=credential_generation,
+            )
+        )
+        if resumed_version is not None:
+            return {"id": job_id, "stage": JobStage.ANALYZING.value}
+
     analysis_request = await snapshot_analysis_request(
         request,
         job_id=job_id,
