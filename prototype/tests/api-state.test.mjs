@@ -150,6 +150,8 @@ test('imported event and insight cards expose native labels and finding metadata
 
   const card = state.feed[0].cards[0]
   assert.equal(card.label, '事件分析')
+  assert.equal(card.title, '午餐深谈')
+  assert.equal(card.summary, '系统性问题正在影响投入。')
   assert.equal(card.cardKind, 'event')
   assert.deepEqual(card.sceneTypes, ['meeting', 'work_conversation'])
   assert.deepEqual(card.detailSections.map((item) => item.kind), ['autonomous-finding', 'analysis', 'autonomous-quotes', 'autonomous-recommendations'])
