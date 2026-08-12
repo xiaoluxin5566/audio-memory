@@ -29,6 +29,7 @@ from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest, PromptComposer
 from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
 from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
+from audio_memory.providers.adapters.base import NativeSearchCallResult
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
 
@@ -105,6 +106,150 @@ class ProviderAnalysisClient:
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
             "openai": OpenAIAdapter(PROVIDER_CONFIGS["openai"]),
         }
+
+    async def native_search(
+        self,
+        provider_id: str,
+        *,
+        queries: list[str],
+        round_number: int,
+        model_id: str | None = None,
+        timeout_seconds: float = 60,
+    ) -> NativeSearchCallResult:
+        """Run one provider-native web-search round without affecting analysis calls."""
+        async with self._remote_lock:
+            return await self._native_search_serialized(
+                provider_id,
+                queries=queries,
+                round_number=round_number,
+                model_id=model_id,
+                timeout_seconds=timeout_seconds,
+            )
+
+    async def _native_search_serialized(
+        self,
+        provider_id: str,
+        *,
+        queries: list[str],
+        round_number: int,
+        model_id: str | None,
+        timeout_seconds: float,
+    ) -> NativeSearchCallResult:
+        adapter = self.adapters.get(provider_id)
+        if adapter is None:
+            return NativeSearchCallResult(
+                provider_id=provider_id,
+                model_id=model_id or "unknown",
+                tool_name=None,
+                available=False,
+                errors=("Native web search is not available for this configured provider.",),
+            )
+
+        resolved_model = model_id or adapter.config.model_id
+        capability = adapter.native_search_capability(model_id=resolved_model)
+        if not capability.available:
+            return NativeSearchCallResult(
+                provider_id=capability.provider_id,
+                model_id=capability.model_id,
+                tool_name=capability.tool_name,
+                available=False,
+                errors=(
+                    capability.reason
+                    or "Native web search is not available for this configured provider.",
+                ),
+            )
+
+        if not queries or any(not isinstance(query, str) or not query.strip() for query in queries):
+            return NativeSearchCallResult(
+                provider_id=capability.provider_id,
+                model_id=capability.model_id,
+                tool_name=capability.tool_name,
+                available=True,
+                errors=("Native web search requires at least one non-empty query.",),
+            )
+
+        read = self.keychain.read(provider_id)
+        if read.status is not KeychainStatus.CONFIGURED or read.secret is None:
+            return NativeSearchCallResult(
+                provider_id=capability.provider_id,
+                model_id=capability.model_id,
+                tool_name=capability.tool_name,
+                available=False,
+                errors=("Provider credential is unavailable for native web search.",),
+            )
+
+        messages: list[dict[str, object]] = []
+        for _ in range(8):
+            payload = adapter.native_search_payload(
+                model_id=resolved_model,
+                messages=messages,
+                queries=queries,
+            )
+            try:
+                response = await self.client.post(
+                    adapter.config.endpoint,
+                    headers={
+                        "Authorization": f"Bearer {read.secret.decode('utf-8')}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=timeout_seconds,
+                )
+            except httpx.RequestError:
+                return self._native_search_error(
+                    capability, "Native web search request failed due to a network error."
+                )
+
+            if response.status_code in {401, 403}:
+                return self._native_search_error(
+                    capability, "Native web search authentication was rejected."
+                )
+            if response.status_code == 429:
+                return self._native_search_error(
+                    capability, "Native web search is temporarily rate limited."
+                )
+            if response.is_error:
+                return self._native_search_error(
+                    capability,
+                    f"Native web search request returned HTTP {response.status_code}.",
+                )
+
+            try:
+                body = response.json()
+                tool_messages = adapter.native_search_tool_messages(body)
+                if tool_messages is not None:
+                    messages.extend(tool_messages)
+                    continue
+                citations = adapter.native_search_citations(body)
+                sources, errors = adapter.normalize_native_search_citations(
+                    citations=citations, round_number=round_number
+                )
+            except (TypeError, ValueError):
+                return self._native_search_error(
+                    capability, "Native web search returned an invalid response."
+                )
+            return NativeSearchCallResult(
+                provider_id=capability.provider_id,
+                model_id=capability.model_id,
+                tool_name=capability.tool_name,
+                available=True,
+                sources=sources,
+                errors=errors,
+            )
+
+        return self._native_search_error(
+            capability, "Native web search exceeded its tool-call limit."
+        )
+
+    @staticmethod
+    def _native_search_error(capability, error: str) -> NativeSearchCallResult:
+        return NativeSearchCallResult(
+            provider_id=capability.provider_id,
+            model_id=capability.model_id,
+            tool_name=capability.tool_name,
+            available=False,
+            errors=(error,),
+        )
 
     async def generate(
         self,
