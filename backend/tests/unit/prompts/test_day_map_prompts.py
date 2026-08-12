@@ -168,9 +168,8 @@ def test_day_map_prompt_reads_every_segment_without_preset_categories() -> None:
     assert "不是分析类别" in request.common_rules
 
 
-def test_search_loop_prompt_keeps_full_transcript_and_gives_value_decision_to_model() -> None:
+def test_search_loop_prompt_uses_map_and_search_state_without_third_full_read() -> None:
     request = PromptComposer().compose_autonomous_search_loop(
-        transcript=transcript(),
         day_map=day_map_payload(),
         search_rounds=[],
         external_sources=[],
@@ -179,8 +178,9 @@ def test_search_loop_prompt_keeps_full_transcript_and_gives_value_decision_to_mo
     )
 
     assert request.scene_id == "autonomous-native-search"
-    assert_whole_transcript(request)
     assert_autonomous_security_contract(request)
+    assert "<untrusted_transcript_data>" not in request.user_data
+    assert request.segment_count == 0
     assert decode_packet(request.user_data, "autonomous_day_map") == day_map_payload()
     assert decode_packet(request.user_data, "remaining_search_rounds") == 5
     assert "是否还值得进一步外部核验" in request.common_rules
@@ -244,7 +244,6 @@ async def test_day_map_and_search_parsers_return_strict_contracts() -> None:
     )
 
     search_request = PromptComposer().compose_autonomous_search_loop(
-        transcript=transcript(),
         day_map=parsed_map,
         search_rounds=[],
         external_sources=[],
@@ -265,6 +264,45 @@ async def test_day_map_and_search_parsers_return_strict_contracts() -> None:
     assert parsed_map.scenes[0].scene_id == "scene_program_date"
     assert isinstance(parsed_decision, NativeSearchDecision)
     assert parsed_decision.action == "finalize"
+
+
+def test_prompt_composition_deduplicates_identical_persisted_sources() -> None:
+    repeated_source = source()
+    later_repeat = repeated_source.model_copy(update={"search_round": 2})
+    request = PromptComposer().compose_autonomous_final_analysis(
+        transcript=transcript(),
+        day_map=day_map_payload(),
+        external_sources=[later_repeat, repeated_source],
+        profile=[],
+        schema=AutonomousAnalysisResult.model_json_schema(),
+    )
+
+    assert decode_packet(request.user_data, "persisted_external_sources") == [
+        repeated_source.model_dump(mode="json")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_final_parser_accepts_identical_repeated_persisted_source_without_repair() -> None:
+    client = SequencedClient([final_payload("source_real_001")])
+    repeated_source = source()
+    later_repeat = repeated_source.model_copy(update={"search_round": 2})
+    request = PromptComposer().compose_autonomous_final_analysis(
+        transcript=transcript(),
+        day_map=day_map_payload(),
+        external_sources=[repeated_source],
+        profile=[],
+        schema=AutonomousAnalysisResult.model_json_schema(),
+    )
+
+    result = await RemoteSceneAnalyzer(client).analyze_autonomous_final_analysis(
+        request,
+        {"provider_id": "kimi", "model_id": "kimi-k2.5"},
+        persisted_sources=[repeated_source, later_repeat],
+    )
+
+    assert result.cards[0].external_source_ids == ["source_real_001"]
+    assert [call["repair_attempted"] for call in client.calls] == [False]
 
 
 @pytest.mark.asyncio

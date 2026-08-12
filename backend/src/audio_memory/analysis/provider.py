@@ -61,10 +61,30 @@ def parse_autonomous_final_analysis(
     raw: str, *, persisted_sources: list[ExternalSource]
 ) -> AutonomousAnalysisResult:
     result = parse_autonomous_output(raw)
-    source_ids = [source.source_id for source in persisted_sources]
-    if len(source_ids) != len(set(source_ids)):
-        raise SceneOutputError("persisted external source IDs must be unique")
-    allowed = set(source_ids)
+    sources_by_id: dict[str, dict[str, object]] = {}
+    for source in persisted_sources:
+        payload = source.model_dump(mode="json")
+        previous = sources_by_id.get(source.source_id)
+        if previous is None:
+            sources_by_id[source.source_id] = payload
+            continue
+        identity = {
+            key: value
+            for key, value in payload.items()
+            if key != "search_round"
+        }
+        previous_identity = {
+            key: value
+            for key, value in previous.items()
+            if key != "search_round"
+        }
+        if previous_identity != identity:
+            raise SceneOutputError(
+                "conflicting persisted external sources share a source_id"
+            )
+        if source.search_round < int(previous["search_round"]):
+            sources_by_id[source.source_id] = payload
+    allowed = set(sources_by_id)
     referenced = {
         source_id
         for card in result.cards

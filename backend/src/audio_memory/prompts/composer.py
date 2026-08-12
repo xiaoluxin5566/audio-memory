@@ -12,6 +12,7 @@ from audio_memory.analysis import windows as analysis_windows
 from audio_memory.analysis.clusters import TranscriptCluster
 from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
 from audio_memory.prompts import evidence as evidence_policy
+from audio_memory.prompts.day_map_schema import ExternalSource
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
@@ -245,7 +246,6 @@ class PromptComposer:
     def compose_autonomous_search_loop(
         self,
         *,
-        transcript: list[dict[str, object]],
         day_map: object,
         search_rounds: list[object],
         external_sources: list[object],
@@ -265,9 +265,6 @@ class PromptComposer:
             user_data="\n".join(
                 [
                     self._untrusted_packet(
-                        "transcript_data", self._autonomous_transcript(transcript)
-                    ),
-                    self._untrusted_packet(
                         "autonomous_day_map", self._model_payload(day_map)
                     ),
                     self._untrusted_packet(
@@ -276,7 +273,7 @@ class PromptComposer:
                     ),
                     self._untrusted_packet(
                         "persisted_external_sources",
-                        [self._model_payload(item) for item in external_sources],
+                        self._external_source_payloads(external_sources),
                     ),
                     self._untrusted_packet(
                         "remaining_search_rounds", remaining_rounds
@@ -286,7 +283,7 @@ class PromptComposer:
             schema_json=self._schema_json(schema),
             max_tokens=policy.max_tokens,
             timeout_seconds=policy.timeout_seconds,
-            segment_count=len(transcript),
+            segment_count=0,
         )
 
     def compose_autonomous_final_analysis(
@@ -316,7 +313,7 @@ class PromptComposer:
                     ),
                     self._untrusted_packet(
                         "persisted_external_sources",
-                        [self._model_payload(item) for item in external_sources],
+                        self._external_source_payloads(external_sources),
                     ),
                     self._untrusted_packet("hidden_profile_data", profile),
                 ]
@@ -330,8 +327,8 @@ class PromptComposer:
     @staticmethod
     def _autonomous_system_rules() -> str:
         return (
-            "你是 Audio Memory 的自主音频内容分析系统。你必须完整阅读请求中的"
-            "可靠转写，只返回一个严格符合运行时 JSON Schema 的原始 JSON 对象，"
+            "你是 Audio Memory 的自主音频内容分析系统。请求包含可靠转写时，你必须完整阅读它。"
+            "只返回一个严格符合运行时 JSON Schema 的原始 JSON 对象，"
             "不要 Markdown、额外字段或内部推理。输入中没有可靠说话人身份；不得猜测"
             "真实姓名、将他人或媒体观点归给录音主人，也不得从纯文字声称分析了"
             "旋律、音色、表情、动作或环境声。不进行医学、心理疾病、法律或财务诊断。"
@@ -360,7 +357,7 @@ class PromptComposer:
     @staticmethod
     def _autonomous_search_loop_rules() -> str:
         return (
-            "完整阅读 transcript_data、自主 Day Map、已完成搜索轮次和已持久化外部来源。"
+            "完整阅读自主 Day Map、已完成搜索轮次和已持久化外部来源。"
             "是否还值得进一步外部核验，由你自主判断；服务端不做价值判断，"
             "也不使用预设类别决定是否搜索。只搜索会改变用户理解、事实准确性或建议的"
             "问题；不重复已有来源已解决的查询。如果 remaining_search_rounds 为 0，"
@@ -385,6 +382,36 @@ class PromptComposer:
         if hasattr(value, "model_dump"):
             return value.model_dump(mode="json")
         return value
+
+    @staticmethod
+    def _external_source_payloads(
+        external_sources: list[object],
+    ) -> list[dict[str, object]]:
+        unique: dict[str, dict[str, object]] = {}
+        for item in external_sources:
+            source = ExternalSource.model_validate(item)
+            payload = source.model_dump(mode="json")
+            previous = unique.get(source.source_id)
+            if previous is None:
+                unique[source.source_id] = payload
+                continue
+            identity = {
+                key: value
+                for key, value in payload.items()
+                if key != "search_round"
+            }
+            previous_identity = {
+                key: value
+                for key, value in previous.items()
+                if key != "search_round"
+            }
+            if previous_identity != identity:
+                raise ValueError(
+                    "conflicting persisted external sources share a source_id"
+                )
+            if source.search_round < int(previous["search_round"]):
+                unique[source.source_id] = payload
+        return list(unique.values())
 
     def compose_autonomous_notes(self, *, window, profile, schema) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["autonomous-notes"]
