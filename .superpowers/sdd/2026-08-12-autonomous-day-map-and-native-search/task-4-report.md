@@ -116,3 +116,62 @@ historic feed shape changes.
   test-layout issue outside Task 4.
 - The task brief named `backend/alembic/versions`; the repository's configured
   migration path is `backend/migrations/versions`, which is where 0012 was added.
+
+## External review fix — round 1
+
+Both Important review findings were reproduced before implementation.
+
+### Overview presentation compatibility
+
+The position-zero backend payload uses the canonical nested `overview` object,
+while the existing feed fallback previously read only `payload.card`. A new
+test calls the real `normalizeFeed` with the exact persisted overview shape.
+Its RED result was `未命名结果 !== 本次概览`. The fallback now accepts
+`payload.overview` when `payload.card` is absent, preserving legacy cards while
+displaying the overview title exactly as `本次概览` and retaining its summary.
+
+### Source provenance re-derivation
+
+The publisher now validates each search round against independently
+re-derived `ExternalSource` objects from that round's raw `SearchResultItem`
+records through `normalize_search_results`. This enforces:
+
+- the source provider equals the analysis version provider;
+- `source_id` is the deterministic SHA-256 identity of provider plus provider
+  result ID;
+- provider result ID, title, URL, publisher, published time, support statement,
+  and originating round all match the raw same-round result;
+- accumulated sources still equal the canonical union of verified rounds.
+
+RED tests proved the old publisher accepted both an arbitrary source ID and a
+wrong provider. GREEN coverage also rejects rewritten title and URL values.
+
+### Fresh verification
+
+Focused publisher provenance tests:
+
+```text
+PYTHONPATH=backend/src backend/.venv/bin/pytest \
+  backend/tests/unit/analysis/test_day_map_publisher.py -q
+```
+
+Result: `7 passed in 0.47s`.
+
+Full backend regression:
+
+```text
+PYTHONPATH=backend/src backend/.venv/bin/pytest --import-mode=importlib \
+  backend/tests -q
+```
+
+Result: `730 passed, 28 skipped in 15.19s`.
+
+Frontend state and build verification from `prototype`:
+
+```text
+node --test tests/api-state.test.mjs tests/product-state.test.mjs
+npm run build
+```
+
+Result: `15 passed`; Vite production build completed successfully with 37
+modules transformed, followed by successful Sites build preparation.

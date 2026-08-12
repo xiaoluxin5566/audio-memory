@@ -57,6 +57,32 @@ test('feed groups cards by natural day and upload batch', () => {
 })
 
 
+test('position-zero batch overview shows its fixed title and summary', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-12', cards: [{
+    id: 'overview-1',
+    batch_id: 'batch-1',
+    scene_id: 'batch_overview',
+    uploaded_at: '2026-08-12T10:00:00Z',
+    payload: {
+      scene_id: 'batch_overview',
+      kind: 'batch_overview',
+      overview: {
+        title: '本次概览',
+        summary: '这段录音从亲子对话转向节目笔记。',
+        scene_ids: ['child-transition', 'media-note'],
+      },
+    },
+    qa: [],
+  }] }] })
+
+  assert.equal(normalized.feed[0].cards[0].title, '本次概览')
+  assert.equal(
+    normalized.feed[0].cards[0].summary,
+    '这段录音从亲子对话转向节目笔记。',
+  )
+})
+
+
 test('history and prompts preserve runtime prompt metadata', () => {
   const history = normalizeHistory({ days: [{ date: '2026-08-05', audio: [{ id: 'f1', original_name: '录音.mp3', duration_ms: 65000, uploaded_at: '2026-08-05T10:00:00Z' }] }] })
   const prompts = normalizePrompts({ prompts: [{ scene_id: 'autonomous-analysis', label: '自主分析', version: 2, content: '完整分析', editable: false, source: 'versioned-code' }] })

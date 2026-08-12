@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select, update
 
 from audio_memory.analysis.profile import ProfileDelta
 from audio_memory.analysis.profile_rebuild import ProfileRebuilder
+from audio_memory.analysis.native_search import normalize_search_results
 from audio_memory.analysis.todos import reconcile_todos
 from audio_memory.analysis.versions import require_card_version
 from audio_memory.transcript_safety import pending_risk_review_exists
@@ -449,6 +450,33 @@ class VersionPublisher:
             ExternalSource.model_validate(item)
             for item in staged.get("external_sources", [])
         )
+        for search_round in search_rounds:
+            if any(
+                source.provider_id != version.provider_id
+                for source in search_round.sources
+            ):
+                raise ValueError(
+                    "search source provider must match analysis version provider"
+                )
+            expected_sources = normalize_search_results(
+                provider_id=version.provider_id,
+                round_number=search_round.round_number,
+                results=search_round.results,
+            )
+            expected_by_id = VersionPublisher._canonical_sources(expected_sources)
+            actual_by_id = VersionPublisher._canonical_sources(search_round.sources)
+            if {
+                source_id: source.model_dump(mode="json")
+                for source_id, source in expected_by_id.items()
+            } != {
+                source_id: source.model_dump(mode="json")
+                for source_id, source in actual_by_id.items()
+            }:
+                raise ValueError(
+                    "search sources must be deterministically derived from "
+                    "same-round provider results"
+                )
+
         round_sources_by_id = VersionPublisher._canonical_sources(
             source
             for search_round in search_rounds

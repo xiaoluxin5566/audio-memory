@@ -354,7 +354,7 @@ export function normalizeFeed(payload) {
         batch.cards.push(...strictCards)
         for (const card of strictCards) batch.qa[card.id] = normalizeConversation(item.qa)
       } else {
-        const shell = item.payload?.card ?? {}
+        const shell = item.payload?.card ?? item.payload?.overview ?? {}
         batch.cards.push({
           id: item.id,
           apiId: item.id,

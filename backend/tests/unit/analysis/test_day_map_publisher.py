@@ -12,6 +12,12 @@ from audio_memory.models import AnalysisJob, AnalysisVersion, Card
 from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
 
 
+SOURCE_ID = (
+    "source_"
+    "686192289d21f34fd636a3e1e8fadc22aa8603dd36bf33487ff3ccc7109b83d5"
+)
+
+
 def autonomous_result() -> AutonomousAnalysisResult:
     return AutonomousAnalysisResult.model_validate(
         {
@@ -19,7 +25,7 @@ def autonomous_result() -> AutonomousAnalysisResult:
                 {
                     "title": "亲子对话",
                     "summary": "先接住情绪，再讨论规则。",
-                    "external_source_ids": ["source_real_001"],
+                    "external_source_ids": [SOURCE_ID],
                     "content": [
                         {
                             "type": "scene_reconstruction",
@@ -62,7 +68,7 @@ def autonomous_result() -> AutonomousAnalysisResult:
 
 def staged_day_map() -> dict[str, object]:
     source = {
-        "source_id": "source_real_001",
+        "source_id": SOURCE_ID,
         "provider_id": "kimi",
         "provider_result_id": "result_42",
         "title": "Emotion coaching and child regulation",
@@ -305,4 +311,55 @@ async def test_failure_after_card_replacement_rolls_back_cards_and_provenance(
     assert version.search_rounds_json is None
     assert version.external_sources_json is None
     assert card_count == 0
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_id", "source_arbitrary", "source"),
+        ("provider_id", "openai", "provider"),
+        ("title", "Rewritten title", "title and URL"),
+        ("url", "https://example.org/rewritten", "title and URL"),
+    ],
+)
+async def test_publication_rejects_fabricated_source_provenance(
+    tmp_path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    database = Database(tmp_path / f"invalid-{field}.sqlite3")
+    await database.create_schema()
+    staged = staged_day_map()
+    staged["search_rounds"][0]["sources"][0][field] = value
+    staged["external_sources"][0][field] = value
+    if field == "source_id":
+        result = autonomous_result().model_copy(deep=True)
+        result.cards[0].external_source_ids = [value]
+    else:
+        result = autonomous_result()
+    async with database.session() as session:
+        session.add(AnalysisJob(id=f"job-{field}", stage="ready_to_commit"))
+        session.add(
+            AnalysisVersion(
+                id=f"version-{field}",
+                source_job_id=f"job-{field}",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json=json.dumps(staged, ensure_ascii=False),
+                status="running",
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(ValueError, match=message):
+        await VersionPublisher(database).publish(
+            f"version-{field}", result, []
+        )
     await database.dispose()
