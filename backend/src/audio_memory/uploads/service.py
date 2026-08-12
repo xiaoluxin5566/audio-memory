@@ -58,6 +58,9 @@ class UploadJobView:
     progress_percent: int = 0
     eta_state: str = "unavailable"
     eta_seconds: int | None = None
+    local_phase: str | None = None
+    batch_current: int = 0
+    batch_total: int = 0
 
 
 class UploadService:
@@ -105,6 +108,7 @@ class UploadService:
             total_ms = sum(int(item.duration_ms or 0) for item in file_rows)
             eta_seconds = None
             eta_state = "unavailable"
+            local_progress = self.eta_tracker.progress(job.id)
             if job.stage == JobStage.TRANSCRIBING.value:
                 eta_seconds = self.eta_tracker.estimate_seconds(
                     job.id, max(0, total_ms - processed_ms)
@@ -122,6 +126,9 @@ class UploadService:
                 ),
                 eta_state=eta_state,
                 eta_seconds=eta_seconds,
+                local_phase=local_progress[0] if local_progress else None,
+                batch_current=local_progress[1] if local_progress else 0,
+                batch_total=local_progress[2] if local_progress else 0,
             )
 
     async def get_active_job(self) -> UploadJobView | None:

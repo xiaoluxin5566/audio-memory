@@ -103,11 +103,13 @@ def test_structured_transcript_migration_adds_required_metadata(tmp_path: Path) 
         "recording_time_source",
         "timezone",
         "speech_mapping_json",
+        "compact_checkpoint_json",
         "vad_speech_json",
         "vad_available",
     } <= job_file_columns
     assert job_file_not_null["recording_time_source"] == 1
     assert job_file_not_null["speech_mapping_json"] == 1
+    assert job_file_not_null["compact_checkpoint_json"] == 1
     assert job_file_not_null["vad_speech_json"] == 1
     assert job_file_not_null["vad_available"] == 1
 

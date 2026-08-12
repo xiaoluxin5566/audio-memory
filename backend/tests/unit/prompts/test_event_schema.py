@@ -1,14 +1,58 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
+from audio_memory.analysis.parser import parse_event_map_output
 from audio_memory.prompts.event_schema import (
     Event,
     EventMap,
+    EventMapDraft,
     StructuredTranscriptSegment,
     UserSpeaker,
 )
+
+
+def empty_event_map_payload() -> dict[str, object]:
+    return {
+        "user_speaker": {
+            "speaker_id": None,
+            "confidence": 0,
+            "reasoning": "无法判断",
+            "evidence_segment_ids": [],
+        },
+        "events": [],
+    }
+
+
+def test_model_event_map_contract_omits_server_owned_unassigned_ids() -> None:
+    schema = EventMapDraft.model_json_schema()
+
+    assert "unassigned_segment_ids" not in schema["properties"]
+    with pytest.raises(ValidationError):
+        EventMapDraft.model_validate(
+            {**empty_event_map_payload(), "unassigned_segment_ids": []}
+        )
+
+
+def test_persisted_event_map_keeps_legacy_unassigned_compatibility() -> None:
+    omitted = EventMap.model_validate(empty_event_map_payload())
+    explicit = EventMap.model_validate(
+        {**empty_event_map_payload(), "unassigned_segment_ids": ["seg_001"]}
+    )
+
+    assert omitted.unassigned_segment_ids == []
+    assert explicit.unassigned_segment_ids == ["seg_001"]
+
+
+def test_event_map_parser_returns_response_only_draft() -> None:
+    parsed = parse_event_map_output(
+        json.dumps(empty_event_map_payload(), ensure_ascii=False)
+    )
+
+    assert isinstance(parsed, EventMapDraft)
 
 
 def event(
@@ -40,16 +84,16 @@ def event(
     )
 
 
-def test_user_speaker_reliability_starts_at_point_seven() -> None:
+def test_user_speaker_reliability_starts_at_point_eight_five() -> None:
     below = UserSpeaker(
         speaker_id="speaker_A",
-        confidence=0.69,
+        confidence=0.84,
         reasoning="只有弱身份线索",
         evidence_segment_ids=["seg_001"],
     )
     boundary = UserSpeaker(
         speaker_id="speaker_A",
-        confidence=0.70,
+        confidence=0.85,
         reasoning="存在明确责任锚点",
         evidence_segment_ids=["seg_001"],
     )
@@ -68,7 +112,7 @@ def test_reliable_user_speaker_requires_nonempty_unique_evidence(
     with pytest.raises(ValidationError, match="evidence"):
         UserSpeaker(
             speaker_id="speaker_A",
-            confidence=0.70,
+            confidence=0.85,
             reasoning="存在明确责任锚点",
             evidence_segment_ids=evidence_segment_ids,
         )

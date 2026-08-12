@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -63,7 +66,7 @@ class ContentService:
             rows = list(
                 (
                     await session.execute(
-                        select(Batch, Card)
+                        select(Batch, Card, AnalysisVersion)
                         .join(
                             Card,
                             (Card.batch_id == Batch.id)
@@ -72,12 +75,24 @@ class ContentService:
                                 == Batch.current_analysis_version_id
                             ),
                         )
+                        .join(
+                            AnalysisVersion,
+                            AnalysisVersion.id == Card.analysis_version_id,
+                        )
                         .where(~pending_risk_review_exists(Batch.job_id))
                         .order_by(Batch.uploaded_at.desc(), Card.position)
                     )
                 ).all()
             )
-            card_ids = [card.id for _, card in rows]
+            card_ids = [card.id for _, card, _ in rows]
+            evidence_by_card = {
+                card.id: await self._evidence_view(
+                    session,
+                    card=card,
+                    version=version,
+                )
+                for _, card, version in rows
+            }
             qa_rows = (
                 list(
                     await session.scalars(
@@ -95,17 +110,21 @@ class ContentService:
                 {"role": message.role, "content": message.content}
             )
         days: dict[str, list[dict[str, object]]] = defaultdict(list)
-        for batch, card in rows:
-            days[batch.natural_date].append(
-                {
-                    "id": card.id,
-                    "batch_id": batch.id,
-                    "scene_id": card.scene_id,
-                    "uploaded_at": batch.uploaded_at,
-                    "payload": json.loads(card.payload_json),
-                    "qa": qa_by_card[card.id],
-                }
-            )
+        for batch, card, version in rows:
+            payload = json.loads(card.payload_json)
+            card_view = {
+                "id": card.id,
+                "batch_id": batch.id,
+                "scene_id": card.scene_id,
+                "uploaded_at": batch.uploaded_at,
+                "payload": payload,
+                "evidence": evidence_by_card[card.id],
+                "qa": qa_by_card[card.id],
+            }
+            sources = self._external_source_view(version, payload)
+            if sources is not None:
+                card_view["sources"] = sources
+            days[batch.natural_date].append(card_view)
         todos.sort(key=lambda item: item.created_at, reverse=True)
         todos.sort(
             key=lambda item: (
@@ -123,6 +142,204 @@ class ContentService:
                 for date, cards in sorted(days.items(), reverse=True)
             ],
         }
+
+    @classmethod
+    def _external_source_view(
+        cls,
+        version: AnalysisVersion,
+        payload: object,
+    ) -> list[dict[str, object]] | None:
+        if version.external_sources_json is None:
+            return None
+        try:
+            raw_sources = json.loads(version.external_sources_json)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw_sources, list):
+            return []
+        sources_by_id = {
+            item["source_id"]: item
+            for item in raw_sources
+            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+        }
+        return [
+            sources_by_id[source_id]
+            for source_id in cls._collect_external_source_ids(payload)
+            if source_id in sources_by_id
+        ]
+
+    @classmethod
+    def _collect_external_source_ids(cls, value: object) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            source_ids = value.get("external_source_ids")
+            if isinstance(source_ids, list):
+                found.extend(item for item in source_ids if isinstance(item, str))
+            for nested in value.values():
+                found.extend(cls._collect_external_source_ids(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.extend(cls._collect_external_source_ids(nested))
+        return list(dict.fromkeys(found))
+
+    async def evidence_audio(self, card_id: str, segment_id: str) -> Path:
+        match = re.fullmatch(r"seg_(\d+)_(\d+)", segment_id)
+        if match is None:
+            raise LookupError("Unknown card evidence")
+        position, segment_index = (int(value) for value in match.groups())
+        async with self.database.session() as session:
+            row = (
+                await session.execute(
+                    select(Card, Batch, AnalysisVersion)
+                    .join(Batch, Batch.id == Card.batch_id)
+                    .join(
+                        AnalysisVersion,
+                        AnalysisVersion.id == Card.analysis_version_id,
+                    )
+                    .where(
+                        Card.id == card_id,
+                        Card.analysis_version_id
+                        == Batch.current_analysis_version_id,
+                        ~pending_risk_review_exists(Batch.job_id),
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                raise LookupError("Unknown card evidence")
+            card, _, version = row
+            if segment_id not in self._scene_evidence_ids(version, card.scene_id):
+                raise LookupError("Unknown card evidence")
+            audio_row = (
+                await session.execute(
+                    select(JobFile, Transcript)
+                    .join(Transcript, Transcript.job_file_id == JobFile.id)
+                    .where(
+                        JobFile.job_id == version.source_job_id,
+                        JobFile.position == position,
+                        Transcript.segment_index == segment_index,
+                        Transcript.risk_classified.is_(True),
+                        Transcript.is_reliable.is_(True),
+                    )
+                )
+            ).one_or_none()
+        if audio_row is None:
+            raise LookupError("Unknown card evidence")
+        source_file, _ = audio_row
+        audio_root = self.paths.audio.resolve()
+        audio_path = Path(source_file.temporary_path).resolve()
+        if not audio_path.is_relative_to(audio_root) or not audio_path.is_file():
+            raise LookupError("Unknown card evidence")
+        return audio_path
+
+    async def _evidence_view(
+        self,
+        session,
+        *,
+        card: Card,
+        version: AnalysisVersion,
+    ) -> list[dict[str, object]]:
+        if card.scene_id == "analysis":
+            payload = json.loads(card.payload_json)
+            source_cards = payload.get("cards", []) if isinstance(payload, dict) else []
+        else:
+            staged = self._staged_scene(version, card.scene_id)
+            source_cards = staged.get("cards", [])
+        if not isinstance(source_cards, list) or not source_cards:
+            return []
+        requested_ids = {
+            segment_id
+            for source_card in source_cards
+            for segment_id in self._collect_evidence_ids(source_card)
+        }
+        if not requested_ids:
+            return []
+        rows = list(
+            (
+                await session.execute(
+                    select(JobFile.position, Transcript)
+                    .join(Transcript, Transcript.job_file_id == JobFile.id)
+                    .where(
+                        JobFile.job_id == version.source_job_id,
+                        Transcript.risk_classified.is_(True),
+                        Transcript.is_reliable.is_(True),
+                    )
+                    .order_by(
+                        JobFile.position,
+                        Transcript.start_ms,
+                        Transcript.segment_index,
+                    )
+                )
+            ).all()
+        )
+        segments = {
+            f"seg_{position}_{transcript.segment_index}": {
+                "segment_id": f"seg_{position}_{transcript.segment_index}",
+                "start_ms": transcript.start_ms,
+                "end_ms": transcript.end_ms,
+                "playback_url": (
+                    f"/api/cards/{quote(card.id, safe='')}"
+                    f"/evidence/{quote(f'seg_{position}_{transcript.segment_index}', safe='')}"
+                    "/audio"
+                ),
+            }
+            for position, transcript in rows
+            if f"seg_{position}_{transcript.segment_index}" in requested_ids
+        }
+        evidence: list[dict[str, object]] = []
+        for card_index, source_card in enumerate(source_cards):
+            source_ids = self._collect_evidence_ids(source_card)
+            card_segments = sorted(
+                (
+                    segments[segment_id]
+                    for segment_id in source_ids
+                    if segment_id in segments
+                ),
+                key=lambda item: (item["start_ms"], item["end_ms"]),
+            )
+            if card_segments:
+                evidence.append(
+                    {"card_index": card_index, "segments": card_segments}
+                )
+        return evidence
+
+    @staticmethod
+    def _staged_scene(
+        version: AnalysisVersion, scene_id: str
+    ) -> dict[str, object]:
+        try:
+            staged = json.loads(version.staged_results_json)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        scene = staged.get(scene_id, {}) if isinstance(staged, dict) else {}
+        return scene if isinstance(scene, dict) else {}
+
+    @classmethod
+    def _scene_evidence_ids(
+        cls, version: AnalysisVersion, scene_id: str
+    ) -> list[str]:
+        if scene_id == "analysis":
+            try:
+                staged = json.loads(version.staged_results_json)
+            except (TypeError, json.JSONDecodeError):
+                return []
+            return cls._collect_evidence_ids(
+                staged.get("autonomous", {}) if isinstance(staged, dict) else {}
+            )
+        return cls._collect_evidence_ids(cls._staged_scene(version, scene_id))
+
+    @classmethod
+    def _collect_evidence_ids(cls, value: object) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            evidence = value.get("evidence_segment_ids")
+            if isinstance(evidence, list):
+                found.extend(item for item in evidence if isinstance(item, str))
+            for nested in value.values():
+                found.extend(cls._collect_evidence_ids(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.extend(cls._collect_evidence_ids(nested))
+        return list(dict.fromkeys(found))
 
     async def history(self) -> dict[str, object]:
         async with self.database.session() as session:

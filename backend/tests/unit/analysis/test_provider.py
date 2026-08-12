@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from audio_memory.analysis import provider as provider_module
+from audio_memory.analysis import windows as windows_module
+from audio_memory.analysis.provider import (
+    ProviderAnalysisClient,
+    ProviderAnalysisError,
+    RemoteSceneAnalyzer,
+)
+from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.director_schema import DirectorResult
+from audio_memory.prompts.event_schema import EventMap
+from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
+
+
+class ConfiguredKeychain:
+    def read(self, provider_id: str) -> KeychainReadResult:
+        return KeychainReadResult(KeychainStatus.CONFIGURED, b"test-only-secret")
+
+
+class DirectorClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        self.calls.append({"provider_id": provider_id, **kwargs})
+        return json.dumps(
+            {
+                "selections": [
+                    {
+                        "selection_id": "selection_001",
+                        "cluster_ids": ["cluster_1234567890abcdefabcd"],
+                        "source_event_ids": [],
+                        "candidate_scenes": ["meeting"],
+                        "title": "Synthetic work discussion",
+                        "selection_reason": "Contains a bounded work decision.",
+                        "value_signals": ["explicit_decision"],
+                        "priority": "high",
+                        "context_before_clusters": 0,
+                        "context_after_clusters": 0,
+                    }
+                ]
+            }
+        )
+
+
+def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
+    monkeypatch,
+) -> None:
+    baseline = provider_module._analysis_parameter_fingerprint()
+
+    monkeypatch.setattr(
+        windows_module,
+        "ANALYSIS_WINDOW_GAP_MS",
+        windows_module.ANALYSIS_WINDOW_GAP_MS + 1,
+    )
+
+    changed = provider_module._analysis_parameter_fingerprint()
+    assert changed != baseline
+    assert "PRIVATE_FIXTURE_TEXT" not in changed
+
+
+def transcript() -> list[dict[str, object]]:
+    return [
+        {
+            "segment_id": "seg_0_0",
+            "file_id": "file-1",
+            "file_name": "fixture.mp3",
+            "recording_started_at": None,
+            "local_date": None,
+            "timezone": None,
+            "start_ms": 0,
+            "end_ms": 1_000,
+            "speaker_id": "unknown",
+            "text": "PRIVATE_FIXTURE_TEXT",
+            "reliability_weight": 1.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_analyzer_parses_director_result_through_strict_boundary() -> None:
+    client = DirectorClient()
+    analyzer = RemoteSceneAnalyzer(client)
+    request = type(
+        "Request",
+        (),
+        {
+            "rendered_instructions": "rules",
+            "user_data": "data",
+            "scene_id": "director:cluster_1234567890abcdefabcd",
+            "max_tokens": 16_384,
+            "timeout_seconds": 120,
+            "segment_count": 1,
+            "schema_json": json.dumps(DirectorResult.model_json_schema()),
+        },
+    )()
+
+    result = await analyzer.analyze_director(
+        request,
+        {"provider_id": "deepseek", "model_id": "deepseek-v4-flash"},
+    )
+
+    assert isinstance(result, DirectorResult)
+    assert result.selections[0].candidate_scenes == ["meeting"]
+    assert client.calls[0]["scene_id"] == request.scene_id
+    assert client.calls[0]["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_deepseek_request_is_bounded_and_enables_thinking() -> None:
+    captured: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions["timeout"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "{}"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 4},
+            },
+        )
+
+    request = PromptComposer().compose_event_map(
+        transcript=transcript(), profile=[], schema=EventMap.model_json_schema()
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.generate(
+            "deepseek",
+            system=request.rendered_instructions,
+            user=request.user_data,
+            model_id="deepseek-v4-pro",
+            scene_id=request.scene_id,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+            segment_count=request.segment_count,
+        )
+
+    assert result == "{}"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["max_tokens"] == 32_768
+    assert payload["temperature"] == 0
+    assert payload["response_format"] == {"type": "json_object"}
+    timeout = captured["timeout"]
+    assert isinstance(timeout, dict)
+    assert timeout["read"] == 180.0
+    assert provider.usage_totals == {"input_tokens": 9, "output_tokens": 4}
+    assert len(provider.parameter_fingerprint) == 64
+
+
+@pytest.mark.asyncio
+async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_free(
+    monkeypatch,
+) -> None:
+    logged: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        provider_module.logger, "info", lambda *values: logged.append(values)
+    )
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "PRIVATE_RESPONSE_TEXT"},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        with pytest.raises(ProviderAnalysisError) as raised:
+            await provider.generate(
+                "deepseek",
+                system="PRIVATE_SYSTEM_TEXT",
+                user="PRIVATE_FIXTURE_TEXT",
+                scene_id="event-map",
+                max_tokens=32_768,
+                timeout_seconds=180,
+                segment_count=3_442,
+            )
+
+    assert raised.value.code == "model_output_truncated"
+    assert len(provider.request_diagnostics) == 1
+    diagnostic = provider.request_diagnostics[0]
+    assert diagnostic.scene_id == "event-map"
+    assert diagnostic.finish_reason == "length"
+    assert diagnostic.segment_count == 3_442
+    assert diagnostic.input_tokens == 10
+    assert diagnostic.output_tokens == 5
+    assert diagnostic.request_bytes > 0
+    assert diagnostic.response_bytes > 0
+    serialized = repr(diagnostic)
+    assert "PRIVATE_SYSTEM_TEXT" not in serialized
+    assert "PRIVATE_FIXTURE_TEXT" not in serialized
+    assert "PRIVATE_RESPONSE_TEXT" not in serialized
+    assert "test-only-secret" not in serialized
+    assert provider_module.logger.name == "uvicorn.error"
+    logged_repr = repr(logged)
+    assert "analysis_provider_request" in logged_repr
+    assert "event-map" in logged_repr
+    assert "PRIVATE_SYSTEM_TEXT" not in logged_repr
+    assert "PRIVATE_FIXTURE_TEXT" not in logged_repr
+    assert "PRIVATE_RESPONSE_TEXT" not in logged_repr
+    assert "test-only-secret" not in logged_repr
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_failure_gets_only_one_extra_attempt() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        with pytest.raises(ProviderAnalysisError) as raised:
+            await provider.generate(
+                "deepseek",
+                system="rules",
+                user="data",
+                scene_id="meeting",
+                max_tokens=16_384,
+                timeout_seconds=120,
+            )
+
+    assert raised.value.code == "provider_unavailable"
+    assert calls == 2

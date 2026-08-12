@@ -22,7 +22,11 @@ from pydantic import (
     model_validator,
 )
 
-from audio_memory.prompts.event_schema import EventMap, StructuredTranscriptSegment
+from audio_memory.prompts.event_schema import (
+    EventMap,
+    EventMapDraft,
+    StructuredTranscriptSegment,
+)
 from audio_memory.prompts.evidence import (
     EvidenceIntegrityError,
     validate_evidence_integrity,
@@ -466,9 +470,21 @@ class _RealProviderBackend:
         event_request = self._composer.compose_event_map(
             transcript=transcript,
             profile=[],
-            schema=EventMap.model_json_schema(),
+            schema=EventMapDraft.model_json_schema(),
         )
-        event_map = await self._analyzer.analyze_event_map(event_request, snapshot)
+        event_draft = await self._analyzer.analyze_event_map(event_request, snapshot)
+        assigned_ids = {
+            segment_id
+            for event in event_draft.events
+            for segment_id in event.evidence_segment_ids
+        }
+        known_ids = {str(item["segment_id"]) for item in transcript}
+        event_map = EventMap.model_validate(
+            {
+                **event_draft.model_dump(mode="python"),
+                "unassigned_segment_ids": sorted(known_ids - assigned_ids),
+            }
+        )
         scene_results: list[StrictSceneResult] = []
         versions: dict[str, int] = {}
         for scene_id in PROMPT_SCENES:
@@ -492,7 +508,7 @@ class _RealProviderBackend:
             for key, value in self._client.usage_totals.items()
         }
         return ProviderCaseOutput(
-            event_map=EventMap.model_validate(event_map),
+            event_map=event_map,
             scene_results=scene_results,
             model_id=config.model_id,
             prompt_versions=versions,

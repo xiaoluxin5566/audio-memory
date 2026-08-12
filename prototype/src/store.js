@@ -1,12 +1,6 @@
-import { DEFAULT_PROMPTS } from './defaults.js';
-
 const CARD_ORDER = ['meeting', 'parenting', 'content', 'growth', 'inspiration'];
 
 export function createInitialState() {
-  const prompts = Object.fromEntries(Object.entries(DEFAULT_PROMPTS).map(([id, current]) => [
-    id,
-    { current, version: 1, versions: [] },
-  ]));
   return {
     version: 1,
     providers: {
@@ -20,7 +14,7 @@ export function createInitialState() {
     feed: [],
     todos: [],
     history: [],
-    prompts,
+    prompts: {},
     hiddenProfile: null,
   };
 }

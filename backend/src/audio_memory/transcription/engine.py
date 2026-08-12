@@ -28,6 +28,21 @@ from audio_memory.diarization.alignment import (
 from audio_memory.diarization.engine import OfflineDiarizationEngine, SpeakerTurn
 from audio_memory.models import JobFile, TempFileManifest, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
+from audio_memory.transcription.compact import (
+    CompactBatch,
+    CompactCheckpoint,
+    LocalFastParameters,
+    SourceRange,
+    build_compact_batches,
+    normalize_source_ranges,
+)
+from audio_memory.transcription.mapping import (
+    MappingRejection,
+    MappedSegment,
+    map_segment,
+    reconcile_mapped_segments,
+)
+from audio_memory.transcription.metrics import LocalFastMetrics
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_gate import EnergyInterval
 from audio_memory.uploads.cleanup import assert_staging_path
@@ -273,17 +288,14 @@ def build_speech_mapping(
     duration_ms: int,
     padding_ms: int = DEFAULT_SPEECH_PADDING_MS,
 ) -> tuple[list[SpeechInterval], list[SpeechMappingEntry]]:
-    padded: list[SpeechInterval] = []
-    for interval in sorted(intervals, key=lambda item: item.start_ms):
-        start_ms = max(0, interval.start_ms - padding_ms)
-        end_ms = min(duration_ms, interval.end_ms + padding_ms)
-        if padded and start_ms <= padded[-1].end_ms:
-            padded[-1] = SpeechInterval(
-                padded[-1].start_ms,
-                max(padded[-1].end_ms, end_ms),
-            )
-        else:
-            padded.append(SpeechInterval(start_ms, end_ms))
+    padded = [
+        SpeechInterval(item.start_ms, item.end_ms)
+        for item in normalize_source_ranges(
+            [SourceRange(item.start_ms, item.end_ms) for item in intervals],
+            duration_ms=duration_ms,
+            padding_ms=padding_ms,
+        )
+    ]
 
     windows: list[SpeechInterval] = []
     for interval in padded:
@@ -601,22 +613,104 @@ def diarize_fail_open(diarization_engine, path: Path) -> list[SpeakerTurn]:
         return []
 
 
+class WhisperBatchResult(list[dict[str, object]]):
+    def __init__(
+        self,
+        segments: list[dict[str, object]],
+        *,
+        language: str | None,
+        language_confidence: float | None,
+    ) -> None:
+        super().__init__(segments)
+        self.language = language
+        self.language_confidence = language_confidence
+
+
 def _transcribe_worker(
     audio_path: str,
     model_id: str,
     word_timestamps: bool = False,
-) -> list[dict[str, object]]:
+    language: str | None = None,
+) -> WhisperBatchResult:
     import mlx_whisper
 
     result = mlx_whisper.transcribe(
         audio_path,
         path_or_hf_repo=model_id,
         word_timestamps=word_timestamps,
+        condition_on_previous_text=False,
+        temperature=0,
+        **({"language": language} if language is not None else {}),
     )
     segments = result.get("segments", [])
     if not isinstance(segments, list):
         raise RuntimeError("Whisper returned an invalid segment list")
-    return segments
+    confidence = result.get("language_probability")
+    return WhisperBatchResult(
+        segments,
+        language=result.get("language") if isinstance(result.get("language"), str) else None,
+        language_confidence=(
+            float(confidence) if isinstance(confidence, (int, float)) else None
+        ),
+    )
+
+
+def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path:
+    """Materialize one compact batch without copying silence between sources."""
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, entry in enumerate(batch.entries):
+        label = f"a{index}"
+        labels.append(f"[{label}]")
+        if entry.kind == "separator":
+            duration = (entry.compact_end_ms - entry.compact_start_ms) / 1000
+            filters.append(
+                f"anullsrc=r=16000:cl=mono:d={duration:.3f}[{label}]"
+            )
+        else:
+            assert entry.source_start_ms is not None
+            assert entry.source_end_ms is not None
+            filters.append(
+                "[0:a]"
+                f"atrim=start={entry.source_start_ms / 1000:.3f}:"
+                f"end={entry.source_end_ms / 1000:.3f},"
+                f"asetpts=PTS-STARTPTS[{label}]"
+            )
+    filters.append(
+        "".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]"
+    )
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[out]",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(target),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Compact WAV preparation failed "
+            f"({completed.returncode}): "
+            f"{completed.stderr.decode('utf-8', errors='replace')[-200:]}"
+        )
+    return target
 
 
 class SelectiveRefiner:
@@ -947,10 +1041,9 @@ class MLXWhisperEngine:
         self.paths = paths
         self.model_id = model_id
         self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
-        self.diarization_engine = diarization_engine or OfflineDiarizationEngine(
-            segmentation_model=paths.diarization_segmentation_model,
-            embedding_model=paths.diarization_embedding_model,
-        )
+        # Speaker separation is intentionally disabled. Audio is transcribed for
+        # information fidelity; the analysis model reasons from linguistic context.
+        self.diarization_engine = None
         self.voice_activity_detector = (
             voice_activity_detector
             if voice_activity_detector is not None
@@ -958,176 +1051,245 @@ class MLXWhisperEngine:
         )
         self.speech_padding_ms = speech_padding_ms
         self._executor: ProcessPoolExecutor | None = None
+        self.metrics_by_job: dict[str, dict[str, object]] = {}
 
     async def transcribe_file(self, file: JobFile, resume_from: int):
         source = Path(file.temporary_path)
+        local_started = time.monotonic()
+        metrics = LocalFastMetrics()
         chunk_dir = source.with_name(f"{file.id}.whisper-chunks")
         manifest_id = str(uuid4())
         await self._register(file.job_id, manifest_id, chunk_dir)
         try:
-            vad_succeeded = True
+            self.eta_tracker.set_progress(file.job_id, "检测语音")
+            vad_started = time.monotonic()
             try:
                 detected = await asyncio.to_thread(
                     self.voice_activity_detector.detect, source
                 )
             except Exception as exc:
-                vad_succeeded = False
                 detected = []
                 logger.disabled = False
                 logger.warning(
                     "Local VAD failed diagnostic=vad_failed error_type=%s",
                     type(exc).__name__,
                 )
-
-            if vad_succeeded:
-                duration_ms = max(
-                    int(file.duration_ms or 0),
-                    max((item.end_ms for item in detected), default=0),
-                )
-                canonical_intervals, mapping = build_speech_mapping(
-                    detected,
-                    duration_ms=duration_ms,
-                    padding_ms=self.speech_padding_ms,
-                )
-                await self._persist_vad_speech(file, detected, available=True)
-                await self._persist_speech_mapping(file, mapping)
-                await self._persist_vad_energy(
-                    file,
-                    getattr(self.voice_activity_detector, "last_energy_intervals", []),
-                )
-                speech_intervals = build_processing_windows(canonical_intervals)
-                ownership_intervals = build_ownership_windows(speech_intervals)
-                chunks = await self._extract_speech_intervals(
-                    source, chunk_dir, speech_intervals
-                )
-                source_offsets = [item.start_ms for item in speech_intervals]
-                audio_durations = [
-                    item.end_ms - item.start_ms for item in speech_intervals
-                ]
-            else:
-                await self._persist_vad_speech(file, [], available=False)
-                await self._persist_speech_mapping(file, [])
-                await self._persist_vad_energy(file, [])
-                chunks = await self._normalize_to_chunks(source, chunk_dir)
-                source_offsets = [
-                    index * WHISPER_CHUNK_SECONDS * 1000
-                    for index in range(len(chunks))
-                ]
-                source_duration_ms = max(0, int(file.duration_ms or 0))
-                audio_durations = [
-                    min(
-                        WHISPER_CHUNK_SECONDS * 1000,
-                        max(
-                            0,
-                            source_duration_ms
-                            - index * WHISPER_CHUNK_SECONDS * 1000,
-                        ),
+            metrics.add_timing("vad", time.monotonic() - vad_started)
+            vad_available = bool(detected)
+            duration_ms = max(
+                int(file.duration_ms or 0),
+                max((item.end_ms for item in detected), default=0),
+            )
+            parameters = LocalFastParameters(speech_padding_ms=self.speech_padding_ms)
+            self.eta_tracker.set_progress(file.job_id, "整理语音批次")
+            ranges = normalize_source_ranges(
+                tuple(SourceRange(item.start_ms, item.end_ms) for item in detected),
+                duration_ms=duration_ms,
+                padding_ms=parameters.speech_padding_ms,
+            )
+            if not ranges and duration_ms > 0:
+                ranges = (SourceRange(0, duration_ms),)
+            batches = build_compact_batches(ranges, parameters)
+            metrics.add_duration(
+                "candidate_speech_ms", sum(batch.speech_ms for batch in batches)
+            )
+            metrics.add_duration(
+                "separator_ms",
+                sum(
+                    entry.compact_end_ms - entry.compact_start_ms
+                    for batch in batches
+                    for entry in batch.entries
+                    if entry.kind == "separator"
+                ),
+            )
+            await self._persist_vad_speech(file, detected, available=vad_available)
+            await self._persist_vad_energy(
+                file,
+                getattr(self.voice_activity_detector, "last_energy_intervals", []),
+            )
+            await self._persist_speech_mapping(
+                file,
+                [
+                    SpeechMappingEntry(
+                        entry.compact_start_ms,
+                        entry.compact_end_ms,
+                        entry.source_start_ms,
+                        entry.source_end_ms,
                     )
-                    or WHISPER_CHUNK_SECONDS * 1000
-                    for index in range(len(chunks))
-                ]
-                speech_intervals = [
-                    SpeechInterval(
-                        source_offsets[index],
-                        source_offsets[index] + audio_durations[index],
-                    )
-                    for index in range(len(chunks))
-                ]
-                ownership_intervals = list(speech_intervals)
-
+                    for batch in batches
+                    for entry in batch.entries
+                    if entry.kind == "source"
+                    and entry.source_start_ms is not None
+                    and entry.source_end_ms is not None
+                ],
+            )
+            chunk_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
-            speaker_coordinator = FileSpeakerCoordinator()
             known_segments = await self._existing_transcript_signatures(file.id)
-            pending_segments: list[SpeakerAwareTranscriptSegment] = []
-            pending_window_index: int | None = None
-            for chunk_index, chunk in enumerate(chunks):
-                skip_transcription = (
-                    (chunk_index + 1) * CHUNK_SEGMENT_STRIDE <= resume_from
-                )
-                turns: list[SpeakerTurn] = []
-                if vad_succeeded and self.diarization_engine is not None:
-                    local_turns = await asyncio.to_thread(
-                        diarize_fail_open, self.diarization_engine, chunk
+            checkpoint = CompactCheckpoint.from_json(
+                getattr(file, "compact_checkpoint_json", "{}"), parameters
+            )
+            pending_batches = [
+                batch
+                for batch in batches
+                if batch.index > checkpoint.last_completed_batch
+            ]
+            prepared: asyncio.Queue[tuple[CompactBatch, Path] | None] = asyncio.Queue(maxsize=2)
+            prepared_limit = asyncio.Semaphore(parameters.max_prepared_wavs)
+            prepared_count = 0
+
+            async def produce() -> None:
+                nonlocal prepared_count
+                try:
+                    for batch in pending_batches:
+                        await prepared_limit.acquire()
+                        target = chunk_dir / f"compact-{batch.index:05d}.wav"
+                        try:
+                            preparation_started = time.monotonic()
+                            await asyncio.to_thread(
+                                prepare_compact_wav, source, batch, target
+                            )
+                            metrics.add_timing(
+                                "wav_preparation",
+                                time.monotonic() - preparation_started,
+                            )
+                            prepared_count += 1
+                            metrics.observe_prepared_wavs(prepared_count)
+                            if target.exists():
+                                metrics.observe_resources(
+                                    peak_rss_bytes=0,
+                                    temporary_disk_bytes=target.stat().st_size,
+                                )
+                        except Exception:
+                            prepared_limit.release()
+                            raise
+                        await prepared.put((batch, target))
+                finally:
+                    await prepared.put(None)
+
+            producer = asyncio.create_task(produce())
+            language_lock = checkpoint.language_lock
+            try:
+                while True:
+                    prepared_item = await prepared.get()
+                    if prepared_item is None:
+                        break
+                    batch, chunk = prepared_item
+                    chunk_index = batch.index
+                    self.eta_tracker.set_progress(
+                        file.job_id,
+                        "本地转写",
+                        current=chunk_index + 1,
+                        total=len(batches),
                     )
-                    turns = speaker_coordinator.coordinate(
-                        speech_intervals[chunk_index], local_turns
-                    )
-                if skip_transcription:
-                    continue
-                started = time.monotonic()
-                raw_segments = await loop.run_in_executor(
-                    self._executor,
-                    _transcribe_worker,
-                    str(chunk),
-                    self.model_id,
-                    False,
-                )
-                current_segments = [
-                    segment
-                    for segment in valid_chunk_segments(
-                        file_id=file.id,
-                        chunk_index=chunk_index,
-                        chunk_seconds=WHISPER_CHUNK_SECONDS,
-                        raw_segments=raw_segments,
-                        turns=turns,
-                        source_offset_ms=source_offsets[chunk_index],
-                    )
-                    if segment.index >= resume_from
-                ]
-                finalized: list[SpeakerAwareTranscriptSegment] = []
-                if pending_window_index is None:
-                    pending_segments = current_segments
-                else:
-                    previous_window = speech_intervals[pending_window_index]
-                    current_window = speech_intervals[chunk_index]
-                    overlap_start_ms = max(
-                        previous_window.start_ms, current_window.start_ms
-                    )
-                    overlap_end_ms = min(
-                        previous_window.end_ms, current_window.end_ms
-                    )
-                    if overlap_end_ms > overlap_start_ms:
-                        finalized, pending_segments = reconcile_boundary_segments(
-                            pending_segments,
-                            current_segments,
-                            overlap=SpeechInterval(
-                                overlap_start_ms, overlap_end_ms
-                            ),
-                            previous_ownership=ownership_intervals[
-                                pending_window_index
-                            ],
-                            current_ownership=ownership_intervals[chunk_index],
+                    started = time.monotonic()
+                    try:
+                        raw_segments = await loop.run_in_executor(
+                            self._executor,
+                            _transcribe_worker,
+                            str(chunk),
+                            self.model_id,
+                            parameters.word_timestamps,
+                            language_lock,
                         )
-                    else:
-                        finalized = pending_segments
-                        pending_segments = current_segments
-                pending_window_index = chunk_index
-
-                for segment in finalized:
-                    if self._duplicates_known_segment(segment, known_segments):
-                        continue
-                    known_segments.append(
-                        (segment.start_ms, segment.end_ms, segment.text.strip())
+                    finally:
+                        chunk.unlink(missing_ok=True)
+                        prepared_count = max(0, prepared_count - 1)
+                        prepared_limit.release()
+                    metrics.increment("whisper_calls")
+                    metrics.add_timing("whisper", time.monotonic() - started)
+                    if chunk_index == 0 and (
+                        raw_segments.language == parameters.language_lock_code
+                        and raw_segments.language_confidence is not None
+                        and raw_segments.language_confidence
+                        >= parameters.language_lock_confidence
+                    ):
+                        language_lock = parameters.language_lock_code
+                    batch_mapped: list[MappedSegment] = []
+                    for local_index, raw in enumerate(raw_segments):
+                        if not isinstance(raw, dict):
+                            continue
+                        converted = dict(raw)
+                        if "start_ms" not in converted and isinstance(converted.get("start"), (int, float)):
+                            converted["start_ms"] = round(float(converted["start"]) * 1000)
+                        if "end_ms" not in converted and isinstance(converted.get("end"), (int, float)):
+                            converted["end_ms"] = round(float(converted["end"]) * 1000)
+                        mapped = map_segment(
+                            batch,
+                            converted,
+                            tolerance_ms=parameters.mapping_tolerance_ms,
+                        )
+                        if isinstance(mapped, MappingRejection):
+                            metrics.reject_mapping(mapped.reason)
+                        elif isinstance(mapped, MappedSegment):
+                            midpoint = (mapped.start_ms + mapped.end_ms) // 2
+                            owns_midpoint = any(
+                                entry.kind == "source"
+                                and entry.source_start_ms is not None
+                                and entry.source_end_ms is not None
+                                and entry.ownership_start_ms is not None
+                                and entry.ownership_end_ms is not None
+                                and entry.source_start_ms <= midpoint < entry.source_end_ms
+                                and entry.ownership_start_ms
+                                <= midpoint
+                                < entry.ownership_end_ms
+                                for entry in batch.entries
+                            )
+                            if owns_midpoint:
+                                batch_mapped.append(mapped)
+                    mapping_started = time.monotonic()
+                    reconciled = reconcile_mapped_segments(
+                        batch_mapped,
+                        duplicate_overlap_ratio=parameters.duplicate_overlap_ratio,
                     )
-                    yield segment
-
-                if current_segments:
+                    metrics.add_timing("mapping", time.monotonic() - mapping_started)
+                    if reconciled.conflict_count:
+                        metrics.increment("mapping_conflicts", reconciled.conflict_count)
+                    for output_index, segment in enumerate(reconciled.kept):
+                        candidate = SpeakerAwareTranscriptSegment(
+                            file_id=file.id,
+                            index=batch.index * CHUNK_SEGMENT_STRIDE + output_index,
+                            start_ms=segment.start_ms,
+                            end_ms=segment.end_ms,
+                            text=segment.text,
+                            words=[],
+                            speaker_id="unknown",
+                            no_speech_prob=segment.no_speech_prob,
+                            avg_logprob=segment.avg_logprob,
+                        )
+                        if self._duplicates_known_segment(candidate, known_segments):
+                            continue
+                        known_segments.append(
+                            (candidate.start_ms, candidate.end_ms, candidate.text.strip())
+                        )
+                        yield candidate
+                    checkpoint = CompactCheckpoint(
+                        parameters.fingerprint(),
+                        last_completed_batch=batch.index,
+                        next_segment_index=(batch.index + 1) * CHUNK_SEGMENT_STRIDE,
+                        language_lock=language_lock,
+                    )
+                    await self._persist_compact_checkpoint(file, checkpoint)
                     self.eta_tracker.record(
                         file.job_id,
-                        audio_durations[chunk_index],
+                        batch.speech_ms,
                         time.monotonic() - started,
                     )
-
-            for segment in pending_segments:
-                if self._duplicates_known_segment(segment, known_segments):
-                    continue
-                known_segments.append(
-                    (segment.start_ms, segment.end_ms, segment.text.strip())
-                )
-                yield segment
+            finally:
+                await producer
+            self.eta_tracker.set_progress(
+                file.job_id, "校验时间轴", current=len(batches), total=len(batches)
+            )
         finally:
+            metrics.add_timing("local_total", time.monotonic() - local_started)
+            self.metrics_by_job[file.job_id] = metrics.to_dict()
+            logger.info(
+                "Local fast aggregate metrics job_id=%s metrics=%s",
+                file.job_id,
+                json.dumps(metrics.to_dict(), sort_keys=True, separators=(",", ":")),
+            )
             safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
             if safe_dir.exists():
                 shutil.rmtree(safe_dir)
@@ -1241,6 +1403,17 @@ class MLXWhisperEngine:
             stored = await session.get(JobFile, file.id)
             if stored is not None:
                 stored.speech_mapping_json = serialized
+                await session.commit()
+
+    async def _persist_compact_checkpoint(
+        self, file: JobFile, checkpoint: CompactCheckpoint
+    ) -> None:
+        serialized = checkpoint.to_json()
+        file.compact_checkpoint_json = serialized
+        async with self.database.session() as session:
+            stored = await session.get(JobFile, file.id)
+            if stored is not None:
+                stored.compact_checkpoint_json = serialized
                 await session.commit()
 
     async def _persist_vad_speech(

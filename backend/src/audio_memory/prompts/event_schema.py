@@ -57,7 +57,7 @@ class UserSpeaker(StrictModel):
 
     @model_validator(mode="after")
     def validate_reliable_evidence(self) -> UserSpeaker:
-        if self.confidence >= 0.70:
+        if self.confidence >= 0.85:
             if not self.evidence_segment_ids:
                 raise ValueError("reliable user speaker evidence must not be empty")
             if len(self.evidence_segment_ids) != len(set(self.evidence_segment_ids)):
@@ -68,7 +68,7 @@ class UserSpeaker(StrictModel):
     def is_reliable(self) -> bool:
         return (
             self.speaker_id is not None
-            and self.confidence >= 0.70
+            and self.confidence >= 0.85
             and bool(self.evidence_segment_ids)
             and len(self.evidence_segment_ids) == len(set(self.evidence_segment_ids))
         )
@@ -120,58 +120,74 @@ class Event(StrictModel):
         return self
 
 
+def _validate_event_graph(
+    events: list[Event], unassigned_segment_ids: list[str]
+) -> None:
+    events_by_id = {event.event_id: event for event in events}
+    if len(events_by_id) != len(events):
+        raise ValueError("event_id values must be unique")
+    if len(unassigned_segment_ids) != len(set(unassigned_segment_ids)):
+        raise ValueError("unassigned_segment_ids must be unique")
+    assignment_counts = Counter(
+        segment_id
+        for event in events
+        for segment_id in event.evidence_segment_ids
+    )
+    repeated_assignments = sorted(
+        segment_id
+        for segment_id, count in assignment_counts.items()
+        if count > 1
+    )
+    if repeated_assignments:
+        raise ValueError(
+            "a segment cannot belong to multiple events, including parent/child "
+            f"events: {repeated_assignments}"
+        )
+    assigned_segment_ids = {
+        segment_id
+        for event in events
+        for segment_id in event.evidence_segment_ids
+    }
+    overlap = assigned_segment_ids & set(unassigned_segment_ids)
+    if overlap:
+        raise ValueError("a segment cannot be both assigned and unassigned")
+    for event in events:
+        if event.parent_event_id is None:
+            continue
+        parent = events_by_id.get(event.parent_event_id)
+        if parent is None:
+            raise ValueError("parent_event_id must reference an event in this map")
+        if event.start_ms < parent.start_ms or event.end_ms > parent.end_ms:
+            raise ValueError("child event must remain inside its parent time range")
+        ancestors = {event.event_id}
+        current = parent
+        while current.parent_event_id is not None:
+            if current.event_id in ancestors:
+                raise ValueError("event parent relationships must be acyclic")
+            ancestors.add(current.event_id)
+            current = events_by_id.get(current.parent_event_id)
+            if current is None:
+                raise ValueError("parent_event_id must reference an event in this map")
+        if current.event_id in ancestors:
+            raise ValueError("event parent relationships must be acyclic")
+
+
+class EventMapDraft(StrictModel):
+    user_speaker: UserSpeaker
+    events: list[Event]
+
+    @model_validator(mode="after")
+    def validate_event_graph(self) -> EventMapDraft:
+        _validate_event_graph(self.events, [])
+        return self
+
+
 class EventMap(StrictModel):
     user_speaker: UserSpeaker
     events: list[Event]
-    unassigned_segment_ids: list[str]
+    unassigned_segment_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_event_graph(self) -> EventMap:
-        events_by_id = {event.event_id: event for event in self.events}
-        if len(events_by_id) != len(self.events):
-            raise ValueError("event_id values must be unique")
-        if len(self.unassigned_segment_ids) != len(set(self.unassigned_segment_ids)):
-            raise ValueError("unassigned_segment_ids must be unique")
-        assignment_counts = Counter(
-            segment_id
-            for event in self.events
-            for segment_id in event.evidence_segment_ids
-        )
-        repeated_assignments = sorted(
-            segment_id
-            for segment_id, count in assignment_counts.items()
-            if count > 1
-        )
-        if repeated_assignments:
-            raise ValueError(
-                "a segment cannot belong to multiple events, including parent/child "
-                f"events: {repeated_assignments}"
-            )
-        assigned_segment_ids = {
-            segment_id
-            for event in self.events
-            for segment_id in event.evidence_segment_ids
-        }
-        overlap = assigned_segment_ids & set(self.unassigned_segment_ids)
-        if overlap:
-            raise ValueError("a segment cannot be both assigned and unassigned")
-        for event in self.events:
-            if event.parent_event_id is None:
-                continue
-            parent = events_by_id.get(event.parent_event_id)
-            if parent is None:
-                raise ValueError("parent_event_id must reference an event in this map")
-            if event.start_ms < parent.start_ms or event.end_ms > parent.end_ms:
-                raise ValueError("child event must remain inside its parent time range")
-            ancestors = {event.event_id}
-            current = parent
-            while current.parent_event_id is not None:
-                if current.event_id in ancestors:
-                    raise ValueError("event parent relationships must be acyclic")
-                ancestors.add(current.event_id)
-                current = events_by_id.get(current.parent_event_id)
-                if current is None:
-                    raise ValueError("parent_event_id must reference an event in this map")
-            if current.event_id in ancestors:
-                raise ValueError("event parent relationships must be acyclic")
+        _validate_event_graph(self.events, self.unassigned_segment_ids)
         return self

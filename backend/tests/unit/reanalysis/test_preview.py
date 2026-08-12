@@ -165,8 +165,11 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert preview.source_batch_count == 3
     assert preview.audio_file_count == 7
     assert preview.transcript_character_count == 28
-    assert preview.estimated_calls_min == 18
-    assert preview.estimated_calls_max == 42
+    # Each source has one autonomous card request plus one hidden-profile call.
+    assert preview.estimated_calls_min == 6
+    # Autonomous semantic retry and one schema repair per request bound the
+    # remote work without estimating legacy Event Map/director/scene calls.
+    assert preview.estimated_calls_max == 18
     assert preview.whisper_calls == 0
     assert preview.diarization_calls == 0
     assert preview.provider_id == "kimi"
@@ -179,6 +182,35 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     assert set(preview.prompt_summary) == set(PROMPT_SCENES)
     assert preview.blockers == []
     await database.dispose()
+
+
+def test_fixed_rule_hashes_cover_only_active_autonomous_analysis(monkeypatch) -> None:
+    from audio_memory.reanalysis.preview import current_fixed_rule_hashes
+    from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES
+
+    baseline = current_fixed_rule_hashes()
+
+    assert "autonomous_analysis_prompt" in baseline
+    assert "autonomous_profile_prompt" in baseline
+    assert "event-map.md" not in baseline
+    assert "director.md" not in baseline
+    assert "common-scene.md" not in baseline
+    assert len(baseline["analysis_schemas"]) == 64
+    assert len(baseline["analysis_parameters"]) == 64
+
+    original = MODEL_REQUEST_POLICIES["autonomous-final-analysis"]
+    monkeypatch.setitem(
+        MODEL_REQUEST_POLICIES,
+        "autonomous-final-analysis",
+        type(original)(
+            max_tokens=original.max_tokens,
+            timeout_seconds=original.timeout_seconds + 1,
+        ),
+    )
+
+    assert current_fixed_rule_hashes()["analysis_parameters"] != baseline[
+        "analysis_parameters"
+    ]
 
 
 @pytest.mark.asyncio
@@ -361,6 +393,46 @@ async def test_batch_creation_persists_frozen_snapshot_and_newest_first_items(
 
 
 @pytest.mark.asyncio
+async def test_active_batch_replay_requires_valid_token_and_exact_signed_scope(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import ReanalysisService, SnapshotChangedError
+
+    database = Database(tmp_path / "active-replay-scope.sqlite3")
+    await database.create_schema()
+    await seed_completed_history(database)
+    prompts = PromptStore(tmp_path / "active-replay-scope-prompts")
+    prompts.initialize()
+    provider = AvailableProvider()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"r" * 32),
+        ),
+        provider_coordinator=provider,
+    )
+    all_history = await service.preview()
+    selected_history = await service.preview(("batch-2",))
+    created = await service.create_batch(all_history.preview_token)
+
+    replayed = await service.create_batch(all_history.preview_token)
+    assert replayed.id == created.id
+
+    with pytest.raises(SnapshotChangedError):
+        await service.create_batch("not-a-signed-preview-token")
+    with pytest.raises(SnapshotChangedError):
+        await service.create_batch(
+            selected_history.preview_token,
+            ("batch-2",),
+        )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_identical_prompt_content_with_new_version_rejects_old_preview(
     tmp_path: Path,
 ) -> None:
@@ -428,8 +500,11 @@ async def test_creation_fences_mutation_after_snapshot_read_until_commit(
     allow_creation = asyncio.Event()
     original_build = builder.build
 
-    async def paused_build(*, provider_binding=None):
-        result = await original_build(provider_binding=provider_binding)
+    async def paused_build(*, provider_binding=None, source_batch_ids=None):
+        result = await original_build(
+            provider_binding=provider_binding,
+            source_batch_ids=source_batch_ids,
+        )
         if provider_binding is not None:
             snapshot_read.set()
             await allow_creation.wait()

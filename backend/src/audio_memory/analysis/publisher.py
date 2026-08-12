@@ -9,10 +9,14 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from audio_memory.analysis.profile import ProfileDelta
 from audio_memory.analysis.profile_rebuild import ProfileRebuilder
+from audio_memory.analysis.native_search import (
+    normalize_search_results,
+    validate_search_round,
+)
 from audio_memory.analysis.todos import reconcile_todos
 from audio_memory.analysis.versions import require_card_version
 from audio_memory.transcript_safety import pending_risk_review_exists
@@ -35,6 +39,13 @@ from audio_memory.models import (
     TodoTombstone,
 )
 from audio_memory.prompts.schemas import SceneResultBase, StrictTodoDraft
+from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
+from audio_memory.prompts.day_map_schema import (
+    AutonomousDayMap,
+    BatchOverview,
+    ExternalSource,
+    SearchRound,
+)
 from audio_memory.prompts.store import PROMPT_SCENES
 
 
@@ -46,6 +57,13 @@ class AnalysisOutcome:
     batch_id: str
     card_count: int
     todo_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DayMapPublication:
+    overview: BatchOverview
+    search_rounds: tuple[SearchRound, ...]
+    external_sources: tuple[ExternalSource, ...]
 
 
 class VersionPublisher:
@@ -81,18 +99,23 @@ class VersionPublisher:
     async def publish(
         self,
         version_id: str,
-        results: list[SceneResultBase],
+        results: list[SceneResultBase] | AutonomousAnalysisResult,
         profile_candidates: list[ProfileDelta],
         *,
         worker_owner_id: str | None = None,
     ) -> AnalysisOutcome:
-        by_scene = self._validated_scenes(results)
-        visible = [
-            by_scene[scene_id]
-            for scene_id in CARD_ORDER
-            if by_scene[scene_id].should_generate
-        ]
-        drafts = [todo for result in results for todo in result.todos]
+        autonomous = isinstance(results, AutonomousAnalysisResult)
+        if autonomous:
+            visible = list(results.cards)
+            drafts: list[StrictTodoDraft] = []
+        else:
+            by_scene = self._validated_scenes(results)
+            visible = [
+                by_scene[scene_id]
+                for scene_id in CARD_ORDER
+                if by_scene[scene_id].should_generate
+            ]
+            drafts = [todo for result in results for todo in result.todos]
         now = datetime.now(UTC)
         async with self.database.session() as session:
             version = await session.get(AnalysisVersion, version_id)
@@ -117,6 +140,10 @@ class VersionPublisher:
                     .order_by(JobFile.position)
                 )
             )
+            day_map_publication = (
+                self._day_map_publication(version, visible) if autonomous else None
+            )
+            published_card_count = len(visible) + int(day_map_publication is not None)
 
         destinations = self._move_first_publication_audio(
             version, batch_id, files
@@ -156,7 +183,36 @@ class VersionPublisher:
                 await self._finalize_audio_rows(
                     session, job.id, files, destinations
                 )
-                await self._insert_cards(session, version, batch, visible)
+                if autonomous and day_map_publication is not None:
+                    await self._replace_day_map_cards(
+                        session,
+                        version,
+                        batch,
+                        day_map_publication.overview,
+                        visible,
+                    )
+                    version.batch_overview_json = json.dumps(
+                        day_map_publication.overview.model_dump(mode="json"),
+                        ensure_ascii=False,
+                    )
+                    version.search_rounds_json = json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in day_map_publication.search_rounds
+                        ],
+                        ensure_ascii=False,
+                    )
+                    version.external_sources_json = json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in day_map_publication.external_sources
+                        ],
+                        ensure_ascii=False,
+                    )
+                elif autonomous:
+                    await self._insert_autonomous_cards(session, version, batch, visible)
+                else:
+                    await self._insert_cards(session, version, batch, visible)
                 candidates = await self._insert_todo_candidates(
                     session, version, drafts
                 )
@@ -171,7 +227,7 @@ class VersionPublisher:
                 version.status = "completed"
                 version.error_code = None
                 version.completed_at = now.isoformat()
-                version.published_card_count = len(visible)
+                version.published_card_count = published_card_count
                 version.published_todo_count = todo_count
                 version.worker_owner_id = None
                 version.lease_expires_at = None
@@ -184,7 +240,7 @@ class VersionPublisher:
                 job.error_code = None
                 if version.reanalysis_batch_id is not None:
                     await self._complete_history_item(session, version, now)
-        return AnalysisOutcome(batch_id, len(visible), todo_count)
+        return AnalysisOutcome(batch_id, published_card_count, todo_count)
 
     @staticmethod
     def _validated_scenes(
@@ -291,6 +347,190 @@ class VersionPublisher:
                         ),
                     )
                 )
+
+    @staticmethod
+    async def _insert_autonomous_cards(session, version, batch, cards) -> None:
+        for position, card in enumerate(cards):
+            card_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"audio-memory-card:{version.id}:analysis:{position}",
+                )
+            )
+            if await session.get(Card, card_id) is None:
+                session.add(
+                    Card(
+                        id=card_id,
+                        batch_id=batch.id,
+                        analysis_version_id=version.id,
+                        scene_id="analysis",
+                        position=position,
+                        payload_json=json.dumps(
+                            {
+                                "scene_id": "analysis",
+                                "cards": [card.model_dump(mode="json")],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                )
+
+    @staticmethod
+    async def _replace_day_map_cards(
+        session,
+        version: AnalysisVersion,
+        batch: Batch,
+        overview: BatchOverview,
+        cards,
+    ) -> None:
+        # A previous transaction cannot leave these rows behind, but deleting
+        # makes an in-transaction retry/replace deterministic as well.
+        await session.execute(
+            delete(Card).where(Card.analysis_version_id == version.id)
+        )
+        session.add(
+            Card(
+                id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"audio-memory-card:{version.id}:batch-overview:0",
+                    )
+                ),
+                batch_id=batch.id,
+                analysis_version_id=version.id,
+                scene_id="batch_overview",
+                position=0,
+                payload_json=json.dumps(
+                    {
+                        "scene_id": "batch_overview",
+                        "kind": "batch_overview",
+                        "overview": overview.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        for position, card in enumerate(cards, start=1):
+            session.add(
+                Card(
+                    id=str(
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"audio-memory-card:{version.id}:analysis:{position}",
+                        )
+                    ),
+                    batch_id=batch.id,
+                    analysis_version_id=version.id,
+                    scene_id="analysis",
+                    position=position,
+                    payload_json=json.dumps(
+                        {
+                            "scene_id": "analysis",
+                            "cards": [card.model_dump(mode="json")],
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+    @staticmethod
+    def _day_map_publication(
+        version: AnalysisVersion, cards
+    ) -> DayMapPublication | None:
+        try:
+            staged = json.loads(version.staged_results_json)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(staged, dict) or "day_map" not in staged:
+            return None
+
+        day_map = AutonomousDayMap.model_validate(staged["day_map"])
+        search_rounds = tuple(
+            validate_search_round(SearchRound.model_validate(item))
+            for item in staged.get("search_rounds", [])
+        )
+        external_sources = tuple(
+            ExternalSource.model_validate(item)
+            for item in staged.get("external_sources", [])
+        )
+        for search_round in search_rounds:
+            if any(
+                source.provider_id != version.provider_id
+                for source in search_round.sources
+            ):
+                raise ValueError(
+                    "search source provider must match analysis version provider"
+                )
+            expected_sources = normalize_search_results(
+                provider_id=version.provider_id,
+                round_number=search_round.round_number,
+                results=search_round.results,
+            )
+            expected_by_id = VersionPublisher._canonical_sources(expected_sources)
+            actual_by_id = VersionPublisher._canonical_sources(search_round.sources)
+            if {
+                source_id: source.model_dump(mode="json")
+                for source_id, source in expected_by_id.items()
+            } != {
+                source_id: source.model_dump(mode="json")
+                for source_id, source in actual_by_id.items()
+            }:
+                raise ValueError(
+                    "search sources must be deterministically derived from "
+                    "same-round provider results"
+                )
+
+        round_sources_by_id = VersionPublisher._canonical_sources(
+            source
+            for search_round in search_rounds
+            for source in search_round.sources
+        )
+        sources_by_id = VersionPublisher._canonical_sources(external_sources)
+        if {
+            source_id: source.model_dump(mode="json")
+            for source_id, source in round_sources_by_id.items()
+        } != {
+            source_id: source.model_dump(mode="json")
+            for source_id, source in sources_by_id.items()
+        }:
+            raise ValueError(
+                "persisted external sources must match canonical search-round sources"
+            )
+
+        referenced_source_ids = {
+            source_id
+            for card in cards
+            for source_id in card.external_source_ids
+        }
+        unknown = sorted(referenced_source_ids - set(sources_by_id))
+        if unknown:
+            raise ValueError(
+                "published autonomous cards reference unknown external sources: "
+                + json.dumps(unknown, ensure_ascii=False)
+            )
+        return DayMapPublication(
+            overview=day_map.overview,
+            search_rounds=search_rounds,
+            external_sources=tuple(sources_by_id.values()),
+        )
+
+    @staticmethod
+    def _canonical_sources(sources) -> dict[str, ExternalSource]:
+        canonical: dict[str, ExternalSource] = {}
+        for source in sources:
+            previous = canonical.get(source.source_id)
+            if previous is None:
+                canonical[source.source_id] = source
+                continue
+            identity = source.model_dump(exclude={"search_round"})
+            previous_identity = previous.model_dump(exclude={"search_round"})
+            if identity != previous_identity:
+                raise ValueError(
+                    "conflicting persisted external sources share a source_id"
+                )
+            if source.search_round < previous.search_round:
+                canonical[source.source_id] = source
+        return canonical
 
     async def _insert_todo_candidates(
         self,

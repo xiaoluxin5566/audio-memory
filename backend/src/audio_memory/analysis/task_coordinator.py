@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from audio_memory.reanalysis.preview import (
 
 NEW_UPLOAD_PRIORITY = 0
 HISTORY_REANALYSIS_PRIORITY = 10
+logger = logging.getLogger("uvicorn.error")
 _PAUSED_HISTORY_STATES = {
     "stopped",
     "stopping",
@@ -141,6 +143,55 @@ class AnalysisTaskCoordinator:
         if request.priority != HISTORY_REANALYSIS_PRIORITY:
             raise ValueError("History reanalysis must use priority 10")
         return await self._submit(request)
+
+    async def retry_failed_upload_in_place(
+        self,
+        *,
+        source_job_id: str,
+        provider_id: str,
+        model_id: str,
+        credential_generation: int,
+    ) -> str | None:
+        """Requeue a compatible failed upload without discarding staged work."""
+        await self.initialize()
+        async with self._condition:
+            async with self.maintenance_guard():
+                async with self.database.session() as session:
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                    version = await session.scalar(
+                        select(AnalysisVersion)
+                        .where(
+                            AnalysisVersion.source_job_id == source_job_id,
+                            AnalysisVersion.batch_id.is_(None),
+                            AnalysisVersion.status == "failed",
+                        )
+                        .order_by(AnalysisVersion.created_at.desc())
+                        .limit(1)
+                    )
+                    if version is None:
+                        await session.rollback()
+                        return None
+                    if (
+                        version.provider_id != provider_id
+                        or version.model_id != model_id
+                        or version.credential_generation != credential_generation
+                        or version.fixed_rules_hash != PromptComposer.fixed_rules_hash()
+                    ):
+                        await session.rollback()
+                        return None
+                    version.status = "pending"
+                    version.error_code = None
+                    version.worker_owner_id = None
+                    version.lease_expires_at = None
+                    job = await session.get(AnalysisJob, source_job_id)
+                    if job is None:
+                        await session.rollback()
+                        return None
+                    job.stage = "analyzing"
+                    job.error_code = None
+                    await session.commit()
+            self._condition.notify_all()
+        return version.id
 
     @asynccontextmanager
     async def maintenance_guard(self):
@@ -440,6 +491,13 @@ class AnalysisTaskCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                logger.exception(
+                    "Analysis task failed version_id=%s without a typed provider error",
+                    version_id,
+                )
+                # AnalysisRunner normally persists its typed failure first. This
+                # fenced fallback only handles exceptions that leave the version
+                # running, so it cannot overwrite a concrete runner error code.
                 async with self.database.session() as session:
                     await session.execute(
                         update(AnalysisVersion)

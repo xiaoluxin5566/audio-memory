@@ -5,6 +5,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.store import PromptConflictError, PromptDocument, PromptStore
 
 
@@ -15,6 +16,9 @@ class PromptView(BaseModel):
     scene_id: str
     version: int
     content: str
+    label: str | None = None
+    editable: bool = True
+    source: str = "legacy-local-file"
 
     @classmethod
     def from_document(cls, document: PromptDocument) -> PromptView:
@@ -36,8 +40,15 @@ def store_from(request: Request) -> PromptStore:
 
 @router.get("")
 async def list_prompts(request: Request) -> dict[str, list[PromptView]]:
-    documents = await asyncio.to_thread(store_from(request).initialize)
-    return {"prompts": [PromptView.from_document(item) for item in documents]}
+    # Initialize old files for read/write compatibility, but do not advertise them
+    # as part of the active autonomous-analysis runtime.
+    await asyncio.to_thread(store_from(request).initialize)
+    return {
+        "prompts": [
+            PromptView(**item, editable=False, source="versioned-code")
+            for item in PromptComposer.autonomous_prompt_documents()
+        ]
+    }
 
 
 @router.get("/{scene_id}")
@@ -65,4 +76,3 @@ async def save_prompt(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return PromptView.from_document(document)
-

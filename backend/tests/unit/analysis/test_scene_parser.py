@@ -33,14 +33,27 @@ async def test_schema_failure_gets_exactly_one_repair_attempt() -> None:
                 '{"scene_id":"meeting","should_generate":false,"generation_reason":"没有足够证据","cards":[],"todos":[],"confidence":0.0}',
             ]
             self.calls = 0
+            self.options = []
 
         async def generate(self, *args, **kwargs):
             self.calls += 1
+            self.options.append(kwargs)
             return self.responses.pop(0)
 
     client = FakeClient()
     analyzer = RemoteSceneAnalyzer(client)
-    request = ModelRequest("meeting", 1, 1, "rules", "prompt", "data", "{}")
+    request = ModelRequest(
+        "meeting",
+        1,
+        1,
+        "rules",
+        "prompt",
+        "data",
+        "{}",
+        max_tokens=16_384,
+        timeout_seconds=120,
+        segment_count=1,
+    )
 
     result = await analyzer.analyze_scene(
         "meeting",
@@ -50,3 +63,8 @@ async def test_schema_failure_gets_exactly_one_repair_attempt() -> None:
 
     assert result.should_generate is False
     assert client.calls == 2
+    assert [options["max_tokens"] for options in client.options] == [16_384, 16_384]
+    assert [options["repair_attempted"] for options in client.options] == [
+        False,
+        True,
+    ]

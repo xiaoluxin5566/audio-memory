@@ -27,8 +27,14 @@ from audio_memory.prompts.schemas import (
     InspirationSceneResult,
     MeetingCard,
     MeetingDetail,
+    MeetingAdaptiveSection,
+    MeetingArgument,
+    MeetingKeyFact,
     MeetingParticipant,
+    MeetingQuoteAnalysis,
+    MeetingRecommendation,
     MeetingSceneResult,
+    MeetingUncertainty,
     ParentingCard,
     ParentingDetail,
     ParentingInteraction,
@@ -57,25 +63,116 @@ def todo(*, owner_type: str = "user", event_id: str = "event_001") -> StrictTodo
     )
 
 
-def meeting_card(event_id: str) -> MeetingCard:
+def meeting_card(event_id: str, *extra_event_ids: str) -> MeetingCard:
+    event_ids = [event_id, *extra_event_ids]
     return MeetingCard(
-        event_ids=[event_id],
+        event_ids=event_ids,
         card=CardShell(title="一期范围确认", summary="团队确认第一期只支持上传已有音频。"),
         confidence=0.92,
         detail=MeetingDetail(
-            event_id=event_id,
-            topic="一期产品范围",
-            start_ms=0,
-            end_ms=12_000,
-            background="围绕一期实现范围展开评审。",
+            event_ids=event_ids,
+            analysis_angle="一期范围如何在用户价值与交付成本之间取舍",
+            context_summary="团队围绕一期实现范围展开评审。",
             participants=[],
-            core_conclusions=[],
-            decisions=[],
-            open_questions=[],
-            meeting_todos=[],
-            discussion_topics=[],
+            key_facts=[
+                MeetingKeyFact(
+                    event_ids=[event_id],
+                    fact="第一期只支持上传已有音频。",
+                    interpretation="团队主动收缩首版交付范围。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            quote_analyses=[
+                MeetingQuoteAnalysis(
+                    event_ids=[event_id],
+                    speaker="负责人",
+                    quote="第一期先把已有音频跑通。",
+                    context="团队讨论首版范围。",
+                    surface_meaning="首版聚焦已有音频。",
+                    deeper_analysis="负责人优先验证核心分析链路。",
+                    interaction_effect="讨论随后转向交付边界。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            arguments=[
+                MeetingArgument(
+                    event_ids=[event_id],
+                    speaker="负责人",
+                    position="首版应缩小范围。",
+                    reasoning="先验证核心链路，再扩展实时录音。",
+                    supporting_facts=["现有音频链路已具备输入条件"],
+                    assumptions=["首版价值可以通过已有音频验证"],
+                    response_from_others="其他参与者继续讨论实现边界。",
+                    counterpoints=[],
+                    assessment="论点明确，但仍需验证用户是否接受非实时入口。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            recommendations=[
+                MeetingRecommendation(
+                    event_ids=[event_id],
+                    target="产品负责人",
+                    observed_issue="首版范围明确，但验收指标尚未具体化。",
+                    evidence_basis="讨论确认上传已有音频，但没有明确成功口径。",
+                    why_it_matters="缺少指标会使首版价值无法判断。",
+                    recommendation="补充首版结果质量和完成时间的验收指标。",
+                    actions=["确定三条核心质量指标", "用真实长音频做基准"],
+                    suggested_language="我们先约定首版成功的三个判断标准。",
+                    expected_result="团队可以基于相同口径判断是否进入下一阶段。",
+                    caveat="指标应避免为了量化而牺牲真实用户价值。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            sections=[
+                MeetingAdaptiveSection(
+                    event_ids=event_ids,
+                    section_type="tradeoff",
+                    title="范围收缩背后的取舍",
+                    narrative="团队选择先验证核心链路，而不是同时承担实时采集复杂度。",
+                    key_points=["先验证分析价值", "延后实时采集"],
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
+            uncertainties=[
+                MeetingUncertainty(
+                    event_ids=[event_id],
+                    question="用户是否接受首版只能上传已有音频？",
+                    why_uncertain="对话没有提供用户验证结果。",
+                    evidence_segment_ids=["seg_001"],
+                )
+            ],
         ),
     )
+
+
+def test_meeting_detail_allows_model_selected_analysis_fields() -> None:
+    detail = MeetingDetail(
+        event_ids=["event_001"],
+        analysis_angle="候选人的案例回答是否形成完整证据链",
+        context_summary="面试官围绕项目经历连续追问。",
+        quote_analyses=[
+            MeetingQuoteAnalysis(
+                event_ids=["event_001"],
+                evidence_segment_ids=["seg_001"],
+                speaker="候选人",
+                quote="我先访谈了十位用户。",
+                deeper_analysis="回答提供了行动和样本规模，但尚未解释筛选方式。",
+            )
+        ],
+    )
+
+    assert detail.participants == []
+    assert detail.arguments == []
+    assert detail.quote_analyses[0].context is None
+
+
+def test_meeting_detail_rejects_summary_without_any_evidenced_analysis() -> None:
+    with pytest.raises(ValidationError, match="at least one evidenced analysis"):
+        MeetingDetail(
+            event_ids=["event_001"],
+            analysis_angle="泛化摘要",
+            context_summary="只有摘要。",
+        )
 
 
 def test_todo_scene_never_emits_cards_and_only_publishes_user_owned_todos() -> None:
@@ -125,7 +222,7 @@ def test_not_generated_scene_must_not_leak_cards_or_todos() -> None:
         )
 
 
-def test_meeting_allows_multiple_independent_cards_but_one_event_per_card() -> None:
+def test_meeting_cards_follow_analysis_themes_and_may_span_events() -> None:
     result = MeetingSceneResult(
         scene_id="meeting",
         should_generate=True,
@@ -135,23 +232,24 @@ def test_meeting_allows_multiple_independent_cards_but_one_event_per_card() -> N
         confidence=0.9,
     )
 
-    assert [card.detail.event_id for card in result.cards] == ["event_001", "event_002"]
-    invalid = meeting_card("event_001").model_dump(mode="json")
-    invalid["event_ids"] = ["event_001", "event_002"]
+    merged = meeting_card("event_001", "event_002")
+    assert merged.detail.event_ids == ["event_001", "event_002"]
+    invalid = merged.model_dump(mode="json")
+    invalid["detail"]["event_ids"] = ["event_001"]
     with pytest.raises(ValidationError):
         MeetingCard.model_validate(invalid)
 
 
-def test_meeting_rejects_duplicate_event_cards_and_extra_fields() -> None:
-    with pytest.raises(ValidationError):
-        MeetingSceneResult(
-            scene_id="meeting",
-            should_generate=True,
-            generation_reason="event_001 被模型重复输出。",
-            cards=[meeting_card("event_001"), meeting_card("event_001")],
-            todos=[],
-            confidence=0.9,
-        )
+def test_meeting_allows_distinct_themes_to_share_an_event_but_rejects_extra_fields() -> None:
+    result = MeetingSceneResult(
+        scene_id="meeting",
+        should_generate=True,
+        generation_reason="同一场对话包含两个独立分析主题。",
+        cards=[meeting_card("event_001"), meeting_card("event_001")],
+        todos=[],
+        confidence=0.9,
+    )
+    assert len(result.cards) == 2
     payload = meeting_card("event_001").model_dump(mode="json")
     payload["detail"]["invented"] = "not allowed"
     with pytest.raises(ValidationError):
@@ -803,19 +901,13 @@ def frontend_meeting_result() -> MeetingSceneResult:
         update={
             "participants": [
                 MeetingParticipant(
+                    event_ids=["event_001"],
                     speaker_id="speaker_A",
                     display_name="用户",
                     role="汇报人",
                     evidence_segment_ids=["seg_001"],
                 )
             ],
-            "core_conclusions": [
-                EvidenceStatement(
-                    content="第一期只支持上传已有音频。",
-                    evidence_segment_ids=["seg_001"],
-                )
-            ],
-            "meeting_todos": [todo()],
         }
     )
     return MeetingSceneResult(
@@ -1030,7 +1122,12 @@ def test_frontend_dump_keeps_nested_visible_collections() -> None:
     content_payload = frontend_content_result().model_dump_for_frontend()
     growth_payload = frontend_growth_result().model_dump_for_frontend()
 
-    assert "发送Q3预算表" in str(meeting_payload["cards"][0]["detail"]["meeting_todos"])
+    assert "第一期先把已有音频跑通" in str(
+        meeting_payload["cards"][0]["detail"]["quote_analyses"]
+    )
+    assert "补充首版结果质量" in str(
+        meeting_payload["cards"][0]["detail"]["recommendations"]
+    )
     assert "端侧 AI 产品体验 播客" in str(
         content_payload["cards"][0]["detail"]["recommendations"]
     )
@@ -1043,7 +1140,7 @@ def test_frontend_dump_keeps_nested_visible_collections() -> None:
     ("scene_id", "result_factory", "visible_value"),
     [
         ("todo", frontend_todo_result, "发送Q3预算表"),
-        ("meeting", frontend_meeting_result, "一期产品范围"),
+        ("meeting", frontend_meeting_result, "一期范围如何在用户价值与交付成本之间取舍"),
         ("parenting", frontend_parenting_result, "连续催促后孩子的抗拒加重"),
         ("content", frontend_content_result, "一段关于端侧 AI 产品体验的视频"),
         ("growth", frontend_growth_result, "用户直接展开方案细节"),
@@ -1140,9 +1237,9 @@ def test_generated_scene_requires_its_publishable_payload(
         )
 
 
-def test_meeting_card_event_id_matches_its_detail() -> None:
+def test_meeting_card_event_ids_match_its_detail() -> None:
     payload = meeting_card("event_001").model_dump(mode="json")
-    payload["detail"]["event_id"] = "event_002"
+    payload["detail"]["event_ids"] = ["event_002"]
 
     with pytest.raises(ValidationError):
         MeetingCard.model_validate(payload)
@@ -1151,7 +1248,6 @@ def test_meeting_card_event_id_matches_its_detail() -> None:
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
-        (MeetingDetail, meeting_card("event_001").detail.model_dump(mode="json")),
         (
             ParentingInteraction,
             parenting_interaction("event_003").model_dump(mode="json"),

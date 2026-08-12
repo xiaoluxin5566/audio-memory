@@ -42,6 +42,19 @@ class RetryTaskCoordinator:
         self.analysis_request = analysis_request
         self.called.set()
 
+    async def retry_failed_upload_in_place(
+        self, *, source_job_id, provider_id, model_id, credential_generation
+    ):
+        self.analysis_request = SimpleNamespace(
+            source_job_id=source_job_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            credential_generation=credential_generation,
+            priority=0,
+        )
+        self.called.set()
+        return SimpleNamespace(id="resumed-version")
+
 
 def make_audio(path: Path, codec: str) -> bytes:
     subprocess.run(
@@ -187,7 +200,25 @@ async def test_abandoned_upload_is_cleaned_on_next_start(job_client, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error_code",
-    ["model_analysis_failed", "credential_changed", "fixed_rules_changed"],
+    [
+        "model_analysis_failed",
+        "credential_changed",
+        "fixed_rules_changed",
+        "network_timeout",
+        "authentication_failed",
+        "insufficient_balance",
+        "rate_limited",
+        "provider_unavailable",
+        "content_rejected",
+        "model_response_invalid",
+        "model_output_truncated",
+        "event_map_schema_invalid",
+        "event_map_unknown_segment",
+        "event_map_coverage_invalid",
+        "analysis_quality_insufficient",
+        "autonomous_day_map_invalid",
+        "autonomous_search_decision_invalid",
+    ],
 )
 async def test_failed_model_analysis_retries_with_active_provider_without_whisper(
     job_client, error_code

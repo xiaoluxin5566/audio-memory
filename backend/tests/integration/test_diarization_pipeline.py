@@ -213,7 +213,16 @@ async def test_missing_recording_time_stays_unknown_instead_of_using_upload_time
 
 
 def test_default_whisper_worker_uses_segment_timestamps(monkeypatch) -> None:
-    def transcribe(_path, *, path_or_hf_repo, word_timestamps=False):
+    def transcribe(
+        _path,
+        *,
+        path_or_hf_repo,
+        word_timestamps=False,
+        condition_on_previous_text=False,
+        temperature=0,
+    ):
+        assert condition_on_previous_text is False
+        assert temperature == 0
         segment = {"start": 0.0, "end": 1.0, "text": "你好"}
         if word_timestamps:
             segment["words"] = [{"word": "你好", "start": 0.0, "end": 1.0}]
@@ -412,10 +421,14 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
 ) -> None:
     transcribed_paths: list[str] = []
 
-    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+    def transcribe(path, **kwargs):
+        word_timestamps = kwargs["word_timestamps"]
         assert word_timestamps is False
         transcribed_paths.append(path)
-        return {"segments": [{"start": 0.0, "end": 0.5, "text": "语音"}]}
+        return {"segments": [
+            {"start": 0.0, "end": 0.5, "text": "语音一"},
+            {"start": 3.0, "end": 3.5, "text": "语音二"},
+        ]}
 
     class SparseVad:
         last_energy_intervals = [
@@ -470,30 +483,30 @@ async def test_five_hour_sparse_audio_only_transcribes_padded_speech(
     engine._executor = ThreadPoolExecutor(max_workers=1)
     extracted: list[SpeechInterval] = []
 
-    async def extract_speech(_source, target_dir, intervals):
-        target_dir.mkdir()
-        extracted.extend(intervals)
-        clips = []
-        for index, _interval in enumerate(intervals):
-            clip = target_dir / f"speech-{index:05d}.wav"
-            clip.write_bytes(b"pcm")
-            clips.append(clip)
-        return clips
+    def prepare(_source, batch, target):
+        extracted.extend(
+            SpeechInterval(entry.source_start_ms, entry.source_end_ms)
+            for entry in batch.entries
+            if entry.kind == "source"
+        )
+        target.write_bytes(b"pcm")
+        return target
 
-    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+    monkeypatch.setattr("audio_memory.transcription.engine.prepare_compact_wav", prepare)
 
     segments = [item async for item in engine.transcribe_file(file, 0)]
 
-    assert [item.text for item in segments] == ["语音", "语音"]
-    assert [item.speaker_id for item in segments] == ["speaker_00", "speaker_01"]
+    assert [item.text for item in segments] == ["语音一", "语音二"]
+    assert [item.speaker_id for item in segments] == ["unknown", "unknown"]
     assert extracted == [
         SpeechInterval(59_750, 62_250),
         SpeechInterval(17_998_750, 18_000_000),
     ]
     assert sum(item.end_ms - item.start_ms for item in extracted) == 3_750
-    assert [Path(item) for item in transcribed_paths] == diarized_paths
+    assert len(transcribed_paths) == 1
+    assert diarized_paths == []
     mapping = json.loads(file.speech_mapping_json)
-    assert mapping[-1]["compact_end_ms"] == 3_750
+    assert mapping[-1]["compact_end_ms"] == 4_250
     async with database.session() as session:
         stored = await session.get(JobFile, "file-1")
     assert stored is not None
@@ -613,9 +626,10 @@ async def test_file_classification_commit_rolls_back_as_one_recoverable_snapshot
                 select(Transcript).order_by(Transcript.segment_index)
             )
         )
-    assert refiner.calls == ["file-1:2"]
-    assert recovered[2].risk_state == "POST_EDIT_PASSED"
-    assert recovered[2].text == "recovered accurate transcript"
+    assert refiner.calls == []
+    assert recovered[2].risk_state is None
+    assert recovered[2].text == "three identical fast transcripts"
+    assert recovered[2].reliability_weight == 0.6
     await database.dispose()
 
 
@@ -717,9 +731,12 @@ async def test_service_hard_rejects_file_overflow_corruption_and_time_conflicts(
         "conflict-0": "timestamp_conflict",
         "conflict-1": "timestamp_conflict",
     }
-    assert metrics.rejected == 6
-    assert all(item.risk_state == "REJECTED" for item in stored)
-    assert all(item.text == "" for item in stored)
+    assert metrics.rejected == 4
+    hard = [item for item in stored if not item.id.startswith("conflict-")]
+    conflicts = [item for item in stored if item.id.startswith("conflict-")]
+    assert all(item.risk_state == "REJECTED" and item.text == "" for item in hard)
+    assert all(item.risk_state is None and item.text for item in conflicts)
+    assert all(item.reliability_weight == 0.6 for item in conflicts)
     await database.dispose()
 
 
@@ -788,12 +805,12 @@ async def test_risk_gate_uses_raw_vad_for_rate_not_the_padded_processing_mapping
     refiner = RecordingRefiner()
     await TranscriptionRiskGateService(database).apply("job-1", refiner)
 
-    assert refiner.calls == ["file-1:1"]
+    assert refiner.calls == []
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_refinement_recheck_counts_replacement_and_excludes_target_old_text(
+async def test_soft_repetition_retains_original_text_without_refinement(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "risk-gate-replacement-context.sqlite3")
@@ -854,10 +871,11 @@ async def test_refinement_recheck_counts_replacement_and_excludes_target_old_tex
         target = await session.get(Transcript, "transcript-2")
     assert target is not None
     assert (target.risk_state, target.is_reliable, target.text) == (
-        "POST_EDIT_FAILED",
-        False,
-        "",
+        None,
+        True,
+        old_repeated,
     )
+    assert target.reliability_weight == 0.6
     await database.dispose()
 
 
@@ -929,7 +947,7 @@ async def test_classification_time_exhausts_total_budget_before_any_refinement(
         target = await session.get(Transcript, "transcript-2")
     assert refiner.calls == []
     assert metrics.queued == 0
-    assert metrics.overflowed == 1
+    assert metrics.overflowed == 0
     assert target is not None
     assert (target.risk_state, target.is_reliable, target.reliability_weight) == (
         None,
@@ -940,21 +958,21 @@ async def test_classification_time_exhausts_total_budget_before_any_refinement(
 
 
 @pytest.mark.asyncio
-async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
+async def test_forced_overlap_uses_midpoint_ownership_without_diarization(
     tmp_path: Path, monkeypatch
 ) -> None:
-    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+    def transcribe(path, **_kwargs):
         index = int(Path(path).stem.split("-")[-1])
         if index == 0:
             return {
                 "segments": [
                     {"start": 10.0, "end": 11.0, "text": "首段"},
-                    {"start": 1784.5, "end": 1786.5, "text": "重叠句子"},
+                    {"start": 1199.0, "end": 1200.0, "text": "重叠句子"},
                 ]
             }
         return {
             "segments": [
-                {"start": 14.0, "end": 15.0, "text": "重叠语句"},
+                {"start": 0.5, "end": 1.5, "text": "重叠句子"},
                 {"start": 35.0, "end": 36.0, "text": "尾段"},
             ]
         }
@@ -1002,28 +1020,27 @@ async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
     engine._executor = ThreadPoolExecutor(max_workers=1)
     extracted: list[SpeechInterval] = []
 
-    async def extract_speech(_source, target_dir, intervals):
-        target_dir.mkdir()
-        extracted.extend(intervals)
-        clips = []
-        for index, _interval in enumerate(intervals):
-            clip = target_dir / f"speech-{index:05d}.wav"
-            clip.write_bytes(b"pcm")
-            clips.append(clip)
-        return clips
+    def prepare(_source, batch, target):
+        extracted.extend(
+            SpeechInterval(entry.source_start_ms, entry.source_end_ms)
+            for entry in batch.entries
+            if entry.kind == "source"
+        )
+        target.write_bytes(b"pcm")
+        return target
 
-    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+    monkeypatch.setattr("audio_memory.transcription.engine.prepare_compact_wav", prepare)
 
     segments = [item async for item in engine.transcribe_file(file, 0)]
 
     assert extracted == [
-        SpeechInterval(0, 1_800_000),
-        SpeechInterval(1_770_000, 1_810_000),
+        SpeechInterval(0, 1_200_000),
+        SpeechInterval(1_198_500, 1_810_000),
     ]
     assert [item.text for item in segments] == ["首段", "重叠句子", "尾段"]
     overlap = next(item for item in segments if item.text == "重叠句子")
-    assert overlap.speaker_id == "speaker_00"
-    assert json.loads(file.speech_mapping_json)[-1]["compact_end_ms"] == 1_810_000
+    assert overlap.speaker_id == "unknown"
+    assert json.loads(file.speech_mapping_json)[-1]["compact_end_ms"] == 611_500
     await engine.close()
     await database.dispose()
 
@@ -1032,18 +1049,16 @@ async def test_overlapping_windows_coordinate_speakers_and_deduplicate_whisper(
 async def test_checkpoint_resume_after_partial_second_speech_interval(
     tmp_path: Path, monkeypatch
 ) -> None:
-    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
-        index = int(Path(path).stem.split("-")[-1])
+    def transcribe(path, **_kwargs):
         return {
             "segments": [
                 {"start": start, "end": end, "text": text}
-                for start, end, text in (
-                    [(0.1, 0.2, "A")]
-                    if index == 0
-                    else [(0.1, 0.2, "B1"), (0.3, 0.4, "B2")]
-                    if index == 1
-                    else [(0.1, 0.2, "C")]
-                )
+                for start, end, text in [
+                    (0.1, 0.2, "A"),
+                    (1.6, 1.7, "B1"),
+                    (1.8, 1.9, "B2"),
+                    (4.1, 4.2, "C"),
+                ]
             ]
         }
 
@@ -1094,16 +1109,11 @@ async def test_checkpoint_resume_after_partial_second_speech_interval(
     )
     engine._executor = ThreadPoolExecutor(max_workers=1)
 
-    async def extract_speech(_source, target_dir, intervals):
-        target_dir.mkdir()
-        clips = []
-        for index, _interval in enumerate(intervals):
-            clip = target_dir / f"speech-{index:05d}.wav"
-            clip.write_bytes(b"pcm")
-            clips.append(clip)
-        return clips
+    def prepare(_source, _batch, target):
+        target.write_bytes(b"pcm")
+        return target
 
-    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+    monkeypatch.setattr("audio_memory.transcription.engine.prepare_compact_wav", prepare)
 
     class InterruptDuringSecondInterval:
         async def transcribe_file(self, file, resume_from):
@@ -1121,7 +1131,6 @@ async def test_checkpoint_resume_after_partial_second_speech_interval(
     service = TranscriptionService(
         database,
         risk_gate=TranscriptionRiskGateService(database),
-        refiner=SelectiveRefiner(database),
     )
     with pytest.raises(RuntimeError, match="simulated interruption"):
         await service.run_job("job-1", InterruptDuringSecondInterval())
@@ -1136,9 +1145,9 @@ async def test_checkpoint_resume_after_partial_second_speech_interval(
         )
     assert [item.segment_uid for item in rows] == [
         "file-1:0",
-        "file-1:10000",
-        "file-1:10001",
-        "file-1:20000",
+        "file-1:1",
+        "file-1:2",
+        "file-1:3",
     ]
     assert len({item.segment_uid for item in rows}) == 4
     assert [
@@ -1150,34 +1159,34 @@ async def test_checkpoint_resume_after_partial_second_speech_interval(
         (30_100, 30_200, "C"),
     ]
     assert [item.speaker_id for item in rows] == [
-        "speaker_00",
-        "speaker_01",
-        "speaker_01",
-        "speaker_02",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
     ]
     await engine.close()
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
+async def test_checkpoint_resume_preserves_owned_forced_overlap_segments(
     tmp_path: Path, monkeypatch
 ) -> None:
-    def transcribe(path, *, path_or_hf_repo, word_timestamps=False):
+    def transcribe(path, **_kwargs):
         index = int(Path(path).stem.split("-")[-1])
         if index == 0:
             return {
                 "segments": [
                     {
-                        "start": 1784.8,
-                        "end": 1786.8,
+                        "start": 1198.8,
+                        "end": 1199.2,
                         "text": "前窗后句记录完成",
                     }
                 ]
             }
         return {
             "segments": [
-                {"start": 14.0, "end": 15.0, "text": "后窗前句转入讨论"}
+                {"start": 0.8, "end": 1.2, "text": "后窗前句转入讨论"}
             ]
         }
 
@@ -1224,16 +1233,11 @@ async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
     )
     engine._executor = ThreadPoolExecutor(max_workers=1)
 
-    async def extract_speech(_source, target_dir, intervals):
-        target_dir.mkdir()
-        clips = []
-        for index, _interval in enumerate(intervals):
-            clip = target_dir / f"speech-{index:05d}.wav"
-            clip.write_bytes(b"pcm")
-            clips.append(clip)
-        return clips
+    def prepare(_source, _batch, target):
+        target.write_bytes(b"pcm")
+        return target
 
-    monkeypatch.setattr(engine, "_extract_speech_intervals", extract_speech)
+    monkeypatch.setattr("audio_memory.transcription.engine.prepare_compact_wav", prepare)
 
     class InterruptBetweenBoundarySegments:
         async def transcribe_file(self, file, resume_from):
@@ -1251,7 +1255,6 @@ async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
     service = TranscriptionService(
         database,
         risk_gate=TranscriptionRiskGateService(database),
-        refiner=SelectiveRefiner(database),
     )
     with pytest.raises(RuntimeError, match="simulated boundary interruption"):
         await service.run_job("job-1", InterruptBetweenBoundarySegments())
@@ -1267,15 +1270,11 @@ async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
     assert [item.segment_uid for item in rows] == ["file-1:0", "file-1:10000"]
     assert len({item.segment_uid for item in rows}) == 2
     assert [(item.start_ms, item.end_ms) for item in rows] == [
-        (1_784_800, 1_786_800),
-        (1_784_000, 1_785_000),
+        (1_198_800, 1_199_200),
+        (1_199_300, 1_199_700),
     ]
-    assert all(
-        item.risk_state == "REJECTED"
-        and item.risk_reason == "timestamp_conflict"
-        and item.text == ""
-        for item in rows
-    )
+    assert all(item.risk_state is None and item.text for item in rows)
+    assert all(item.speaker_id == "unknown" for item in rows)
 
     await engine.close()
     await database.dispose()
@@ -1285,7 +1284,7 @@ async def test_checkpoint_resume_preserves_reverse_order_boundary_segments(
 async def test_whisper_pipeline_continues_when_vad_fails(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
-    def transcribe(_path, *, path_or_hf_repo, word_timestamps=False):
+    def transcribe(_path, **_kwargs):
         return {
             "segments": [
                 {
@@ -1333,18 +1332,16 @@ async def test_whisper_pipeline_continues_when_vad_fails(
     )
     engine._executor = ThreadPoolExecutor(max_workers=1)
 
-    async def make_one_chunk(_source: Path, target_dir: Path) -> list[Path]:
-        target_dir.mkdir()
-        chunk = target_dir / "chunk-00000.wav"
-        chunk.write_bytes(b"local pcm")
-        return [chunk]
+    def make_one_chunk(_source, _batch, target):
+        target.write_bytes(b"local pcm")
+        return target
 
-    monkeypatch.setattr(engine, "_normalize_to_chunks", make_one_chunk)
+    monkeypatch.setattr("audio_memory.transcription.engine.prepare_compact_wav", make_one_chunk)
 
     segments = [item async for item in engine.transcribe_file(file, 0)]
 
     assert [(item.text, item.speaker_id) for item in segments] == [
-        ("这段文字不能丢", None)
+        ("这段文字不能丢", "unknown")
     ]
     assert file.vad_available is False
     assert file.vad_speech_json == "[]"
@@ -1354,7 +1351,7 @@ async def test_whisper_pipeline_continues_when_vad_fails(
 
 
 @pytest.mark.asyncio
-async def test_risk_gate_refines_one_repeated_segment_replaces_text_and_never_requeues(
+async def test_risk_gate_retains_repeated_segment_and_never_refines_or_requeues(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "risk-gate.sqlite3")
@@ -1424,19 +1421,20 @@ async def test_risk_gate_refines_one_repeated_segment_replaces_text_and_never_re
                 select(Transcript).order_by(Transcript.segment_index)
             )
         )
-    assert refiner.calls == ["file-1:2"]
-    assert metrics.queued == 1
+    assert refiner.calls == []
+    assert metrics.queued == 0
     assert (rows[1].is_reliable, rows[1].reliability_weight) == (True, 0.6)
     assert (rows[2].risk_state, rows[2].is_reliable, rows[2].text) == (
-        "POST_EDIT_PASSED",
+        None,
         True,
-        "精转写后的不同文本",
+        "重复的转写文本",
     )
+    assert rows[2].reliability_weight == 0.6
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_risk_gate_isolates_repeated_refinement_and_downgrades_queue_overflow(
+async def test_risk_gate_retains_all_repetitions_without_queue_or_refinement(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "risk-gate-overflow.sqlite3")
@@ -1527,17 +1525,16 @@ async def test_risk_gate_isolates_repeated_refinement_and_downgrades_queue_overf
                 select(Transcript).order_by(Transcript.segment_index)
             )
         )
-    assert len(refiner.calls) == 10
-    assert metrics.overflowed == 1
-    assert all(item.risk_state == "POST_EDIT_FAILED" for item in rows[2:12])
-    assert all(item.is_reliable is False and item.text == "" for item in rows[2:12])
+    assert refiner.calls == []
+    assert metrics.overflowed == 0
+    assert all(item.risk_state is None for item in rows[2:])
+    assert all(item.is_reliable is True and item.text for item in rows[2:])
     assert (rows[12].risk_state, rows[12].is_reliable, rows[12].reliability_weight) == (
         None,
         True,
         0.6,
     )
     assert all(item.risk_classified is True for item in rows)
-    assert refiner.calls == [f"file-1:{index}" for index in range(2, 12)]
     async with database.session() as session:
         resumed = await session.get(AnalysisJob, "job-1")
     assert resumed is not None
@@ -1603,7 +1600,7 @@ async def test_transcription_without_risk_gate_never_enters_analysis(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_refinement_recheck_excludes_hard_rejected_text(tmp_path: Path) -> None:
+async def test_hard_rejected_context_does_not_trigger_secondary_whisper(tmp_path: Path) -> None:
     database = Database(tmp_path / "rejected-refinement-context.sqlite3")
     await database.create_schema()
     async with database.session() as session:
@@ -1674,15 +1671,16 @@ async def test_refinement_recheck_excludes_hard_rejected_text(tmp_path: Path) ->
         refined = await session.get(Transcript, "normal-2")
     assert refined is not None
     assert (refined.risk_state, refined.is_reliable, refined.text) == (
-        "POST_EDIT_PASSED",
+        None,
         True,
-        "discarded result text",
+        "repeat candidate text",
     )
+    assert refined.reliability_weight == 0.6
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_refinement_result_cannot_shift_to_the_next_queued_segment(
+async def test_repeated_candidates_are_retained_without_a_refinement_queue(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "refinement-result-position.sqlite3")
@@ -1746,16 +1744,14 @@ async def test_refinement_result_cannot_shift_to_the_next_queued_segment(
         first = await session.get(Transcript, "transcript-2")
         second = await session.get(Transcript, "transcript-3")
     assert first is not None and second is not None
-    assert (first.risk_state, first.text) == ("POST_EDIT_FAILED", "")
-    assert (second.risk_state, second.text) == (
-        "POST_EDIT_PASSED",
-        "second queued result",
-    )
+    assert (first.risk_state, first.text) == (None, "same candidate text")
+    assert (second.risk_state, second.text) == (None, "same candidate text")
+    assert first.reliability_weight == second.reliability_weight == 0.6
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_refinement_recheck_rejects_phrase_repetition_after_512_characters(
+async def test_long_suffix_repetition_stays_soft_without_secondary_whisper(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "post-edit-suffix-repeat.sqlite3")
@@ -1817,15 +1813,16 @@ async def test_refinement_recheck_rejects_phrase_repetition_after_512_characters
 
     assert target is not None
     assert (target.risk_state, target.is_reliable, target.text) == (
-        "POST_EDIT_FAILED",
-        False,
-        "",
+        None,
+        True,
+        "old repeated candidate",
     )
+    assert target.reliability_weight == 0.6
     await database.dispose()
 
 
 @pytest.mark.asyncio
-async def test_refinement_recheck_keeps_the_entire_crowded_thirty_second_window(
+async def test_crowded_window_soft_risk_retains_original_text(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "post-edit-crowded-window.sqlite3")
@@ -1892,10 +1889,11 @@ async def test_refinement_recheck_keeps_the_entire_crowded_thirty_second_window(
 
     assert target is not None
     assert (target.risk_state, target.is_reliable, target.text) == (
-        "POST_EDIT_FAILED",
-        False,
-        "",
+        None,
+        True,
+        "old repeated candidate",
     )
+    assert target.reliability_weight == 0.6
     await database.dispose()
 
 
@@ -1973,11 +1971,12 @@ async def test_refinement_recheck_uses_oversized_rejections_as_repeat_evidence(
         "comparison_text_too_long",
         "comparison_text_too_long",
     ]
-    assert all(row.risk_state == "REJECTED" and row.text == "" for row in rows[:2])
+    assert all(row.risk_state is None and row.text for row in rows[:2])
+    assert all(row.reliability_weight == 0.6 for row in rows[:2])
     assert (rows[4].risk_state, rows[4].is_reliable, rows[4].text) == (
-        "POST_EDIT_FAILED",
-        False,
-        "",
+        None,
+        True,
+        "old repeated candidate",
     )
     await database.dispose()
 
@@ -2059,13 +2058,13 @@ async def test_refinement_recheck_uses_budget_rejection_after_old_candidates_exp
 
     assert rejected is not None and target is not None
     assert (rejected.risk_state, rejected.risk_reason, rejected.text) == (
-        "REJECTED",
+        None,
         "similarity_comparison_budget_exhausted",
-        "",
+        "ababcdefghij",
     )
     assert (target.risk_state, target.is_reliable, target.text) == (
-        "POST_EDIT_FAILED",
-        False,
-        "",
+        None,
+        True,
+        "old repeated candidate",
     )
     await database.dispose()

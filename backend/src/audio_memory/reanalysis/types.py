@@ -84,6 +84,7 @@ class ReanalysisSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ReanalysisPreview:
+    source_batch_ids: tuple[str, ...]
     source_batch_count: int
     audio_file_count: int
     transcript_character_count: int

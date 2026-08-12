@@ -203,7 +203,7 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["run", "resume"])
-async def test_transcription_passes_bulk_wall_clock_to_risk_gate_and_bounds_refinement(
+async def test_transcription_passes_bulk_wall_clock_and_never_runs_refinement(
     tmp_path: Path, entrypoint: str
 ) -> None:
     """The production and recovery paths must enforce the 20% refinement budget."""
@@ -296,7 +296,7 @@ async def test_transcription_passes_bulk_wall_clock_to_risk_gate_and_bounds_refi
 
     refiner = SlowRefiner()
     risk_gate = RecordingRiskGate(database)
-    service = TranscriptionService(database, risk_gate=risk_gate, refiner=refiner)
+    service = TranscriptionService(database, risk_gate=risk_gate)
     if entrypoint == "run":
         await service.run_job(job_id, DelayedRepeatedEngine())
     else:
@@ -304,16 +304,15 @@ async def test_transcription_passes_bulk_wall_clock_to_risk_gate_and_bounds_refi
 
     assert risk_gate.bulk_elapsed_seconds is not None
     assert risk_gate.bulk_elapsed_seconds > 0
-    assert refiner.calls == [f"{file_id}:2"]
+    assert refiner.calls == []
     async with database.session() as session:
         transcripts = list(
             await session.scalars(
                 select(Transcript).order_by(Transcript.segment_index)
             )
         )
-    assert transcripts[2].risk_state == "POST_EDIT_PASSED"
-    assert all(item.risk_state is None for item in transcripts[3:])
-    assert all(item.reliability_weight == 0.6 for item in transcripts[3:])
+    assert all(item.risk_state is None for item in transcripts)
+    assert all(item.reliability_weight == 0.6 for item in transcripts[2:])
     await database.dispose()
 
 

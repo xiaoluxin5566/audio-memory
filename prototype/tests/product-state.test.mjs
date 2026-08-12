@@ -4,11 +4,9 @@ import assert from 'node:assert/strict'
 import { createInitialState, formatJobEta, getFeedbackFormState, orderCards } from '../src/store.js'
 
 
-test('initial state has six fixed prompt scenes and no persisted content', () => {
+test('initial state waits for the runtime autonomous prompt list', () => {
   const state = createInitialState()
-  assert.deepEqual(Object.keys(state.prompts), [
-    'todo', 'meeting', 'parenting', 'content', 'growth', 'inspiration',
-  ])
+  assert.deepEqual(Object.keys(state.prompts), [])
   assert.deepEqual(state.feed, [])
   assert.deepEqual(state.history, [])
 })

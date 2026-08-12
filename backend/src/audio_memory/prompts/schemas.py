@@ -62,11 +62,72 @@ class SceneResultBase(StrictModel):
         return self
 
 
-class MeetingParticipant(StrictModel):
+class MeetingEvidenceItem(StrictModel):
+    event_ids: list[str] = Field(min_length=1)
+    evidence_segment_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_references(self) -> MeetingEvidenceItem:
+        if len(self.event_ids) != len(set(self.event_ids)):
+            raise ValueError("meeting event_ids must be unique")
+        if len(self.evidence_segment_ids) != len(set(self.evidence_segment_ids)):
+            raise ValueError("meeting evidence_segment_ids must be unique")
+        return self
+
+
+class MeetingParticipant(MeetingEvidenceItem):
     speaker_id: str = Field(min_length=1)
     display_name: str | None
     role: str | None
-    evidence_segment_ids: list[str] = Field(min_length=1)
+
+
+class MeetingKeyFact(MeetingEvidenceItem):
+    fact: str = Field(min_length=1, max_length=1_200)
+    interpretation: str | None = Field(default=None, max_length=1_200)
+
+
+class MeetingQuoteAnalysis(MeetingEvidenceItem):
+    speaker: str = Field(min_length=1, max_length=160)
+    quote: str = Field(min_length=1, max_length=500)
+    context: str | None = Field(default=None, min_length=1, max_length=1_200)
+    surface_meaning: str | None = Field(default=None, min_length=1, max_length=1_200)
+    deeper_analysis: str = Field(min_length=1, max_length=2_000)
+    interaction_effect: str | None = Field(default=None, max_length=1_200)
+
+
+class MeetingArgument(MeetingEvidenceItem):
+    speaker: str = Field(min_length=1, max_length=160)
+    position: str = Field(min_length=1, max_length=1_200)
+    reasoning: str = Field(min_length=1, max_length=2_000)
+    supporting_facts: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    response_from_others: str | None = Field(default=None, max_length=1_200)
+    counterpoints: list[str] = Field(default_factory=list)
+    assessment: str | None = Field(default=None, min_length=1, max_length=2_000)
+
+
+class MeetingRecommendation(MeetingEvidenceItem):
+    target: str = Field(min_length=1, max_length=300)
+    observed_issue: str = Field(min_length=1, max_length=1_200)
+    evidence_basis: str = Field(min_length=1, max_length=1_200)
+    why_it_matters: str | None = Field(default=None, min_length=1, max_length=1_200)
+    recommendation: str = Field(min_length=1, max_length=2_000)
+    actions: list[str] = Field(default_factory=list)
+    suggested_language: str | None = Field(default=None, max_length=1_200)
+    expected_result: str | None = Field(default=None, max_length=1_200)
+    caveat: str | None = Field(default=None, max_length=1_200)
+
+
+class MeetingAdaptiveSection(MeetingEvidenceItem):
+    section_type: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=200)
+    narrative: str = Field(min_length=1, max_length=4_000)
+    key_points: list[str] = Field(default_factory=list)
+
+
+class MeetingUncertainty(MeetingEvidenceItem):
+    question: str = Field(min_length=1, max_length=1_200)
+    why_uncertain: str = Field(min_length=1, max_length=1_200)
 
 
 class EvidenceStatement(StrictModel):
@@ -79,35 +140,48 @@ class MeetingDecision(EvidenceStatement):
 
 
 class MeetingDetail(StrictModel):
-    event_id: str = Field(pattern=r"^event_[A-Za-z0-9_]+$")
-    topic: str = Field(min_length=1, max_length=300)
-    start_ms: int = Field(ge=0)
-    end_ms: int = Field(gt=0)
-    background: str = Field(min_length=1, max_length=1_200)
-    participants: list[MeetingParticipant]
-    core_conclusions: list[EvidenceStatement]
-    decisions: list[MeetingDecision]
-    open_questions: list[EvidenceStatement]
-    meeting_todos: list[StrictTodoDraft]
-    discussion_topics: list[EvidenceStatement]
+    event_ids: list[str] = Field(min_length=1)
+    analysis_angle: str = Field(min_length=1, max_length=500)
+    context_summary: str = Field(min_length=1, max_length=3_000)
+    participants: list[MeetingParticipant] = Field(default_factory=list)
+    key_facts: list[MeetingKeyFact] = Field(default_factory=list)
+    quote_analyses: list[MeetingQuoteAnalysis] = Field(default_factory=list)
+    arguments: list[MeetingArgument] = Field(default_factory=list)
+    recommendations: list[MeetingRecommendation] = Field(default_factory=list)
+    sections: list[MeetingAdaptiveSection] = Field(default_factory=list)
+    uncertainties: list[MeetingUncertainty] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_time_range(self) -> MeetingDetail:
-        if self.end_ms <= self.start_ms:
-            raise ValueError("meeting end_ms must be greater than start_ms")
+    def validate_event_ids(self) -> MeetingDetail:
+        if len(self.event_ids) != len(set(self.event_ids)):
+            raise ValueError("meeting detail event_ids must be unique")
+        if not any(
+            (
+                self.key_facts,
+                self.quote_analyses,
+                self.arguments,
+                self.recommendations,
+                self.sections,
+            )
+        ):
+            raise ValueError("meeting detail requires at least one evidenced analysis")
         return self
 
 
 class MeetingCard(StrictModel):
-    event_ids: list[str] = Field(min_length=1, max_length=1)
+    event_ids: list[str] = Field(min_length=1)
     card: CardShell
     confidence: float = Field(ge=0.3, le=1)
     detail: MeetingDetail
 
     @model_validator(mode="after")
     def validate_event_binding(self) -> MeetingCard:
-        if self.event_ids[0] != self.detail.event_id:
-            raise ValueError("meeting card event_id must match its detail")
+        if len(self.event_ids) != len(set(self.event_ids)):
+            raise ValueError("meeting card event_ids must be unique")
+        if set(self.event_ids) != set(self.detail.event_ids) or len(
+            self.event_ids
+        ) != len(self.detail.event_ids):
+            raise ValueError("meeting card event_ids must match its detail")
         if self.card.title.strip() in {
             "会议纪要",
             "会议总结",
@@ -136,10 +210,7 @@ class MeetingSceneResult(SceneResultBase):
     todos: list[StrictTodoDraft]
 
     @model_validator(mode="after")
-    def validate_independent_meetings(self) -> MeetingSceneResult:
-        event_ids = [card.event_ids[0] for card in self.cards]
-        if len(event_ids) != len(set(event_ids)):
-            raise ValueError("each meeting event may appear in only one meeting card")
+    def validate_global_todos(self) -> MeetingSceneResult:
         if any(todo.owner_type not in {"user", "shared"} for todo in self.todos):
             raise ValueError("global todos must be owned by the user or shared")
         return self
@@ -735,19 +806,49 @@ _FRONTEND_TODO_FIELDS: dict[str, object | None] = {
 _FRONTEND_MEETING_CARD_FIELDS: dict[str, object | None] = {
     "card": _FRONTEND_CARD_SHELL_FIELDS,
     "detail": {
-        "topic": None,
-        "start_ms": None,
-        "end_ms": None,
-        "background": None,
+        "analysis_angle": None,
+        "context_summary": None,
         "participants": {
             "display_name": None,
             "role": None,
         },
-        "core_conclusions": {"content": None},
-        "decisions": {"content": None, "status": None},
-        "open_questions": {"content": None},
-        "meeting_todos": _FRONTEND_TODO_FIELDS,
-        "discussion_topics": {"content": None},
+        "key_facts": {"fact": None, "interpretation": None},
+        "quote_analyses": {
+            "speaker": None,
+            "quote": None,
+            "context": None,
+            "surface_meaning": None,
+            "deeper_analysis": None,
+            "interaction_effect": None,
+        },
+        "arguments": {
+            "speaker": None,
+            "position": None,
+            "reasoning": None,
+            "supporting_facts": None,
+            "assumptions": None,
+            "response_from_others": None,
+            "counterpoints": None,
+            "assessment": None,
+        },
+        "recommendations": {
+            "target": None,
+            "observed_issue": None,
+            "evidence_basis": None,
+            "why_it_matters": None,
+            "recommendation": None,
+            "actions": None,
+            "suggested_language": None,
+            "expected_result": None,
+            "caveat": None,
+        },
+        "sections": {
+            "section_type": None,
+            "title": None,
+            "narrative": None,
+            "key_points": None,
+        },
+        "uncertainties": {"question": None, "why_uncertain": None},
     },
 }
 

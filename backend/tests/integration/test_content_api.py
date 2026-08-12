@@ -55,7 +55,25 @@ async def content_client(tmp_path: Path):
                 prompt_snapshot_json='{"meeting":{"content":"frozen prompt"}}',
                 profile_snapshot_json="[]",
                 fixed_rules_hash="rules",
-                staged_results_json="{}",
+                staged_results_json=json.dumps(
+                    {
+                        "meeting": {
+                            "cards": [
+                                {
+                                    "detail": {
+                                        "core_conclusions": [
+                                            {
+                                                "content": "先做 macOS",
+                                                "evidence_segment_ids": ["seg_0_0"],
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
                 status="completed",
             )
         )
@@ -63,7 +81,9 @@ async def content_client(tmp_path: Path):
         batch = await session.get(Batch, batch_id)
         assert batch is not None
         batch.current_analysis_version_id = version_id
-        session.add(JobFile(id=file_id, job_id=job_id, original_name="会议.mp3", extension=".mp3", size_bytes=10, sha256="c" * 64, duration_ms=1000, position=0, temporary_path=str(paths.audio / "会议.mp3")))
+        audio_path = paths.audio / "会议.mp3"
+        audio_path.write_bytes(b"test-audio")
+        session.add(JobFile(id=file_id, job_id=job_id, original_name="会议.mp3", extension=".mp3", size_bytes=10, sha256="c" * 64, duration_ms=1000, position=0, temporary_path=str(audio_path)))
         session.add(Transcript(id=str(uuid4()), job_file_id=file_id, segment_index=0, start_ms=0, end_ms=1000, text="会议原文", words_json="[]", risk_classified=True))
         session.add(
             Transcript(
@@ -114,6 +134,44 @@ async def test_feed_history_and_scoped_question(content_client):
     assert history["days"][0]["audio"][0]["original_name"] == "会议.mp3"
     assert answer.json()["messages"][-1]["role"] == "assistant"
     assert refreshed_feed["days"][0]["cards"][0]["qa"] == answer.json()["messages"]
+
+
+@pytest.mark.asyncio
+async def test_feed_exposes_safe_card_evidence_and_audio_supports_ranges(
+    content_client,
+):
+    client, _, _, ids = content_client
+
+    feed = (await client.get("/api/feed")).json()
+    evidence = feed["days"][0]["cards"][0]["evidence"]
+    audio = await client.get(
+        f"/api/cards/{ids['card_id']}/evidence/seg_0_0/audio",
+        headers={"Range": "bytes=0-3"},
+    )
+    rejected = await client.get(
+        f"/api/cards/{ids['card_id']}/evidence/seg_0_1/audio"
+    )
+
+    assert evidence == [
+        {
+            "card_index": 0,
+            "segments": [
+                {
+                    "segment_id": "seg_0_0",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "playback_url": (
+                        f"/api/cards/{ids['card_id']}"
+                        "/evidence/seg_0_0/audio"
+                    ),
+                }
+            ],
+        }
+    ]
+    assert audio.status_code == 206
+    assert audio.content == b"test"
+    assert audio.headers["accept-ranges"] == "bytes"
+    assert rejected.status_code == 404
 
 
 @pytest.mark.asyncio

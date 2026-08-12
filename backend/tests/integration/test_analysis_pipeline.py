@@ -9,13 +9,14 @@ import pytest
 from audio_memory.analysis.runner import AnalysisRunner
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
+    ProviderAnalysisError,
     RemoteProfileExtractor,
     RemoteSceneAnalyzer,
 )
 from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.prompts.composer import PromptComposer
-from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.event_schema import EventMap, EventMapDraft
 from audio_memory.prompts.schemas import MeetingSceneResult
 from audio_memory.prompts.store import PromptDocument
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
@@ -42,7 +43,6 @@ def map_payload() -> dict[str, object]:
             "evidence_segment_ids": [],
         },
         "events": [],
-        "unassigned_segment_ids": ["seg_0_0"],
     }
 
 
@@ -201,9 +201,8 @@ async def test_invalid_schema_makes_exactly_one_repair_request() -> None:
         return chat_response(next(responses))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        analyzer = RemoteSceneAnalyzer(
-            ProviderAnalysisClient(ConfiguredKeychain(), client)
-        )
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        analyzer = RemoteSceneAnalyzer(provider)
         model_request = PromptComposer().compose_event_map(
             transcript=[
                 {
@@ -220,17 +219,26 @@ async def test_invalid_schema_makes_exactly_one_repair_request() -> None:
                 }
             ],
             profile=[],
-            schema=EventMap.model_json_schema(),
+            schema=EventMapDraft.model_json_schema(),
         )
         result = await analyzer.analyze_event_map(
             model_request,
             {"provider_id": "kimi", "model_id": "kimi-k2.5"},
         )
 
-    assert result == EventMap.model_validate(map_payload())
+    assert result == EventMapDraft.model_validate(map_payload())
     assert len(requests) == 2
     repair_system = requests[1]["messages"][0]["content"]
     assert "修复" in repair_system
+    assert [item.repair_attempted for item in provider.request_diagnostics] == [
+        False,
+        True,
+    ]
+    assert [item.scene_id for item in provider.request_diagnostics] == [
+        "event-map",
+        "event-map",
+    ]
+    assert all(request["max_tokens"] == 32_768 for request in requests)
 
 
 @pytest.mark.asyncio
@@ -243,19 +251,18 @@ async def test_second_invalid_schema_is_not_repaired_again() -> None:
         return chat_response("still-not-json")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        analyzer = RemoteSceneAnalyzer(
-            ProviderAnalysisClient(ConfiguredKeychain(), client)
-        )
+        analyzer = RemoteSceneAnalyzer(ProviderAnalysisClient(ConfiguredKeychain(), client))
         model_request = PromptComposer().compose_event_map(
-            transcript=[], profile=[], schema=EventMap.model_json_schema()
+            transcript=[], profile=[], schema=EventMapDraft.model_json_schema()
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ProviderAnalysisError) as raised:
             await analyzer.analyze_event_map(
                 model_request,
                 {"provider_id": "kimi", "model_id": "kimi-k2.5"},
             )
 
     assert call_count == 2
+    assert raised.value.code == "event_map_schema_invalid"
 
 
 @pytest.mark.asyncio
@@ -292,6 +299,7 @@ async def test_invalid_profile_schema_makes_exactly_one_repair_request() -> None
         )
         facts = await extractor.extract(
             [{"segment_id": "seg_0_0", "text": "我是产品经理"}],
+            [],
             [],
             {"provider_id": "kimi", "model_id": "kimi-k2.5"},
         )
@@ -370,7 +378,29 @@ async def test_real_request_confines_editable_prompt_injection(injection: str) -
         captured.update(json.loads(request.content))
         return chat_response(json.dumps(empty_meeting_payload(), ensure_ascii=False))
 
-    event_map = EventMap.model_validate(map_payload())
+    assigned_payload = map_payload()
+    assigned_payload["events"] = [
+        {
+            "event_id": "event_injection_test",
+            "parent_event_id": None,
+            "event_type": "discussion",
+            "title": "Prompt isolation test",
+            "start_ms": 0,
+            "end_ms": 1_000,
+            "speaker_ids": ["unknown"],
+            "user_role": None,
+            "user_role_confidence": 0,
+            "factual_summary": "Synthetic prompt isolation discussion.",
+            "topics": ["prompt isolation"],
+            "candidate_scenes": ["meeting"],
+            "evidence_segment_ids": ["seg_0_0"],
+            "boundary_confidence": 0.9,
+            "local_date": None,
+            "timezone": None,
+        }
+    ]
+    assigned_payload["unassigned_segment_ids"] = []
+    event_map = EventMap.model_validate(assigned_payload)
     transcript = [
         {
             "segment_id": "seg_0_0",

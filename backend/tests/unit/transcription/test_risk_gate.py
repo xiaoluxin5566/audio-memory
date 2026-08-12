@@ -60,17 +60,17 @@ def test_normalized_similarity_uses_normalized_levenshtein_distance() -> None:
     assert normalized_similarity("", "") == 0.0
 
 
-def test_rejects_segment_without_sufficient_vad_support_after_grace() -> None:
+def test_retains_segment_without_sufficient_vad_support_at_soft_weight() -> None:
     decisions = classify_segments(
         [segment(0, 0, 2_000, "有文本")],
         [TimeInterval(0, 100)],
         [],
     )
 
-    assert decisions[0].state == "REJECTED"
+    assert decisions[0].state is None
     assert decisions[0].reason == "no_vad_support"
-    assert decisions[0].is_reliable is False
-    assert decisions[0].reliability_weight == 0.0
+    assert decisions[0].is_reliable is True
+    assert decisions[0].reliability_weight == 0.6
 
 
 def test_unavailable_vad_downgrades_valid_text_but_keeps_hard_checks_active() -> None:
@@ -124,7 +124,7 @@ def test_rejects_segments_outside_their_owning_file_window() -> None:
     assert all(decision.state == "REJECTED" for decision in decisions)
 
 
-def test_rejects_every_segment_in_an_unresolved_cross_segment_time_conflict() -> None:
+def test_retains_unresolved_cross_segment_time_conflict_at_soft_weight() -> None:
     # Removing the cross-segment pass would trust both sides of a boundary merge
     # conflict merely because each segment is individually well formed.
     decisions = classify_segments(
@@ -143,7 +143,8 @@ def test_rejects_every_segment_in_an_unresolved_cross_segment_time_conflict() ->
         "timestamp_conflict",
         None,
     ]
-    assert [decision.state for decision in decisions] == ["REJECTED", "REJECTED", None]
+    assert [decision.state for decision in decisions] == [None, None, None]
+    assert [decision.reliability_weight for decision in decisions[:2]] == [0.6, 0.6]
 
 
 def test_vad_grace_keeps_segment_when_coverage_reaches_thirty_percent() -> None:
@@ -180,9 +181,10 @@ def test_marks_third_similar_segment_within_thirty_seconds_high_risk() -> None:
         [],
     )
 
-    assert decisions[2].state == "HIGH_RISK_PENDING"
+    assert decisions[2].state is None
     assert decisions[2].reason == "repeated_nearby"
-    assert decisions[2].is_reliable is False
+    assert decisions[2].is_reliable is True
+    assert decisions[2].reliability_weight == 0.6
 
 
 def test_exact_repeat_detection_survives_the_bounded_approximate_comparison_cap() -> None:
@@ -206,7 +208,7 @@ def test_exact_repeat_detection_survives_the_bounded_approximate_comparison_cap(
         [],
     )
 
-    assert decisions[259].state == "HIGH_RISK_PENDING"
+    assert decisions[259].state is None
     assert decisions[259].reason == "repeated_nearby"
 
 
@@ -229,7 +231,7 @@ def test_approximate_repeat_detection_keeps_the_entire_thirty_second_window() ->
         [],
     )
 
-    assert decisions[259].state == "HIGH_RISK_PENDING"
+    assert decisions[259].state is None
     assert decisions[259].reason == "repeated_nearby"
 
 
@@ -250,7 +252,7 @@ def test_unprovable_crowded_similarity_window_is_rejected() -> None:
         [],
     )
 
-    assert decisions[257].state == "REJECTED"
+    assert decisions[257].state is None
     assert decisions[257].reason == "similarity_comparison_budget_exhausted"
 
 
@@ -274,7 +276,7 @@ def test_marks_three_adjacent_long_phrase_repetitions_high_risk() -> None:
         [],
     )
 
-    assert decisions[0].state == "HIGH_RISK_PENDING"
+    assert decisions[0].state is None
     assert decisions[0].reason == "repeated_phrase"
 
 
@@ -287,7 +289,7 @@ def test_phrase_repetition_after_the_first_512_characters_is_high_risk() -> None
         [],
     )
 
-    assert decisions[0].state == "HIGH_RISK_PENDING"
+    assert decisions[0].state is None
     assert decisions[0].reason == "repeated_phrase"
 
 
@@ -300,7 +302,7 @@ def test_text_beyond_safe_full_comparison_limit_is_rejected() -> None:
         [],
     )
 
-    assert decisions[0].state == "REJECTED"
+    assert decisions[0].state is None
     assert decisions[0].reason == "comparison_text_too_long"
 
 
@@ -318,9 +320,9 @@ def test_oversized_rejections_remain_repeat_evidence_for_a_safe_length_third() -
     )
 
     assert [(item.state, item.reason) for item in decisions] == [
-        ("REJECTED", "comparison_text_too_long"),
-        ("REJECTED", "comparison_text_too_long"),
-        ("HIGH_RISK_PENDING", "repeated_nearby"),
+        (None, "comparison_text_too_long"),
+        (None, "comparison_text_too_long"),
+        (None, "repeated_nearby"),
     ]
 
 
@@ -345,11 +347,11 @@ def test_budget_rejection_remains_repeat_evidence_after_old_candidates_expire() 
     )
 
     assert (decisions[257].state, decisions[257].reason) == (
-        "REJECTED",
+        None,
         "similarity_comparison_budget_exhausted",
     )
     assert (decisions[258].state, decisions[258].reason) == (
-        "HIGH_RISK_PENDING",
+        None,
         "repeated_nearby",
     )
 
@@ -361,7 +363,7 @@ def test_marks_repeat_after_confirmed_noninitial_silence_high_risk() -> None:
         [EnergyInterval(1_000, 12_000, has_signal=False)],
     )
 
-    assert decisions[1].state == "HIGH_RISK_PENDING"
+    assert decisions[1].state is None
     assert decisions[1].reason == "post_silence_repeat"
 
 
@@ -376,7 +378,7 @@ def test_silence_repeat_allows_up_to_nineteen_percent_signal_energy() -> None:
         ],
     )
 
-    assert decisions[1].state == "HIGH_RISK_PENDING"
+    assert decisions[1].state is None
     assert decisions[1].reason == "post_silence_repeat"
 
 
@@ -395,7 +397,7 @@ def test_silence_repeat_requires_eighty_percent_energy_coverage() -> None:
     assert decisions[1].reason == "light_repetition"
 
 
-def test_rejected_segment_does_not_contribute_to_repeat_history() -> None:
+def test_soft_vad_segment_remains_available_as_repeat_context() -> None:
     decisions = classify_segments(
         [
             segment(0, 0, 1_000, "重复文本"),
@@ -406,9 +408,9 @@ def test_rejected_segment_does_not_contribute_to_repeat_history() -> None:
         [],
     )
 
-    assert decisions[0].state == "REJECTED"
+    assert (decisions[0].state, decisions[0].reason) == (None, "no_vad_support")
     assert [(decision.state, decision.reason) for decision in decisions[1:]] == [
-        (None, None),
+        (None, "light_repetition"),
         (None, None),
     ]
 
@@ -434,7 +436,7 @@ def test_high_speech_rate_requires_effective_speech_and_light_repetition() -> No
         [],
     )
 
-    assert decisions[1].state == "HIGH_RISK_PENDING"
+    assert decisions[1].state is None
     assert decisions[1].reason == "implausible_speech_rate"
 
 

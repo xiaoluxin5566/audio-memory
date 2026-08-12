@@ -541,7 +541,9 @@ def test_real_provider_path_uses_injected_keychain_and_mock_transport_only(
     case = evaluator._EvaluationCase.model_validate(payload["cases"][0])
     responses = iter(
         [
-            case.event_map.model_dump(mode="json"),
+            case.event_map.model_dump(
+                mode="json", exclude={"unassigned_segment_ids"}
+            ),
             *[
                 result.model_dump(mode="json")
                 for result in case.scene_results
@@ -655,13 +657,13 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     database = app_data / "audio-memory.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE alembic_version (version_num TEXT NOT NULL)")
-        connection.execute("INSERT INTO alembic_version VALUES ('0010')")
+        connection.execute("INSERT INTO alembic_version VALUES ('0012')")
         connection.execute(
             "CREATE TABLE reanalysis_batches (id TEXT, status TEXT NOT NULL)"
         )
         connection.execute("INSERT INTO reanalysis_batches VALUES ('b1', 'paused')")
         connection.execute(
-            "CREATE TABLE analysis_versions (id TEXT, status TEXT, worker_owner_id TEXT, lease_expires_at TEXT)"
+            "CREATE TABLE analysis_versions (id TEXT, status TEXT, worker_owner_id TEXT, lease_expires_at TEXT, batch_overview_json TEXT, search_rounds_json TEXT, external_sources_json TEXT)"
         )
         connection.execute(
             "CREATE TABLE reanalysis_items (analysis_version_id TEXT, status TEXT, completed_at TEXT)"
@@ -686,7 +688,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     assert "✓ 分析迁移链" in result.stdout
     assert "✓ 历史重分析恢复" in result.stdout
     assert "✓ 本地会话安全" in result.stdout
-    assert "✓ 本地数据库已迁移至 0010" in result.stdout
+    assert "✓ 本地数据库已迁移至 0012" in result.stdout
     assert "✓ 历史重分析状态已恢复" in result.stdout
     vad_path = app_data / "models/diarization/silero_vad.onnx"
     trusted_vad = vad_path.read_bytes()
@@ -752,7 +754,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert "✗ 本地数据库已迁移至 0010" in stale.stdout
+    assert "✗ 本地数据库已迁移至 0012" in stale.stdout
     assert "✗ 历史重分析状态已恢复" in stale.stdout
     assert stale.returncode == 1
 

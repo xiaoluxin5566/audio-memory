@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
 
+from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
 from audio_memory.prompts.store import PROMPT_SCENES
@@ -43,6 +44,9 @@ class JobView(BaseModel):
     progress_percent: int = 0
     eta_state: str = "unavailable"
     eta_seconds: int | None = None
+    local_phase: str | None = None
+    batch_current: int = 0
+    batch_total: int = 0
 
 
 def service_from(request: Request) -> UploadService:
@@ -276,12 +280,10 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    retryable_errors = {
-        "model_analysis_failed",
-        "credential_changed",
-        "fixed_rules_changed",
-    }
-    if job.stage != JobStage.FAILED.value or job.error_code not in retryable_errors:
+    if (
+        job.stage != JobStage.FAILED.value
+        or job.error_code not in ANALYSIS_RETRYABLE_ERROR_CODES
+    ):
         raise HTTPException(
             status_code=409,
             detail="Only a failed model analysis can be retried",
@@ -306,6 +308,18 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
                 "message": str(exc),
             },
         ) from exc
+
+    if job.error_code.startswith("autonomous_"):
+        resumed_version = (
+            await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
+                source_job_id=job_id,
+                provider_id=provider.provider_id,
+                model_id=provider.model_id,
+                credential_generation=credential_generation,
+            )
+        )
+        if resumed_version is not None:
+            return {"id": job_id, "stage": JobStage.ANALYZING.value}
 
     analysis_request = await snapshot_analysis_request(
         request,

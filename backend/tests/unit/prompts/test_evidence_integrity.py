@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from audio_memory.analysis.dossiers import SceneDossier
 from audio_memory.prompts.event_schema import Event, EventMap, UserSpeaker
 from audio_memory.prompts.evidence import (
     EvidenceIntegrityError,
@@ -27,8 +28,15 @@ from audio_memory.prompts.schemas import (
     InspirationSceneResult,
     InterestSignal,
     MeetingCard,
+    MeetingAdaptiveSection,
+    MeetingArgument,
     MeetingDetail,
+    MeetingKeyFact,
+    MeetingParticipant,
+    MeetingQuoteAnalysis,
+    MeetingRecommendation,
     MeetingSceneResult,
+    MeetingUncertainty,
     ParentingCard,
     ParentingDetail,
     ParentingInteraction,
@@ -128,11 +136,311 @@ def test_rejects_cross_event_evidence_even_when_segment_exists() -> None:
         )
 
 
-def test_rejects_user_attribution_below_point_seven() -> None:
+def dossier_event_map() -> EventMap:
+    base = event_map()
+    return base.model_copy(update={"unassigned_segment_ids": ["seg_003"]})
+
+
+def dossier(
+    *,
+    allowed_segment_ids: tuple[str, ...] = ("seg_001", "seg_003"),
+    file_ids: tuple[str, ...] = ("file-a",),
+    start_ms: int = 0,
+    end_ms: int = 3_000,
+    source_event_ids: tuple[str, ...] = ("event_001",),
+) -> SceneDossier:
+    return SceneDossier(
+        dossier_id="dossier_1234567890abcdefabcd",
+        primary_event_id="event_001",
+        source_event_ids=source_event_ids,
+        candidate_scenes=("todo", "meeting"),
+        selected_cluster_ids=("cluster_1234567890abcdefabcd",),
+        expanded_cluster_ids=("cluster_1234567890abcdefabcd",),
+        allowed_segment_ids=allowed_segment_ids,
+        file_ids=file_ids,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        title="完整工作讨论",
+        selection_reason="包含 Event 未分配的完整上下文。",
+        priority="high",
+    )
+
+
+def dossier_segment_lookup() -> dict[str, dict[str, object]]:
+    return {
+        "seg_001": {
+            "segment_id": "seg_001",
+            "file_id": "file-a",
+            "start_ms": 0,
+            "end_ms": 1_000,
+        },
+        "seg_002": {
+            "segment_id": "seg_002",
+            "file_id": "file-a",
+            "start_ms": 1_000,
+            "end_ms": 2_000,
+        },
+        "seg_003": {
+            "segment_id": "seg_003",
+            "file_id": "file-a",
+            "start_ms": 2_000,
+            "end_ms": 3_000,
+        },
+    }
+
+
+def test_dossier_allows_event_unassigned_todo_evidence() -> None:
+    validate_evidence_integrity(
+        todo_result(evidence_segment_ids=["seg_003"]),
+        dossier_event_map(),
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "scope", "lookup", "match"),
+    [
+        (
+            todo_result(evidence_segment_ids=["seg_999"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "unknown segment",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_002"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "outside dossier",
+        ),
+        (
+            todo_result(event_id="event_002", evidence_segment_ids=["seg_003"]),
+            dossier(),
+            dossier_segment_lookup(),
+            "authorize event",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_003"]),
+            dossier(),
+            {
+                **dossier_segment_lookup(),
+                "seg_003": {
+                    "segment_id": "seg_003",
+                    "file_id": "file-b",
+                    "start_ms": 2_000,
+                    "end_ms": 3_000,
+                },
+            },
+            "file",
+        ),
+        (
+            todo_result(evidence_segment_ids=["seg_003"]),
+            dossier(end_ms=2_500),
+            dossier_segment_lookup(),
+            "time",
+        ),
+    ],
+)
+def test_dossier_rejects_unknown_outside_or_misaligned_evidence(
+    result: TodoSceneResult,
+    scope: SceneDossier,
+    lookup: dict[str, dict[str, object]],
+    match: str,
+) -> None:
+    with pytest.raises(EvidenceIntegrityError, match=match):
+        validate_evidence_integrity(
+            result,
+            dossier_event_map(),
+            {"seg_001", "seg_002", "seg_003"},
+            dossiers=[scope],
+            segment_lookup=lookup,
+        )
+
+
+def test_dossier_allows_meeting_conclusion_outside_event_membership() -> None:
+    result = meeting_with_cross_event_conclusion()
+    result.cards[0].detail.key_facts[0].evidence_segment_ids = ["seg_003"]
+
+    validate_evidence_integrity(
+        result,
+        dossier_event_map(),
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
+
+
+def adaptive_meeting_with_every_evidence_field() -> MeetingSceneResult:
+    evidence = {"event_ids": ["event_001"], "evidence_segment_ids": ["seg_001"]}
+    return MeetingSceneResult(
+        scene_id="meeting",
+        should_generate=True,
+        generation_reason="同一主题包含原句、论点、分析和建议。",
+        cards=[
+            MeetingCard(
+                event_ids=["event_001"],
+                card=CardShell(title="首版范围取舍", summary="分析范围收缩的依据和风险。"),
+                confidence=0.9,
+                detail=MeetingDetail(
+                    event_ids=["event_001"],
+                    analysis_angle="首版范围如何取舍",
+                    context_summary="团队讨论首版范围。",
+                    participants=[
+                        MeetingParticipant(
+                            **evidence,
+                            speaker_id="speaker_A",
+                            display_name=None,
+                            role="负责人",
+                        )
+                    ],
+                    key_facts=[
+                        MeetingKeyFact(
+                            **evidence,
+                            fact="首版聚焦已有音频。",
+                            interpretation="主动收缩范围。",
+                        )
+                    ],
+                    quote_analyses=[
+                        MeetingQuoteAnalysis(
+                            **evidence,
+                            speaker="负责人",
+                            quote="先把已有音频跑通。",
+                            context="讨论首版范围。",
+                            surface_meaning="首版先支持已有音频。",
+                            deeper_analysis="优先验证核心价值。",
+                            interaction_effect="讨论转向验收边界。",
+                        )
+                    ],
+                    arguments=[
+                        MeetingArgument(
+                            **evidence,
+                            speaker="负责人",
+                            position="首版应聚焦。",
+                            reasoning="先验证核心价值。",
+                            supporting_facts=["已有音频链路可用"],
+                            assumptions=["用户接受首版入口"],
+                            response_from_others=None,
+                            counterpoints=[],
+                            assessment="方向清楚但需用户验证。",
+                        )
+                    ],
+                    recommendations=[
+                        MeetingRecommendation(
+                            **evidence,
+                            target="产品负责人",
+                            observed_issue="成功口径不清晰。",
+                            evidence_basis="只确认了功能范围。",
+                            why_it_matters="无法判断首版价值。",
+                            recommendation="补充质量验收标准。",
+                            actions=["定义验收指标"],
+                            suggested_language=None,
+                            expected_result=None,
+                            caveat=None,
+                        )
+                    ],
+                    sections=[
+                        MeetingAdaptiveSection(
+                            **evidence,
+                            section_type="tradeoff",
+                            title="范围取舍",
+                            narrative="团队延后实时采集以降低首版复杂度。",
+                            key_points=["先验证价值"],
+                        )
+                    ],
+                    uncertainties=[
+                        MeetingUncertainty(
+                            **evidence,
+                            question="用户是否接受该入口？",
+                            why_uncertain="没有用户验证证据。",
+                        )
+                    ],
+                ),
+            )
+        ],
+        todos=[],
+        confidence=0.9,
+    )
+
+
+@pytest.mark.parametrize(
+    "collection",
+    [
+        "participants",
+        "key_facts",
+        "quote_analyses",
+        "arguments",
+        "recommendations",
+        "sections",
+        "uncertainties",
+    ],
+)
+def test_every_adaptive_meeting_item_is_checked_against_its_dossier(
+    collection: str,
+) -> None:
+    result = adaptive_meeting_with_every_evidence_field()
+    getattr(result.cards[0].detail, collection)[0].evidence_segment_ids = ["seg_002"]
+
+    with pytest.raises(EvidenceIntegrityError, match="outside dossier"):
+        validate_evidence_integrity(
+            result,
+            dossier_event_map(),
+            {"seg_001", "seg_002", "seg_003"},
+            dossiers=[dossier()],
+            segment_lookup=dossier_segment_lookup(),
+        )
+
+
+def test_dossier_rejects_card_event_without_authorized_scope() -> None:
+    result = MeetingSceneResult(
+        scene_id="meeting",
+        should_generate=True,
+        generation_reason="event_002 被错误路由为会议。",
+        cards=[
+            MeetingCard(
+                event_ids=["event_002"],
+                card=CardShell(title="错误事件", summary="没有档案授权。"),
+                confidence=0.9,
+                detail=MeetingDetail(
+                    event_ids=["event_002"],
+                    analysis_angle="错误事件为何没有档案授权",
+                    context_summary="没有档案授权。",
+                    participants=[],
+                    key_facts=[
+                        MeetingKeyFact(
+                            event_ids=["event_002"],
+                            evidence_segment_ids=["seg_002"],
+                            fact="该事件没有会议档案授权。",
+                            interpretation=None,
+                        )
+                    ],
+                    quote_analyses=[],
+                    arguments=[],
+                    recommendations=[],
+                    sections=[],
+                    uncertainties=[],
+                ),
+            )
+        ],
+        todos=[],
+        confidence=0.9,
+    )
+
+    with pytest.raises(EvidenceIntegrityError, match="authorize event"):
+        validate_evidence_integrity(
+            result,
+            dossier_event_map(),
+            {"seg_001", "seg_002", "seg_003"},
+            dossiers=[dossier()],
+            segment_lookup=dossier_segment_lookup(),
+        )
+
+
+def test_rejects_user_attribution_below_point_eight_five() -> None:
     with pytest.raises(EvidenceIntegrityError, match="user identity"):
         validate_evidence_integrity(
             todo_result(),
-            event_map(user_confidence=0.69),
+            event_map(user_confidence=0.84),
             {"seg_001", "seg_002"},
         )
 
@@ -151,6 +459,7 @@ def test_rejects_media_action_call_misclassified_as_user_todo() -> None:
     [
         "media",
         "video",
+        "interview",
         "podcast",
         "music",
         "audiobook",
@@ -196,6 +505,48 @@ def test_other_event_kind_cannot_default_to_user_commitment() -> None:
         )
 
 
+def test_meeting_routed_interview_allows_objective_recommendation_with_unknown_identity() -> None:
+    routed_map = dossier_event_map().model_copy(
+        update={
+            "user_speaker": UserSpeaker(
+                speaker_id=None,
+                confidence=0,
+                reasoning="身份未知。",
+                evidence_segment_ids=[],
+            ),
+            "events": [
+                event("event_001", "seg_001", event_type="interview"),
+                event("event_002", "seg_002", event_type="video"),
+            ],
+        }
+    )
+    result = meeting_with_cross_event_conclusion()
+    result.cards[0].detail.key_facts[0].evidence_segment_ids = ["seg_001"]
+    result.cards[0].detail.recommendations = [
+        MeetingRecommendation(
+            event_ids=["event_001"],
+            target="候选人",
+            observed_issue="作品集证据需要补充。",
+            evidence_basis="面试中出现补充作品集的讨论。",
+            why_it_matters="这会影响项目能力判断。",
+            recommendation="补充能够证明个人职责的作品集材料。",
+            actions=["整理项目材料"],
+            suggested_language=None,
+            expected_result=None,
+            caveat="无法确认候选人是否为用户本人。",
+            evidence_segment_ids=["seg_001"],
+        )
+    ]
+
+    validate_evidence_integrity(
+        result,
+        routed_map,
+        {"seg_001", "seg_002", "seg_003"},
+        dossiers=[dossier()],
+        segment_lookup=dossier_segment_lookup(),
+    )
+
+
 def test_event_map_must_account_for_every_transcript_segment() -> None:
     with pytest.raises(EvidenceIntegrityError, match="unassigned"):
         validate_evidence_integrity(
@@ -222,39 +573,29 @@ def meeting_with_cross_event_conclusion() -> MeetingSceneResult:
                 card=CardShell(title="确认一期范围", summary="只支持上传已有音频。"),
                 confidence=0.9,
                 detail=MeetingDetail(
-                    event_id="event_001",
-                    topic="一期范围",
-                    start_ms=0,
-                    end_ms=1_000,
-                    background="产品范围评审。",
+                    event_ids=["event_001"],
+                    analysis_angle="一期范围如何取舍",
+                    context_summary="产品范围评审。",
                     participants=[],
-                    core_conclusions=[
-                        EvidenceStatement(
-                            content="第一期只支持上传已有音频。",
+                    key_facts=[
+                        MeetingKeyFact(
+                            event_ids=["event_001"],
+                            fact="第一期只支持上传已有音频。",
+                            interpretation="团队主动收缩范围。",
                             evidence_segment_ids=["seg_002"],
                         )
                     ],
-                    decisions=[],
-                    open_questions=[],
-                    meeting_todos=[],
-                    discussion_topics=[],
+                    quote_analyses=[],
+                    arguments=[],
+                    recommendations=[],
+                    sections=[],
+                    uncertainties=[],
                 ),
             )
         ],
         todos=[],
         confidence=0.9,
     )
-
-
-def meeting_with_user_owned_detail_todo() -> MeetingSceneResult:
-    payload = meeting_with_cross_event_conclusion().model_dump(mode="json")
-    payload["cards"][0]["detail"]["core_conclusions"][0][
-        "evidence_segment_ids"
-    ] = ["seg_001"]
-    payload["cards"][0]["detail"]["meeting_todos"] = [
-        todo_result().todos[0].model_dump(mode="json")
-    ]
-    return MeetingSceneResult.model_validate(payload)
 
 
 def parenting_with_cross_event_finding() -> ParentingSceneResult:
@@ -498,7 +839,7 @@ def test_low_identity_rejects_personal_evaluation_or_profile_signal(result_facto
     with pytest.raises(EvidenceIntegrityError, match="user identity"):
         validate_evidence_integrity(
             result_factory(),
-            event_map(user_confidence=0.69),
+            event_map(user_confidence=0.84),
             {"seg_001", "seg_002"},
         )
 
@@ -511,24 +852,7 @@ def test_low_identity_still_allows_objective_content_consumption_record() -> Non
 
     validate_evidence_integrity(
         ContentSceneResult.model_validate(payload),
-        event_map(user_confidence=0.69),
-        {"seg_001", "seg_002"},
-    )
-
-
-def test_meeting_detail_user_todo_uses_point_seven_identity_boundary() -> None:
-    result = meeting_with_user_owned_detail_todo()
-
-    with pytest.raises(EvidenceIntegrityError, match="user identity"):
-        validate_evidence_integrity(
-            result,
-            event_map(user_confidence=0.69),
-            {"seg_001", "seg_002"},
-        )
-
-    validate_evidence_integrity(
-        result,
-        event_map(user_confidence=0.70),
+        event_map(user_confidence=0.84),
         {"seg_001", "seg_002"},
     )
 
@@ -643,7 +967,7 @@ def test_integrity_rejects_empty_parenting_basis_after_model_copy_bypass() -> No
 
 
 def test_integrity_revalidates_reliable_user_evidence_after_model_copy_bypass() -> None:
-    valid_map = event_map(user_confidence=0.70)
+    valid_map = event_map(user_confidence=0.85)
     invalid_speaker = valid_map.user_speaker.model_copy(
         update={"evidence_segment_ids": []}
     )
@@ -658,7 +982,7 @@ def test_integrity_revalidates_reliable_user_evidence_after_model_copy_bypass() 
 
 
 def test_reliable_user_speaker_evidence_must_reference_a_transcript_segment() -> None:
-    valid_map = event_map(user_confidence=0.70)
+    valid_map = event_map(user_confidence=0.85)
     invalid_speaker = valid_map.user_speaker.model_copy(
         update={"evidence_segment_ids": ["seg_999"]}
     )

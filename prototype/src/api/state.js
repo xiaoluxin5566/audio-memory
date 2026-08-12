@@ -1,5 +1,6 @@
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI' }
 const SCENE_LABELS = {
+  analysis: 'AI 深度分析',
   meeting: '会议纪要',
   parenting: '家庭教育',
   content: '内容推荐',
@@ -53,7 +54,7 @@ export function normalizeProviders(payload) {
 
 
 function normalizeSection(section) {
-  if (section.kind === 'text') return { title: section.title, content: section.text ?? '' }
+  if (section.kind === 'text') return { kind: 'adaptive', title: section.title, content: section.text ?? '', items: [] }
   if (section.kind === 'grouped_items') {
     return {
       title: section.title,
@@ -76,16 +77,17 @@ function detailBlock(title, { content = '', items = [], eventTitle = '' } = {}) 
 }
 
 function meetingBlocks(detail = {}) {
-  const participants = (detail.participants ?? []).map((item) => [item.display_name, item.role].filter(Boolean).join(' · '))
-  return [
-    detailBlock('会议背景', { content: detail.background }),
-    detailBlock('参与者', { items: participants }),
-    detailBlock('核心结论', { items: textList(detail.core_conclusions) }),
-    detailBlock('已确认决策', { items: textList(detail.decisions) }),
-    detailBlock('待确认问题', { items: textList(detail.open_questions) }),
-    detailBlock('会议待办', { items: (detail.meeting_todos ?? []).map((item) => item.text) }),
-    detailBlock('讨论议题', { items: textList(detail.discussion_topics) }),
-  ].filter((block) => block.content || block.items.length)
+  const sections = [
+    { kind: 'overview', title: detail.analysis_angle || '对话全景', content: detail.context_summary },
+    { kind: 'participants', title: '对话角色', entries: (detail.participants ?? []).map((item) => ({ name: item.display_name || '未命名参与者', role: item.role || '' })) },
+    { kind: 'facts', title: '关键事实', entries: (detail.key_facts ?? []).map((item) => ({ fact: item.fact, interpretation: item.interpretation || '' })) },
+    { kind: 'quotes', title: '原句分析', entries: (detail.quote_analyses ?? []).map((item) => ({ speaker: item.speaker, quote: item.quote, context: item.context, surfaceMeaning: item.surface_meaning, deeperAnalysis: item.deeper_analysis, interactionEffect: item.interaction_effect || '' })) },
+    { kind: 'arguments', title: '双方论点', entries: (detail.arguments ?? []).map((item) => ({ speaker: item.speaker, position: item.position, reasoning: item.reasoning, supportingFacts: item.supporting_facts ?? [], assumptions: item.assumptions ?? [], responseFromOthers: item.response_from_others || '', counterpoints: item.counterpoints ?? [], assessment: item.assessment })) },
+    ...(detail.sections ?? []).map((item) => ({ kind: 'adaptive', title: item.title, sectionType: item.section_type, content: item.narrative, items: item.key_points ?? [] })),
+    { kind: 'recommendations', title: '针对性建议', entries: (detail.recommendations ?? []).map((item) => ({ target: item.target, observedIssue: item.observed_issue, evidenceBasis: item.evidence_basis, whyItMatters: item.why_it_matters, recommendation: item.recommendation, actions: item.actions ?? [], suggestedLanguage: item.suggested_language || '', expectedResult: item.expected_result || '', caveat: item.caveat || '' })) },
+    { kind: 'uncertainties', title: '仍需确认', entries: (detail.uncertainties ?? []).map((item) => ({ question: item.question, whyUncertain: item.why_uncertain })) },
+  ]
+  return sections.filter((section) => section.content || section.items?.length || section.entries?.length)
 }
 
 function parentingBlocks(detail = {}) {
@@ -178,26 +180,179 @@ function strictBlocks(sceneId, detail) {
   return []
 }
 
+function autonomousPresentation(source = {}) {
+  const metadataSection = (source.content ?? []).find((item) => item.type === 'external_meta')
+  let metadata = {}
+  if (metadataSection?.body) {
+    try { metadata = JSON.parse(metadataSection.body) } catch { metadata = {} }
+  }
+  const cardKind = ['event', 'insight'].includes(metadata.card_kind) ? metadata.card_kind : ''
+  const sceneTypes = Array.isArray(metadata.scene_types) ? metadata.scene_types.filter((item) => typeof item === 'string') : []
+  const blocks = [
+    ...(source.content ?? []).filter((item) => item.type !== 'external_meta').map((item) => {
+      const finding = /^finding:([^:]+):([^:]+)$/.exec(item.type ?? '')
+      if (finding) return { kind: 'autonomous-finding', findingType: finding[1], confidence: finding[2], title: item.title, content: item.body ?? '', items: item.items ?? [] }
+      return { kind: 'analysis', sectionType: item.type, title: item.title, content: item.body ?? '', items: item.items ?? [], blocks: analysisBlocks(item.body, item.type, item.title) }
+    }),
+    ...((source.quotes ?? []).length ? [{ kind: 'autonomous-quotes', title: '关键原句分析', entries: source.quotes }] : []),
+    ...((source.recommendations ?? []).length ? [{ kind: 'autonomous-recommendations', title: '针对性建议', entries: source.recommendations }] : []),
+  ]
+  return [
+    { cardKind, sceneTypes, label: cardKind === 'event' ? '事件分析' : cardKind === 'insight' ? '深度洞察' : SCENE_LABELS.analysis },
+    blocks,
+  ]
+}
+
+function tableCells(line) {
+  return line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
+}
+
+function isTableDivider(line) {
+  const cells = tableCells(line)
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+}
+
+function analysisBlocks(body = '', sectionType = '', title = '') {
+  const lines = String(body).replace(/\r\n/g, '\n').split('\n')
+  const blocks = []
+  let currentHeading = ''
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index].trim()
+    if (!line) { index += 1; continue }
+
+    if (/^\*\*[^*]+\*\*$/.test(line) || /^#{2,4}\s+/.test(line)) {
+      currentHeading = line.replace(/^#{2,4}\s+/, '').replace(/^\*\*|\*\*$/g, '')
+      blocks.push({ kind: 'heading', text: currentHeading })
+      index += 1
+      continue
+    }
+
+    if (line.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1])) {
+      const rows = [tableCells(line)]
+      index += 2
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(tableCells(lines[index]))
+        index += 1
+      }
+      blocks.push({ kind: 'matrix', rows })
+      continue
+    }
+
+    const bullet = /^[-*]\s+(.+)$/.exec(line)
+    if (bullet) {
+      const items = []
+      while (index < lines.length) {
+        const match = /^[-*]\s+(.+)$/.exec(lines[index].trim())
+        if (!match) break
+        items.push(match[1])
+        index += 1
+      }
+      blocks.push({ kind: 'bullet-list', items })
+      continue
+    }
+
+    const numbered = /^\d+[.)]\s+(.+)$/.exec(line)
+    if (numbered) {
+      const items = []
+      while (index < lines.length) {
+        const match = /^\d+[.)]\s+(.+)$/.exec(lines[index].trim())
+        if (!match) break
+        items.push(match[1])
+        index += 1
+      }
+      const timelineContext = /(推进|过程|时间线|转折|循环|链条|路径|阶段|如何形成)/i.test(currentHeading || `${sectionType} ${title}`)
+      blocks.push({ kind: timelineContext ? 'timeline' : 'numbered-list', items })
+      continue
+    }
+
+    if ((line.match(/(?:→|->)/g) ?? []).length >= 2) {
+      blocks.push({ kind: 'cause-chain', items: line.split(/\s*(?:→|->)\s*/).filter(Boolean) })
+      index += 1
+      continue
+    }
+
+    const paragraph = [line]
+    index += 1
+    while (index < lines.length && lines[index].trim()) {
+      const next = lines[index].trim()
+      if (/^(?:[-*]\s+|\d+[.)]\s+|#{2,4}\s+)/.test(next) || /^\*\*[^*]+\*\*$/.test(next) || (next.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1]))) break
+      paragraph.push(next)
+      index += 1
+    }
+    blocks.push({ kind: 'paragraph', text: paragraph.join(' ') })
+  }
+  return blocks
+}
+
 function normalizeStrictCards(item, batch) {
   const payload = item.payload
   if (!payload?.scene_id || !Array.isArray(payload.cards)) return null
   return payload.cards.map((source, index) => {
     const shell = source.card ?? {}
     const detail = source.detail ?? {}
-    const topic = payload.scene_id === 'meeting' ? detail.topic : ''
+    const [autonomousMeta, autonomousSections] = item.scene_id === 'analysis' ? autonomousPresentation(source) : [{}, []]
     return {
       id: `${item.id}:${index}`,
       apiId: item.id,
       sceneId: item.scene_id,
-      label: SCENE_LABELS[item.scene_id] ?? item.scene_id,
-      title: shell.title || topic || '未命名结果',
-      summary: shell.summary ?? '',
+      label: autonomousMeta.label ?? SCENE_LABELS[item.scene_id] ?? item.scene_id,
+      cardKind: autonomousMeta.cardKind ?? '',
+      sceneTypes: autonomousMeta.sceneTypes ?? [],
+      showEvidencePlayback: item.scene_id !== 'analysis',
+      title: (item.scene_id === 'analysis' ? source.title : shell.title) || '未命名结果',
+      summary: (item.scene_id === 'analysis' ? source.summary : shell.summary) ?? '',
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',
-      detailSections: strictBlocks(item.scene_id, detail),
+      detailSections: item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail),
       details: strictCardDetails(item.scene_id, detail),
+      sources: normalizeExternalSources(source, item.sources),
+      evidence: (item.evidence ?? [])
+        .find((group) => group.card_index === index)?.segments
+        ?.map((segment) => ({
+          segmentId: segment.segment_id,
+          startMs: segment.start_ms,
+          endMs: segment.end_ms,
+          playbackUrl: segment.playback_url,
+        })) ?? [],
     }
   })
+}
+
+function sourceDomain(url) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+function normalizeExternalSources(card, itemSources = []) {
+  const referencedIds = new Set(card.external_source_ids ?? [])
+  if (referencedIds.size === 0) return []
+  return itemSources
+    .filter((source) => referencedIds.has(source.source_id))
+    .map((source) => ({
+      title: source.title ?? '',
+      url: source.url ?? '',
+      domain: sourceDomain(source.url),
+    }))
+    .filter((source) => source.title && source.url)
+}
+
+function normalizeBatchOverview(item) {
+  const overview = item.payload?.overview
+  if (item.scene_id !== 'batch_overview' || item.payload?.kind !== 'batch_overview' || !overview) return null
+  return {
+    id: item.id,
+    apiId: item.id,
+    kind: 'batch_overview',
+    title: '本次概览',
+    summary: overview.summary ?? '',
+    sceneIds: overview.scene_ids ?? [],
+    timeLabel: timeLabel(item.uploaded_at),
+    sources: [],
+  }
 }
 
 
@@ -227,16 +382,22 @@ export function normalizeFeed(payload) {
           audio: [],
           transcript: '',
           cards: [],
+          overview: null,
           qa: {},
         })
       }
       const batch = batches.get(item.batch_id)
+      const overview = normalizeBatchOverview(item)
+      if (overview) {
+        batch.overview ??= overview
+        continue
+      }
       const strictCards = normalizeStrictCards(item, batch)
       if (strictCards) {
         batch.cards.push(...strictCards)
         for (const card of strictCards) batch.qa[card.id] = normalizeConversation(item.qa)
       } else {
-        const shell = item.payload?.card ?? {}
+        const shell = item.payload?.card ?? item.payload?.overview ?? {}
         batch.cards.push({
           id: item.id,
           apiId: item.id,
@@ -248,13 +409,19 @@ export function normalizeFeed(payload) {
           meta: '查看 AI 分析详情',
           detailSections: (item.payload?.detail_sections ?? []).map(normalizeSection),
           details: {},
+          sources: [],
         })
         batch.qa[item.id] = normalizeConversation(item.qa)
       }
     }
   }
   return {
-    feed: [...batches.values()].sort((a, b) => b.uploadedAtRaw.localeCompare(a.uploadedAtRaw)),
+    feed: [...batches.values()]
+      .map((batch) => ({
+        ...batch,
+        cards: batch.overview ? [batch.overview, ...batch.cards] : batch.cards,
+      }))
+      .sort((a, b) => b.uploadedAtRaw.localeCompare(a.uploadedAtRaw)),
     todos: (payload?.todos ?? []).map((item) => ({
       id: item.id,
       text: item.text,
@@ -297,6 +464,9 @@ export function normalizePrompts(payload) {
   return Object.fromEntries((payload?.prompts ?? []).map((item) => [item.scene_id, {
     current: item.content,
     version: item.version,
+    label: item.label ?? item.scene_id,
+    editable: item.editable !== false,
+    source: item.source ?? '',
   }]))
 }
 
