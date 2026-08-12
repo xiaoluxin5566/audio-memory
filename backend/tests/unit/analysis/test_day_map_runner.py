@@ -9,7 +9,7 @@ import pytest
 
 from audio_memory.analysis.native_search import normalize_search_results
 from audio_memory.analysis.provider import ProviderAnalysisClient, ProviderAnalysisError
-from audio_memory.analysis.publisher import AnalysisOutcome
+from audio_memory.analysis.publisher import AnalysisOutcome, VersionPublisher
 from audio_memory.analysis.runner import AnalysisRunner
 from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
 from audio_memory.prompts.day_map_schema import (
@@ -208,6 +208,11 @@ async def test_no_search_day_map_goes_straight_to_forced_final_pass() -> None:
     assert provider.calls == ["autonomous-day-map", "autonomous-final-analysis"]
     assert runner.saved[-1]["search_rounds"] == []
     assert runner.saved[-1]["external_sources"] == []
+    assert runner.saved[-1]["search_phase"] == {
+        "status": "finalized",
+        "decision": decision(),
+        "completed_rounds": 0,
+    }
     assert "autonomous" in runner.saved[-1]
 
 
@@ -275,6 +280,39 @@ async def test_transient_native_search_uses_the_existing_single_retry() -> None:
     assert provider.attempts == 2
 
 
+class ExhaustedStructuredTransientProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__(initial="search", followup="finalize")
+        self.attempts = 0
+
+    async def native_search(
+        self, provider_id, *, queries, round_number, model_id=None, timeout_seconds=60
+    ):
+        self.attempts += 1
+        return NativeSearchCallResult(
+            provider_id=provider_id,
+            model_id=model_id or "kimi-k2.5",
+            tool_name="$web_search",
+            available=False,
+            errors=("Native web search is temporarily unavailable.",),
+            retriable=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_structured_search_failure_persists_and_finalizes_audio() -> None:
+    provider = ExhaustedStructuredTransientProvider()
+
+    runner, result = await run_pipeline(provider, [segment(0)])
+
+    assert result.cards
+    assert provider.attempts == 2
+    assert runner.saved[-1]["search_rounds"][0]["errors"] == [
+        "Native web search is temporarily unavailable."
+    ]
+    assert runner.saved[-1]["search_phase"]["status"] == "finalized"
+
+
 @pytest.mark.asyncio
 async def test_resume_executes_the_exact_staged_pending_round() -> None:
     first_source = source(1)
@@ -314,6 +352,46 @@ async def test_resume_executes_the_exact_staged_pending_round() -> None:
     assert "autonomous-day-map" not in provider.calls
     assert provider.native_calls[0] == (2, ["resume exact query"])
     assert all(round_number != 1 for round_number, _ in provider.native_calls)
+
+
+class FinalFailureProvider(RecordingProvider):
+    async def analyze_autonomous_final_analysis(
+        self, request, provider_snapshot, *, persisted_sources
+    ):
+        self.calls.append(request.scene_id)
+        raise ProviderAnalysisError("final call failed", code="provider_unavailable")
+
+
+class ResumeFinalOnlyProvider(RecordingProvider):
+    async def analyze_autonomous_day_map(self, *args, **kwargs):
+        raise AssertionError("resume must use staged Day Map")
+
+    async def analyze_autonomous_search_loop(self, *args, **kwargs):
+        raise AssertionError("resume must use staged terminal search phase")
+
+    async def native_search(self, *args, **kwargs):
+        raise AssertionError("resume must not repeat completed native search")
+
+
+@pytest.mark.asyncio
+async def test_terminal_decision_is_checkpointed_before_final_and_resumed_exactly() -> None:
+    staged: dict[str, object] = {}
+    first = FinalFailureProvider(initial="search", followup="finalize")
+
+    with pytest.raises(ProviderAnalysisError, match="final call failed"):
+        await run_pipeline(first, [segment(0)], staged)
+
+    assert staged["search_phase"] == {
+        "status": "finalized",
+        "decision": decision(),
+        "completed_rounds": 1,
+    }
+    resumed = ResumeFinalOnlyProvider()
+    _, result = await run_pipeline(resumed, [segment(0)], staged)
+
+    assert result.cards
+    assert resumed.calls == ["autonomous-final-analysis"]
+    assert resumed.native_calls == []
 
 
 class FallbackRunner(IsolatedRunner):
@@ -467,6 +545,50 @@ class FullRunHarness(AnalysisRunner):
 
     async def publish(self, *args, **kwargs):
         return AnalysisOutcome("batch-1", 2, 0)
+
+
+class EmptyProfileExtractor:
+    async def extract(self, transcript, cards, existing, provider_snapshot):
+        return []
+
+
+class FullFallbackPublicationHarness(FullRunHarness):
+    def __init__(self, provider):
+        super().__init__(provider, EmptyProfileExtractor())
+        self.published_overview = None
+
+    async def _transcript(self, *args):
+        return [segment(index, "录" * 6_000) for index in range(6)]
+
+    async def _long_autonomous(self, *args):
+        return final_result(), args[2]
+
+    async def publish(self, version_id, results, profile_delta, **kwargs):
+        publication = VersionPublisher._day_map_publication(
+            self.version, results.cards
+        )
+        assert publication is not None
+        self.published_overview = publication.overview
+        return AnalysisOutcome("batch-1", len(results.cards) + 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_full_fallback_run_stages_and_publishes_one_compatible_overview() -> None:
+    runner = FullFallbackPublicationHarness(
+        RejectingProvider("provider_input_rejected")
+    )
+
+    outcome = await runner.run("version-1")
+
+    staged = json.loads(runner.version.staged_results_json)
+    assert outcome.card_count == 2
+    assert runner.published_overview is not None
+    assert runner.published_overview.title == "本次概览"
+    assert staged["fallback"] == {
+        "route": "compact",
+        "reason": "provider_input_rejected",
+    }
+    assert staged["day_map"]["overview"]["title"] == "本次概览"
 
 
 @pytest.mark.asyncio

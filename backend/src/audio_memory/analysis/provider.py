@@ -266,7 +266,9 @@ class ProviderAnalysisClient:
                 )
             except httpx.RequestError:
                 return self._native_search_error(
-                    capability, "Native web search request failed due to a network error."
+                    capability,
+                    "Native web search request failed due to a network error.",
+                    retriable=True,
                 )
 
             if response.status_code in {401, 403}:
@@ -275,7 +277,15 @@ class ProviderAnalysisClient:
                 )
             if response.status_code == 429:
                 return self._native_search_error(
-                    capability, "Native web search is temporarily rate limited."
+                    capability,
+                    "Native web search is temporarily rate limited.",
+                    retriable=True,
+                )
+            if response.status_code >= 500:
+                return self._native_search_error(
+                    capability,
+                    f"Native web search request returned HTTP {response.status_code}.",
+                    retriable=True,
                 )
             if response.is_error:
                 return self._native_search_error(
@@ -320,13 +330,16 @@ class ProviderAnalysisClient:
         )
 
     @staticmethod
-    def _native_search_error(capability, error: str) -> NativeSearchCallResult:
+    def _native_search_error(
+        capability, error: str, *, retriable: bool = False
+    ) -> NativeSearchCallResult:
         return NativeSearchCallResult(
             provider_id=capability.provider_id,
             model_id=capability.model_id,
             tool_name=capability.tool_name,
             available=False,
             errors=(error,),
+            retriable=retriable,
         )
 
     async def generate(

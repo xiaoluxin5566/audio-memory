@@ -87,6 +87,7 @@ from audio_memory.prompts.schemas import (
     TodoSceneResult,
 )
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
+from audio_memory.providers.adapters.base import NativeSearchCallResult
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -321,16 +322,64 @@ class AnalysisRunner:
                 staged,
                 worker_owner_id,
             )
-            return result, transcript
-        return await self._long_autonomous(
-            version,
-            context,
-            transcript,
-            profile,
-            provider_snapshot,
-            staged,
-            worker_owner_id,
+            profile_transcript = transcript
+        else:
+            result, profile_transcript = await self._long_autonomous(
+                version,
+                context,
+                transcript,
+                profile,
+                provider_snapshot,
+                staged,
+                worker_owner_id,
+            )
+        await self._stage_compact_fallback(
+            version, result, staged, worker_owner_id
         )
+        return result, profile_transcript
+
+    async def _stage_compact_fallback(
+        self,
+        version,
+        result: AutonomousAnalysisResult,
+        staged: dict[str, object],
+        worker_owner_id: str | None,
+    ) -> None:
+        fallback_decision = NativeSearchDecision(
+            action="finalize",
+            rationale="Provider rejected full input; use the compatible audio-only result.",
+        )
+        if "day_map" not in staged:
+            staged["day_map"] = AutonomousDayMap.model_validate(
+                {
+                    "overview": {
+                        "title": "本次概览",
+                        "summary": (
+                            "完整转写超出当前模型的单次输入范围，"
+                            "已通过兼容分析流程生成以下结果。"
+                        ),
+                        "scene_ids": [],
+                    },
+                    "scenes": [],
+                    "search_action": fallback_decision.model_dump(mode="json"),
+                }
+            ).model_dump(mode="json")
+        staged.setdefault("search_rounds", [])
+        staged.setdefault("external_sources", [])
+        staged.setdefault(
+            "search_phase",
+            {
+                "status": "finalized",
+                "decision": fallback_decision.model_dump(mode="json"),
+                "completed_rounds": len(staged["search_rounds"]),
+            },
+        )
+        staged["fallback"] = {
+            "route": "compact",
+            "reason": "provider_input_rejected",
+        }
+        staged["autonomous"] = result.model_dump(mode="json")
+        await self._save_staged(version.id, staged, worker_owner_id)
 
     async def _day_map_autonomous(
         self,
@@ -361,8 +410,11 @@ class AnalysisRunner:
         self._validate_day_map_evidence(day_map, transcript)
 
         rounds, external_sources = self._staged_search_state(staged)
+        terminal_decision = self._staged_terminal_decision(staged, rounds)
         pending = self._pending_search_round(rounds)
-        if pending is not None:
+        if terminal_decision is not None:
+            decision = terminal_decision
+        elif pending is not None:
             decision = pending.decision
         elif not rounds:
             decision = day_map.search_action
@@ -463,6 +515,29 @@ class AnalysisRunner:
                 worker_owner_id,
             )
 
+        if terminal_decision is None:
+            if decision.action == "search":
+                if len(rounds) >= MAX_SEARCH_ROUNDS:
+                    decision = NativeSearchDecision(
+                        action="finalize",
+                        rationale=(
+                            "Search round limit reached; finalize with available sources."
+                        ),
+                    )
+                else:
+                    decision = NativeSearchDecision(
+                        action="finalize",
+                        rationale=(
+                            "Native search was unavailable; continue from audio only."
+                        ),
+                    )
+            staged["search_phase"] = {
+                "status": "finalized",
+                "decision": decision.model_dump(mode="json"),
+                "completed_rounds": len(rounds),
+            }
+            await self._save_staged(version.id, staged, worker_owner_id)
+
         if "autonomous" in staged:
             result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
         else:
@@ -500,16 +575,31 @@ class AnalysisRunner:
         last_error: ProviderAnalysisError | None = None
         for attempt in range(2):
             try:
-                return await self.provider.native_search(
+                result = await self.provider.native_search(
                     str(provider_snapshot["provider_id"]),
                     queries=[item.query for item in decision.queries],
                     round_number=round_number,
                     model_id=str(provider_snapshot.get("model_id") or "") or None,
                 )
+                if result.retriable and attempt == 0:
+                    await asyncio.sleep(0.25 * (2**attempt))
+                    continue
+                return result
             except ProviderAnalysisError as exc:
                 last_error = exc
-                if not exc.retriable or attempt == 1:
+                if not exc.retriable:
                     raise
+                if attempt == 1:
+                    return NativeSearchCallResult(
+                        provider_id=str(provider_snapshot["provider_id"]),
+                        model_id=(
+                            str(provider_snapshot.get("model_id") or "unknown")
+                        ),
+                        tool_name=None,
+                        available=False,
+                        errors=("Native web search remained temporarily unavailable.",),
+                        retriable=True,
+                    )
                 await asyncio.sleep(0.25 * (2**attempt))
         raise last_error or ProviderAnalysisError("Native search request failed")
 
@@ -534,6 +624,36 @@ class AnalysisRunner:
         return await self.provider.analyze_autonomous_search_loop(
             request, provider_snapshot
         )
+
+    @staticmethod
+    def _staged_terminal_decision(
+        staged: dict[str, object], rounds: list[SearchRound]
+    ) -> NativeSearchDecision | None:
+        raw_phase = staged.get("search_phase")
+        if raw_phase is None:
+            return None
+        if not isinstance(raw_phase, dict):
+            raise ProviderAnalysisError(
+                "Stored autonomous search phase is invalid",
+                code="autonomous_search_state_invalid",
+            )
+        try:
+            decision = NativeSearchDecision.model_validate(raw_phase.get("decision"))
+        except ValidationError as exc:
+            raise ProviderAnalysisError(
+                "Stored autonomous search phase is invalid",
+                code="autonomous_search_state_invalid",
+            ) from exc
+        if (
+            raw_phase.get("status") != "finalized"
+            or decision.action != "finalize"
+            or raw_phase.get("completed_rounds") != len(rounds)
+        ):
+            raise ProviderAnalysisError(
+                "Stored autonomous search phase is invalid",
+                code="autonomous_search_state_invalid",
+            )
+        return decision
 
     @staticmethod
     def _validate_day_map_evidence(

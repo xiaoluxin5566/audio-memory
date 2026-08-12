@@ -30,6 +30,8 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "autonomous_day_map_evidence_invalid",
         "autonomous_search_state_invalid",
         "autonomous_final_source_invalid",
+        "autonomous_day_map_invalid",
+        "autonomous_search_decision_invalid",
     }
 )
 

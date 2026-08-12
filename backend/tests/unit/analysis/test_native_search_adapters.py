@@ -213,6 +213,23 @@ async def test_kimi_native_search_without_provider_citations_is_provenance_unava
 
 
 @pytest.mark.asyncio
+async def test_provider_unavailable_search_is_a_structured_retriable_result() -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "temporarily unavailable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.native_search(
+            "kimi", queries=["verify claim"], round_number=1
+        )
+
+    assert result.available is False
+    assert result.retriable is True
+    assert result.sources == ()
+    assert result.errors == ("Native web search request returned HTTP 503.",)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("finish_reason", ["length", "content_filter", None])
 async def test_kimi_native_search_rejects_non_stop_terminal_reasons(
     finish_reason: str | None,

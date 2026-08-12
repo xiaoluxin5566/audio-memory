@@ -105,3 +105,67 @@ All 28 skips are the suite's explicitly disabled legacy Event Map pipeline.
   where Task 2 proved it. Unsupported adapters retain the pure-audio route.
 - No live provider capability probe or real-audio acceptance was performed;
   those remain Task 7, not Task 5.
+
+## Review fix round 1
+
+Addressed all four Important review findings:
+
+1. A typed full-input rejection now stages `fallback` metadata, a compatible
+   category-free Day Map with one `本次概览`, empty search/source state when
+   needed, a terminal search phase, and the compact-route final result. A
+   full-run regression exercises `run()` through the publisher's Day Map
+   contract and verifies the overview is counted exactly once.
+2. Every terminal search decision is persisted in `search_phase` before the
+   final model call. Its completed-round count is validated on resume. A final
+   call failure/resume regression proves that neither the decision model nor
+   native search runs again.
+3. `autonomous_day_map_invalid` and
+   `autonomous_search_decision_invalid` are accepted by the upload analysis
+   recovery allowlist. The upload API regression exercises their in-place
+   autonomous-version retry path.
+4. Native-search network, rate-limit, and provider-unavailable results now
+   carry a structured `retriable` marker. The runner retries one structured
+   failure once; a second unavailable result is persisted as the round error
+   and analysis continues to pure-audio finalization. Exhausted retriable
+   exceptions are likewise converted to a safe unavailable result rather than
+   blocking publication.
+
+The first combined RED run for the new review regressions produced seven
+expected failures: missing fallback overview state, missing terminal phase,
+missing structured retriable result metadata, and the two absent upload retry
+codes. After implementation, focused review coverage passed:
+
+```text
+PYTHONPATH=src .venv/bin/pytest \
+  tests/unit/analysis/test_day_map_runner.py \
+  tests/unit/analysis/test_native_search_adapters.py \
+  'tests/integration/test_upload_jobs.py::test_failed_model_analysis_retries_with_active_provider_without_whisper' \
+  -q
+
+38 passed in 1.84s
+```
+
+Relevant regression plus syntax compilation:
+
+```text
+PYTHONPATH=src .venv/bin/python -m compileall -q \
+  src tests/unit/analysis/test_day_map_runner.py
+PYTHONPATH=src .venv/bin/pytest \
+  tests/unit/analysis \
+  tests/unit/prompts/test_day_map_prompts.py \
+  tests/unit/content/test_feed_service.py \
+  tests/integration/test_upload_jobs.py -q
+
+158 passed in 4.42s
+```
+
+Fresh full backend verification:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  .venv/bin/pytest --import-mode=importlib -q
+
+746 passed, 28 skipped in 18.36s
+```
+
+All 28 skips remain the explicitly disabled legacy Event Map pipeline.

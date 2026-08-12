@@ -37,6 +37,7 @@ class NativeSearchCallResult:
     available: bool
     sources: tuple[ExternalSource, ...] = ()
     errors: tuple[str, ...] = ()
+    retriable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
