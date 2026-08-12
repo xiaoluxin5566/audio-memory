@@ -42,6 +42,7 @@ class AutonomousRecommendation(EvidencedModel):
 class AutonomousCard(EvidencedModel):
     title: str = Field(min_length=1, max_length=240)
     summary: str = Field(min_length=1, max_length=4_000)
+    external_source_ids: list[str] = Field(default_factory=list)
     content: list[AutonomousSection] = Field(
         min_length=2,
         json_schema_extra={
@@ -65,6 +66,8 @@ class AutonomousCard(EvidencedModel):
             raise ValueError("first content section must be scene_reconstruction")
         if not any(section.type == "analysis" for section in self.content[1:]):
             raise ValueError("card requires an analysis section after reconstruction")
+        if len(self.external_source_ids) != len(set(self.external_source_ids)):
+            raise ValueError("external_source_ids must be unique")
         return self
 
 
