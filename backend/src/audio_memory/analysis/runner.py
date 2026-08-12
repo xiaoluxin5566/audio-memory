@@ -538,44 +538,57 @@ class AnalysisRunner:
             }
             await self._save_staged(version.id, staged, worker_owner_id)
 
+        retry_from_empty_checkpoint = False
         if "autonomous" in staged:
-            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
-        else:
-            for attempt in range(2):
-                request = self.composer.compose_autonomous_final_analysis(
-                    transcript=transcript,
-                    day_map=day_map,
-                    external_sources=external_sources,
-                    profile=profile,
-                    schema=AutonomousAnalysisResult.model_json_schema(),
-                    semantic_retry=attempt > 0,
+            raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, transcript
                 )
-                await self._require_ownership(version.id, worker_owner_id)
-                await self._require_generation(version, worker_owner_id)
-                result = await self.provider.analyze_autonomous_final_analysis(
-                    request,
-                    provider_snapshot,
-                    persisted_sources=external_sources,
-                )
-                try:
-                    self._validate_autonomous_evidence(result, transcript)
-                except ValueError as exc:
-                    if attempt == 0:
-                        continue
-                    raise ProviderAnalysisError(
-                        "Autonomous final evidence is invalid",
-                        code="autonomous_final_evidence_invalid",
-                    ) from exc
-                result = self._sanitize_autonomous_evidence(result, transcript)
+            except ValueError:
+                if not self._canonical_autonomous_result_is_empty(
+                    raw_result, transcript
+                ):
+                    raise
+                staged.pop("autonomous")
+                await self._save_staged(version.id, staged, worker_owner_id)
+                retry_from_empty_checkpoint = True
+            else:
                 self._validate_external_source_references(result, external_sources)
-                break
+                return result
+
+        for attempt in range(1 if retry_from_empty_checkpoint else 2):
+            request = self.composer.compose_autonomous_final_analysis(
+                transcript=transcript,
+                day_map=day_map,
+                external_sources=external_sources,
+                profile=profile,
+                schema=AutonomousAnalysisResult.model_json_schema(),
+                semantic_retry=retry_from_empty_checkpoint or attempt > 0,
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            raw_result = await self.provider.analyze_autonomous_final_analysis(
+                request,
+                provider_snapshot,
+                persisted_sources=external_sources,
+            )
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, transcript
+                )
+            except ValueError as exc:
+                if attempt == 0 and not retry_from_empty_checkpoint:
+                    continue
+                raise ProviderAnalysisError(
+                    "Autonomous final evidence is invalid",
+                    code="autonomous_final_evidence_invalid",
+                ) from exc
+            self._validate_external_source_references(result, external_sources)
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
             return result
-        self._validate_autonomous_evidence(result, transcript)
-        result = self._sanitize_autonomous_evidence(result, transcript)
-        self._validate_external_source_references(result, external_sources)
-        return result
+        raise AssertionError("autonomous final analysis retry loop exhausted")
 
     async def _native_search_with_retry(
         self,
@@ -802,34 +815,48 @@ class AnalysisRunner:
     async def _direct_autonomous(
         self, version, transcript, profile, provider_snapshot, staged, worker_owner_id
     ) -> AutonomousAnalysisResult:
+        retry_from_empty_checkpoint = False
         if "autonomous" in staged:
-            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
-        else:
-            for attempt in range(2):
-                request = self.composer.compose_autonomous_analysis(
-                    transcript=transcript, profile=profile,
-                    schema=AutonomousAnalysisResult.model_json_schema(),
-                    semantic_retry=attempt > 0,
+            raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, transcript
                 )
-                await self._require_ownership(version.id, worker_owner_id)
-                await self._require_generation(version, worker_owner_id)
-                result = await self.provider.analyze_autonomous(request, provider_snapshot)
-                try:
-                    self._validate_autonomous_evidence(result, transcript)
-                except ValueError as exc:
-                    if attempt == 0:
-                        continue
-                    raise ProviderAnalysisError(
-                        "Autonomous result evidence is invalid",
-                        code="autonomous_evidence_invalid",
-                    ) from exc
-                result = self._sanitize_autonomous_evidence(result, transcript)
-                break
+            except ValueError:
+                if not self._canonical_autonomous_result_is_empty(
+                    raw_result, transcript
+                ):
+                    raise
+                staged.pop("autonomous")
+                await self._save_staged(version.id, staged, worker_owner_id)
+                retry_from_empty_checkpoint = True
+            else:
+                return result
+
+        for attempt in range(1 if retry_from_empty_checkpoint else 2):
+            request = self.composer.compose_autonomous_analysis(
+                transcript=transcript, profile=profile,
+                schema=AutonomousAnalysisResult.model_json_schema(),
+                semantic_retry=retry_from_empty_checkpoint or attempt > 0,
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            raw_result = await self.provider.analyze_autonomous(request, provider_snapshot)
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, transcript
+                )
+            except ValueError as exc:
+                if attempt == 0 and not retry_from_empty_checkpoint:
+                    continue
+                raise ProviderAnalysisError(
+                    "Autonomous result evidence is invalid",
+                    code="autonomous_evidence_invalid",
+                ) from exc
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
             return result
-        self._validate_autonomous_evidence(result, transcript)
-        return self._sanitize_autonomous_evidence(result, transcript)
+        raise AssertionError("autonomous direct analysis retry loop exhausted")
 
     async def _long_autonomous(
         self, version, context: LongContextPlan, transcript, profile,
@@ -922,39 +949,52 @@ class AnalysisRunner:
         retrieved = [
             item for item in transcript if str(item["segment_id"]) in requested_ids
         ]
+        retry_from_empty_checkpoint = False
         if "autonomous" in staged:
-            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
-        else:
-            notebook_payloads = [item.model_dump(mode="json") for item in notebooks]
-            for attempt in range(2):
-                request = self.composer.compose_autonomous_final(
-                    transcript=retrieved, notebooks=notebook_payloads,
-                    retrieval_plan=retrieval.model_dump(mode="json"), profile=profile,
-                    schema=AutonomousAnalysisResult.model_json_schema(),
-                    semantic_retry=attempt > 0,
+            raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, retrieved
                 )
-                await self._require_ownership(version.id, worker_owner_id)
-                await self._require_generation(version, worker_owner_id)
-                result = await self.provider.analyze_autonomous_final(
-                    request, provider_snapshot
+            except ValueError:
+                if not self._canonical_autonomous_result_is_empty(
+                    raw_result, retrieved
+                ):
+                    raise
+                staged.pop("autonomous")
+                await self._save_staged(version.id, staged, worker_owner_id)
+                retry_from_empty_checkpoint = True
+            else:
+                return result, retrieved
+
+        notebook_payloads = [item.model_dump(mode="json") for item in notebooks]
+        for attempt in range(1 if retry_from_empty_checkpoint else 2):
+            request = self.composer.compose_autonomous_final(
+                transcript=retrieved, notebooks=notebook_payloads,
+                retrieval_plan=retrieval.model_dump(mode="json"), profile=profile,
+                schema=AutonomousAnalysisResult.model_json_schema(),
+                semantic_retry=retry_from_empty_checkpoint or attempt > 0,
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            raw_result = await self.provider.analyze_autonomous_final(
+                request, provider_snapshot
+            )
+            try:
+                result = self._validated_canonical_autonomous_result(
+                    raw_result, retrieved
                 )
-                try:
-                    self._validate_autonomous_evidence(result, retrieved)
-                except ValueError as exc:
-                    if attempt == 0:
-                        continue
-                    raise ProviderAnalysisError(
-                        "Autonomous final evidence is invalid",
-                        code="autonomous_final_evidence_invalid",
-                    ) from exc
-                result = self._sanitize_autonomous_evidence(result, retrieved)
-                break
+            except ValueError as exc:
+                if attempt == 0 and not retry_from_empty_checkpoint:
+                    continue
+                raise ProviderAnalysisError(
+                    "Autonomous final evidence is invalid",
+                    code="autonomous_final_evidence_invalid",
+                ) from exc
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
             return result, retrieved
-        self._validate_autonomous_evidence(result, retrieved)
-        result = self._sanitize_autonomous_evidence(result, retrieved)
-        return result, retrieved
+        raise AssertionError("autonomous long analysis retry loop exhausted")
     @staticmethod
     def _validate_autonomous_evidence(
         result: AutonomousAnalysisResult,
@@ -974,6 +1014,29 @@ class AnalysisRunner:
                 normalized_source = re.sub(r"[^\w\u4e00-\u9fff]", "", source)
                 if not normalized_quote or normalized_quote not in normalized_source:
                     raise ValueError("autonomous quote is not verbatim evidence")
+
+    @classmethod
+    def _validated_canonical_autonomous_result(
+        cls,
+        result: AutonomousAnalysisResult,
+        transcript: list[dict[str, object]],
+    ) -> AutonomousAnalysisResult:
+        cls._validate_autonomous_evidence(result, transcript)
+        canonical = cls._sanitize_autonomous_evidence(result, transcript)
+        cls._validate_autonomous_evidence(canonical, transcript)
+        return canonical
+
+    @classmethod
+    def _canonical_autonomous_result_is_empty(
+        cls,
+        result: AutonomousAnalysisResult,
+        transcript: list[dict[str, object]],
+    ) -> bool:
+        canonical = cls._sanitize_autonomous_evidence(result, transcript)
+        return (
+            sum(len(str(item["text"])) for item in transcript) >= 1_000
+            and not canonical.cards
+        )
 
     @staticmethod
     def _sanitize_autonomous_evidence(

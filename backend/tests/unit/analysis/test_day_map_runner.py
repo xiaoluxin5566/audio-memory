@@ -448,10 +448,15 @@ async def test_exhausted_final_evidence_retry_is_typed() -> None:
 
 
 class EmptyEvidenceCardProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.final_requests = []
+
     async def analyze_autonomous_final_analysis(
         self, request, provider_snapshot, *, persisted_sources
     ):
         self.calls.append(request.scene_id)
+        self.final_requests.append(request)
         result = final_result()
         result.cards[0].evidence_segment_ids = []
         for section in result.cards[0].content:
@@ -477,6 +482,40 @@ async def test_fresh_and_resumed_final_results_share_canonical_empty_evidence_ou
         "autonomous-final-analysis",
     ]
     assert resumed_provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_large_canonical_empty_final_result_retries_consistently_fresh_and_resumed() -> None:
+    transcript = [segment(0, "录" * 1_000)]
+    staged: dict[str, object] = {}
+    fresh_provider = EmptyEvidenceCardProvider()
+
+    with pytest.raises(ProviderAnalysisError) as fresh_error:
+        await run_pipeline(fresh_provider, transcript, staged)
+
+    assert fresh_error.value.code == "autonomous_final_evidence_invalid"
+    assert "autonomous" not in staged
+    assert len(fresh_provider.final_requests) == 2
+    assert fresh_provider.final_requests[1].user_data == (
+        fresh_provider.final_requests[0].user_data
+    )
+    assert "上一轮 JSON 或证据未通过校验" in (
+        fresh_provider.final_requests[1].common_rules
+    )
+
+    # Simulate a checkpoint made by the previous fresh-path behavior.
+    staged["autonomous"] = {"cards": []}
+    resumed_provider = EmptyEvidenceCardProvider()
+
+    with pytest.raises(ProviderAnalysisError) as resumed_error:
+        await run_pipeline(resumed_provider, transcript, staged)
+
+    assert resumed_error.value.code == fresh_error.value.code
+    assert "autonomous" not in staged
+    assert len(resumed_provider.final_requests) == 1
+    assert "上一轮 JSON 或证据未通过校验" in (
+        resumed_provider.final_requests[0].common_rules
+    )
 
 
 class DirectInvalidEvidenceThenValidProvider(RecordingProvider):
@@ -512,6 +551,45 @@ async def test_direct_route_retries_raw_invalid_evidence_before_sanitization() -
 
     assert result.cards
     assert len(provider.direct_requests) == 2
+    assert "上一轮 JSON 或证据未通过校验" in provider.direct_requests[1].common_rules
+
+
+class DirectCanonicalEmptyEvidenceProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.direct_requests = []
+
+    async def analyze_autonomous(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        self.direct_requests.append(request)
+        result = final_result()
+        result.cards[0].evidence_segment_ids = []
+        for section in result.cards[0].content:
+            section.evidence_segment_ids = []
+        return result
+
+
+@pytest.mark.asyncio
+async def test_direct_large_canonical_empty_result_retries_then_raises_typed_error() -> None:
+    provider = DirectCanonicalEmptyEvidenceProvider()
+    runner = IsolatedRunner(provider)
+    version = type("Version", (), {"id": "version-1"})()
+    staged: dict[str, object] = {}
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner._direct_autonomous(
+            version,
+            [segment(0, "录" * 1_000)],
+            [],
+            {"provider_id": "kimi", "model_id": "kimi-k2.5"},
+            staged,
+            None,
+        )
+
+    assert raised.value.code == "autonomous_evidence_invalid"
+    assert "autonomous" not in staged
+    assert len(provider.direct_requests) == 2
+    assert provider.direct_requests[1].user_data == provider.direct_requests[0].user_data
     assert "上一轮 JSON 或证据未通过校验" in provider.direct_requests[1].common_rules
 
 
