@@ -91,6 +91,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
     assert requests[0]["tools"] == [
         {"type": "builtin_function", "function": {"name": "$web_search"}}
     ]
+    assert requests[1]["messages"][:2] == requests[0]["messages"]
     tool_message = requests[1]["messages"][-1]
     assert tool_message == {
         "role": "tool",
@@ -181,3 +182,65 @@ async def test_kimi_malformed_citation_is_returned_as_error_without_inventing_so
     assert result.available is True
     assert result.sources == ()
     assert result.errors == ("Citation 0 is invalid: url must be an absolute HTTP(S) URL",)
+
+
+@pytest.mark.asyncio
+async def test_kimi_native_search_without_provider_citations_is_provenance_unavailable() -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "No source envelope."},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.native_search(
+            "kimi", queries=["source-free response"], round_number=1
+        )
+
+    assert result.available is False
+    assert result.sources == ()
+    assert result.errors == (
+        "Native web search returned no provider-issued structured citations.",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", None])
+async def test_kimi_native_search_rejects_non_stop_terminal_reasons(
+    finish_reason: str | None,
+) -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        choice: dict[str, object] = {
+            "message": {
+                "role": "assistant",
+                "content": "A response that must not be considered complete.",
+                "citations": [
+                    {
+                        "id": "source_001",
+                        "title": "Source",
+                        "url": "https://example.com/source",
+                    }
+                ],
+            }
+        }
+        if finish_reason is not None:
+            choice["finish_reason"] = finish_reason
+        return httpx.Response(200, json={"choices": [choice]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.native_search(
+            "kimi", queries=["terminal state"], round_number=1
+        )
+
+    assert result.available is False
+    assert result.sources == ()
+    assert result.errors == ("Native web search did not complete normally.",)

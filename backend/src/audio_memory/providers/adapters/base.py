@@ -99,6 +99,10 @@ class ChatCompletionsAdapter:
         """Return tool responses for a continuation, or None when a turn is final."""
         return None
 
+    def native_search_completed(self, body: object) -> bool:
+        """Confirm that a terminal response completed the native search normally."""
+        return True
+
     def native_search_citations(self, body: object) -> list[object]:
         """Extract provider citations without treating model prose as a source."""
         return []

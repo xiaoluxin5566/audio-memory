@@ -185,6 +185,12 @@ class ProviderAnalysisClient:
                 messages=messages,
                 queries=queries,
             )
+            payload_messages = payload.get("messages")
+            if not isinstance(payload_messages, list):
+                return self._native_search_error(
+                    capability, "Native web search request could not preserve its conversation."
+                )
+            messages = list(payload_messages)
             try:
                 response = await self.client.post(
                     adapter.config.endpoint,
@@ -220,7 +226,16 @@ class ProviderAnalysisClient:
                 if tool_messages is not None:
                     messages.extend(tool_messages)
                     continue
+                if not adapter.native_search_completed(body):
+                    return self._native_search_error(
+                        capability, "Native web search did not complete normally."
+                    )
                 citations = adapter.native_search_citations(body)
+                if not citations:
+                    return self._native_search_error(
+                        capability,
+                        "Native web search returned no provider-issued structured citations.",
+                    )
                 sources, errors = adapter.normalize_native_search_citations(
                     citations=citations, round_number=round_number
                 )

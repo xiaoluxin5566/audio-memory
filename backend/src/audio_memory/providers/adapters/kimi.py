@@ -96,6 +96,9 @@ class KimiAdapter(ChatCompletionsAdapter):
             raise ValueError("Kimi native search citations are invalid.")
         return citations
 
+    def native_search_completed(self, body: object) -> bool:
+        return self._choice(body).get("finish_reason") == "stop"
+
     @staticmethod
     def _choice(body: object) -> dict[str, object]:
         if not isinstance(body, dict):
