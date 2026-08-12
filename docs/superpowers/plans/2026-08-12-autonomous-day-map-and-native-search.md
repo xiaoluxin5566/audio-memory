@@ -116,11 +116,11 @@
 1. Add integration tests for old batch compatibility, native-search-unavailable fallback, five-round exhaustion, restart/resume, source/evidence separation, and the no-external-profile invariant.
 2. Run backend full suite from `backend`: `pytest -q`; run frontend test/build from `prototype` using its project scripts. Fix any regressions before proceeding.
 3. Run configured-provider capability probes using a non-user batch/test request only. Record which configured provider/model supports native search, exact fallback behavior, and whether no extra key was used. Never log secrets.
-4. Run one real four-file batch through the new branch, then manually inspect: exactly one `本次概览`; autonomous scenes include child interaction and identifiable media/program content when present; any web-enhanced claim has a real source; no external data enters the hidden profile; old historic cards remain visible.
-5. Record observed timings, card quality observations, failures/fallbacks, and test commands/results in the acceptance document. Commit: `test: verify day map and native search flow`.
+4. Re-run all previously uploaded audio through the new branch, then manually inspect every resulting batch: exactly one `本次概览`; autonomous scenes include child interaction and identifiable media/program content when present; any web-enhanced claim has a real source; no external data enters the hidden profile; old historic cards remain visible. Treat the four-file July 30 batch as a focused quality comparison, not the execution limit.
+5. Record all-batch timings, card quality observations, failures/fallbacks, and test commands/results in the acceptance document. Commit: `test: verify day map and native search flow`.
 
 ## Final verification and handoff
 
 1. Check `git status --short` and ensure only intended tracked implementation files are staged/committed; preserve existing unrelated untracked files.
 2. Re-run the exact regression commands recorded in Task 7 after the final commit.
-3. Summarize provider capability outcomes, full-read fallback condition, observed four-file batch outcome, and any remaining product decision for the user. Do not claim native search works for a provider until its configured runtime probe succeeds.
+3. Summarize provider capability outcomes, full-read fallback condition, observed all-upload batch outcome (including the four-file July 30 comparison), and any remaining product decision for the user. Do not claim native search works for a provider until its configured runtime probe succeeds.
