@@ -153,6 +153,18 @@ class InvalidRetrievalOnceProvider(LongRouteProvider):
         })
 
 
+class MixedInvalidFinalEvidenceProvider(LongRouteProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.final_requests = []
+
+    async def analyze_autonomous_final(self, request, provider_snapshot):
+        self.final_requests.append(request)
+        result = await super().analyze_autonomous_final(request, provider_snapshot)
+        result.cards[0].content[1].evidence_segment_ids = ["invented-segment"]
+        return result
+
+
 @pytest.mark.asyncio
 async def test_long_route_stages_notes_retrieves_exact_source_in_order_and_resumes() -> None:
     transcript = [segment(index, "录" * 6_000) for index in range(6)]
@@ -227,3 +239,23 @@ async def test_long_route_repairs_invalid_retrieval_ids_once() -> None:
     assert provider.retrieval_attempts == 2
     assert [item["segment_id"] for item in retrieved] == ["seg_1", "seg_4"]
     assert result.cards
+
+
+@pytest.mark.asyncio
+async def test_long_final_mixed_invalid_evidence_fails_after_one_context_retry() -> None:
+    transcript = [segment(index, "录" * 6_000) for index in range(6)]
+    context = plan_autonomous_context(transcript)
+    assert isinstance(context, LongContextPlan)
+    provider = MixedInvalidFinalEvidenceProvider()
+    runner = IsolatedLongRunner(provider)
+    version = type("Version", (), {"id": "version-1"})()
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner._long_autonomous(
+            version, context, transcript, [], {"provider_id": "deepseek"}, {}, None
+        )
+
+    assert raised.value.code == "autonomous_final_evidence_invalid"
+    assert len(provider.final_requests) == 2
+    assert provider.final_requests[1].user_data == provider.final_requests[0].user_data
+    assert "服务端校验反馈" in provider.final_requests[1].common_rules

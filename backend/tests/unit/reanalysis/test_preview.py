@@ -393,6 +393,46 @@ async def test_batch_creation_persists_frozen_snapshot_and_newest_first_items(
 
 
 @pytest.mark.asyncio
+async def test_active_batch_replay_requires_valid_token_and_exact_signed_scope(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import ReanalysisService, SnapshotChangedError
+
+    database = Database(tmp_path / "active-replay-scope.sqlite3")
+    await database.create_schema()
+    await seed_completed_history(database)
+    prompts = PromptStore(tmp_path / "active-replay-scope-prompts")
+    prompts.initialize()
+    provider = AvailableProvider()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"r" * 32),
+        ),
+        provider_coordinator=provider,
+    )
+    all_history = await service.preview()
+    selected_history = await service.preview(("batch-2",))
+    created = await service.create_batch(all_history.preview_token)
+
+    replayed = await service.create_batch(all_history.preview_token)
+    assert replayed.id == created.id
+
+    with pytest.raises(SnapshotChangedError):
+        await service.create_batch("not-a-signed-preview-token")
+    with pytest.raises(SnapshotChangedError):
+        await service.create_batch(
+            selected_history.preview_token,
+            ("batch-2",),
+        )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_identical_prompt_content_with_new_version_rejects_old_preview(
     tmp_path: Path,
 ) -> None:

@@ -381,6 +381,22 @@ class InvalidEvidenceThenValidProvider(RecordingProvider):
         return final_result()
 
 
+class MixedInvalidEvidenceThenValidProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.final_requests = []
+
+    async def analyze_autonomous_final_analysis(
+        self, request, provider_snapshot, *, persisted_sources
+    ):
+        self.calls.append(request.scene_id)
+        self.final_requests.append(request)
+        result = final_result()
+        if len(self.final_requests) == 1:
+            result.cards[0].content[1].evidence_segment_ids = ["unknown-segment"]
+        return result
+
+
 @pytest.mark.asyncio
 async def test_final_evidence_failure_gets_one_semantic_retry() -> None:
     provider = InvalidEvidenceThenValidProvider()
@@ -395,6 +411,18 @@ async def test_final_evidence_failure_gets_one_semantic_retry() -> None:
     ]
     assert len(provider.final_requests) == 2
     assert "上一轮 JSON 或证据未通过校验" not in provider.final_requests[0].common_rules
+    assert "上一轮 JSON 或证据未通过校验" in provider.final_requests[1].common_rules
+
+
+@pytest.mark.asyncio
+async def test_mixed_invalid_final_evidence_preserves_context_for_one_retry() -> None:
+    provider = MixedInvalidEvidenceThenValidProvider()
+
+    _, result = await run_pipeline(provider, [segment(0, "录" * 1_000)])
+
+    assert result.cards
+    assert len(provider.final_requests) == 2
+    assert provider.final_requests[1].user_data == provider.final_requests[0].user_data
     assert "上一轮 JSON 或证据未通过校验" in provider.final_requests[1].common_rules
 
 

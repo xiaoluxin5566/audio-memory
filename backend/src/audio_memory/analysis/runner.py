@@ -558,7 +558,6 @@ class AnalysisRunner:
                     persisted_sources=external_sources,
                 )
                 try:
-                    result = self._sanitize_autonomous_evidence(result, transcript)
                     self._validate_autonomous_evidence(result, transcript)
                 except ValueError as exc:
                     if attempt == 0:
@@ -571,8 +570,9 @@ class AnalysisRunner:
                 break
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
-        result = self._sanitize_autonomous_evidence(result, transcript)
+            return result
         self._validate_autonomous_evidence(result, transcript)
+        result = self._sanitize_autonomous_evidence(result, transcript)
         self._validate_external_source_references(result, external_sources)
         return result
 
@@ -938,7 +938,6 @@ class AnalysisRunner:
                     request, provider_snapshot
                 )
                 try:
-                    result = self._sanitize_autonomous_evidence(result, retrieved)
                     self._validate_autonomous_evidence(result, retrieved)
                 except ValueError as exc:
                     if attempt == 0:
@@ -950,8 +949,9 @@ class AnalysisRunner:
                 break
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
-        result = self._sanitize_autonomous_evidence(result, retrieved)
+            return result, retrieved
         self._validate_autonomous_evidence(result, retrieved)
+        result = self._sanitize_autonomous_evidence(result, retrieved)
         return result, retrieved
     @staticmethod
     def _validate_autonomous_evidence(

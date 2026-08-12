@@ -86,9 +86,6 @@ class ReanalysisService:
                     "duplicate_source_batch_ids",
                     "Selected source batch IDs must be unique",
                 )
-            active = await self._active_batch()
-            if active is not None:
-                return await self._view(active.id)
             try:
                 supplied = self.preview_builder.signer.verify(preview_token)
             except (PreviewTokenExpiredError, PreviewTokenInvalidError) as exc:
@@ -115,6 +112,11 @@ class ReanalysisService:
                 raise SnapshotChangedError(
                     "Selected history does not match the signed preview"
                 )
+            active = await self._active_batch()
+            if active is not None:
+                active_view = await self._view(active.id)
+                self._require_matching_active_replay(supplied, active_view)
+                return active_view
             validation = await self.provider_coordinator.validate_saved(provider_id)
             if not bool(getattr(validation, "ok", False)):
                 raise PreviewBlockedError(["provider_validation_failed"])
@@ -151,6 +153,21 @@ class ReanalysisService:
                                 .limit(1)
                             )
                             if active is not None:
+                                active_source_ids = list(
+                                    await session.scalars(
+                                        select(ReanalysisItem.source_batch_id)
+                                        .where(
+                                            ReanalysisItem.reanalysis_batch_id
+                                            == active.id
+                                        )
+                                        .order_by(ReanalysisItem.position)
+                                    )
+                                )
+                                self._require_matching_active_replay(
+                                    supplied,
+                                    active,
+                                    source_batch_ids=active_source_ids,
+                                )
                                 batch_id = active.id
                             else:
                                 session.add(
@@ -193,6 +210,27 @@ class ReanalysisService:
             if self.worker is not None:
                 await self.worker.notify()
             return await self._view(batch_id)
+
+    @staticmethod
+    def _require_matching_active_replay(
+        supplied: dict[str, object],
+        active,
+        *,
+        source_batch_ids: list[str] | None = None,
+    ) -> None:
+        if source_batch_ids is None:
+            source_batch_ids = [item.source_batch_id for item in active.items]
+        comparable = {
+            "provider_id": active.provider_id,
+            "model_id": active.model_id,
+            "credential_generation": active.credential_generation,
+            "snapshot_hash": active.snapshot_hash,
+            "source_batch_ids": source_batch_ids,
+        }
+        if any(supplied.get(key) != value for key, value in comparable.items()):
+            raise SnapshotChangedError(
+                "Active reanalysis batch was created from a different preview"
+            )
 
     @staticmethod
     def _require_matching_snapshot(supplied, current) -> None:
