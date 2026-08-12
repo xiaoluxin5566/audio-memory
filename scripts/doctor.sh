@@ -40,7 +40,7 @@ if [ "${AUDIO_MEMORY_DOCTOR_CORE_ONLY:-0}" != "1" ]; then
 fi
 
 if [ -f "$APP_DATA/audio-memory.sqlite3" ]; then
-  check '本地数据库已迁移至 0011' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
+  check '本地数据库已迁移至 0012' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
   check '历史重分析状态已恢复' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" recovery "$APP_DATA/audio-memory.sqlite3"
   if command -v sqlite3 >/dev/null 2>&1; then
     LAST_ERROR="$(sqlite3 -readonly "$APP_DATA/audio-memory.sqlite3" "select coalesce(last_validation_error_message,'') from provider_metadata where last_validation_error_message is not null order by last_validated_at desc limit 1;" 2>/dev/null || true)"

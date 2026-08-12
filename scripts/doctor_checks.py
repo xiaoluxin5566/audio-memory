@@ -31,7 +31,7 @@ DIARIZATION_HASHES = {
 DIARIZATION_SIZES = {
     "10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e": 1540514,
 }
-EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 12)]
+EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 13)]
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -166,13 +166,21 @@ def check_database(database: Path) -> bool:
     required = {
         "alembic_version": {"version_num"},
         "reanalysis_batches": {"id", "status"},
-        "analysis_versions": {"id", "status", "worker_owner_id", "lease_expires_at"},
+        "analysis_versions": {
+            "id",
+            "status",
+            "worker_owner_id",
+            "lease_expires_at",
+            "batch_overview_json",
+            "search_rounds_json",
+            "external_sources_json",
+        },
         "reanalysis_items": {"analysis_version_id", "status", "completed_at"},
     }
     try:
         with _connect(database) as connection:
             revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
-            return revisions == [("0011",)] and all(
+            return revisions == [("0012",)] and all(
                 columns.issubset(_columns(connection, table))
                 for table, columns in required.items()
             )

@@ -273,6 +273,9 @@ class AnalysisVersion(Base):
     staged_results_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="{}"
     )
+    batch_overview_json: Mapped[str | None] = mapped_column(Text)
+    search_rounds_json: Mapped[str | None] = mapped_column(Text)
+    external_sources_json: Mapped[str | None] = mapped_column(Text)
     published_card_count: Mapped[int | None] = mapped_column(Integer)
     published_todo_count: Mapped[int | None] = mapped_column(Integer)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)

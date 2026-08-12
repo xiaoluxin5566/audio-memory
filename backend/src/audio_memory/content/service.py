@@ -110,18 +110,21 @@ class ContentService:
                 {"role": message.role, "content": message.content}
             )
         days: dict[str, list[dict[str, object]]] = defaultdict(list)
-        for batch, card, _ in rows:
-            days[batch.natural_date].append(
-                {
-                    "id": card.id,
-                    "batch_id": batch.id,
-                    "scene_id": card.scene_id,
-                    "uploaded_at": batch.uploaded_at,
-                    "payload": json.loads(card.payload_json),
-                    "evidence": evidence_by_card[card.id],
-                    "qa": qa_by_card[card.id],
-                }
-            )
+        for batch, card, version in rows:
+            payload = json.loads(card.payload_json)
+            card_view = {
+                "id": card.id,
+                "batch_id": batch.id,
+                "scene_id": card.scene_id,
+                "uploaded_at": batch.uploaded_at,
+                "payload": payload,
+                "evidence": evidence_by_card[card.id],
+                "qa": qa_by_card[card.id],
+            }
+            sources = self._external_source_view(version, payload)
+            if sources is not None:
+                card_view["sources"] = sources
+            days[batch.natural_date].append(card_view)
         todos.sort(key=lambda item: item.created_at, reverse=True)
         todos.sort(
             key=lambda item: (
@@ -139,6 +142,45 @@ class ContentService:
                 for date, cards in sorted(days.items(), reverse=True)
             ],
         }
+
+    @classmethod
+    def _external_source_view(
+        cls,
+        version: AnalysisVersion,
+        payload: object,
+    ) -> list[dict[str, object]] | None:
+        if version.external_sources_json is None:
+            return None
+        try:
+            raw_sources = json.loads(version.external_sources_json)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw_sources, list):
+            return []
+        sources_by_id = {
+            item["source_id"]: item
+            for item in raw_sources
+            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+        }
+        return [
+            sources_by_id[source_id]
+            for source_id in cls._collect_external_source_ids(payload)
+            if source_id in sources_by_id
+        ]
+
+    @classmethod
+    def _collect_external_source_ids(cls, value: object) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            source_ids = value.get("external_source_ids")
+            if isinstance(source_ids, list):
+                found.extend(item for item in source_ids if isinstance(item, str))
+            for nested in value.values():
+                found.extend(cls._collect_external_source_ids(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.extend(cls._collect_external_source_ids(nested))
+        return list(dict.fromkeys(found))
 
     async def evidence_audio(self, card_id: str, segment_id: str) -> Path:
         match = re.fullmatch(r"seg_(\d+)_(\d+)", segment_id)
