@@ -143,4 +143,17 @@ class SearchRound(StrictModel):
             raise ValueError("source_id values must be unique within a search round")
         if any(source.search_round != self.round_number for source in self.sources):
             raise ValueError("sources must retain their originating search round")
+        results_by_id = {
+            result.provider_result_id: result for result in self.results
+        }
+        for source in self.sources:
+            result = results_by_id.get(source.provider_result_id)
+            if result is None:
+                raise ValueError(
+                    "each source must map to a provider result in the same round"
+                )
+            if source.title != result.title or source.url != result.url:
+                raise ValueError(
+                    "sources must retain the title and URL of their provider result"
+                )
         return self

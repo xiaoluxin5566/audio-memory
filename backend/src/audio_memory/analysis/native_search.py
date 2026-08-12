@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hashlib import sha256
+
 from audio_memory.prompts.day_map_schema import (
     MAX_SEARCH_ROUNDS,
     ExternalSource,
@@ -51,7 +53,7 @@ def normalize_search_results(
 
     return [
         ExternalSource(
-            source_id=f"source_{provider_id}_{result.provider_result_id}",
+            source_id=_source_id(provider_id, result.provider_result_id),
             provider_id=provider_id,
             provider_result_id=result.provider_result_id,
             title=result.title,
@@ -63,3 +65,9 @@ def normalize_search_results(
         )
         for result in results
     ]
+
+
+def _source_id(provider_id: str, provider_result_id: str) -> str:
+    """Create a bounded ID while retaining both original IDs in source fields."""
+    identity = f"{provider_id}\0{provider_result_id}".encode("utf-8")
+    return f"source_{sha256(identity).hexdigest()}"
