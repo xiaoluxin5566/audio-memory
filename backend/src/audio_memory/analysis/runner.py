@@ -566,6 +566,7 @@ class AnalysisRunner:
                         "Autonomous final evidence is invalid",
                         code="autonomous_final_evidence_invalid",
                     ) from exc
+                result = self._sanitize_autonomous_evidence(result, transcript)
                 self._validate_external_source_references(result, external_sources)
                 break
             staged["autonomous"] = result.model_dump(mode="json")
@@ -814,7 +815,6 @@ class AnalysisRunner:
                 await self._require_generation(version, worker_owner_id)
                 result = await self.provider.analyze_autonomous(request, provider_snapshot)
                 try:
-                    result = self._sanitize_autonomous_evidence(result, transcript)
                     self._validate_autonomous_evidence(result, transcript)
                 except ValueError as exc:
                     if attempt == 0:
@@ -823,12 +823,13 @@ class AnalysisRunner:
                         "Autonomous result evidence is invalid",
                         code="autonomous_evidence_invalid",
                     ) from exc
+                result = self._sanitize_autonomous_evidence(result, transcript)
                 break
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
-        result = self._sanitize_autonomous_evidence(result, transcript)
+            return result
         self._validate_autonomous_evidence(result, transcript)
-        return result
+        return self._sanitize_autonomous_evidence(result, transcript)
 
     async def _long_autonomous(
         self, version, context: LongContextPlan, transcript, profile,
@@ -946,6 +947,7 @@ class AnalysisRunner:
                         "Autonomous final evidence is invalid",
                         code="autonomous_final_evidence_invalid",
                     ) from exc
+                result = self._sanitize_autonomous_evidence(result, retrieved)
                 break
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)

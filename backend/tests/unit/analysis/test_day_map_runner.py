@@ -447,6 +447,74 @@ async def test_exhausted_final_evidence_retry_is_typed() -> None:
     assert raised.value.code == "autonomous_final_evidence_invalid"
 
 
+class EmptyEvidenceCardProvider(RecordingProvider):
+    async def analyze_autonomous_final_analysis(
+        self, request, provider_snapshot, *, persisted_sources
+    ):
+        self.calls.append(request.scene_id)
+        result = final_result()
+        result.cards[0].evidence_segment_ids = []
+        for section in result.cards[0].content:
+            section.evidence_segment_ids = []
+        return result
+
+
+@pytest.mark.asyncio
+async def test_fresh_and_resumed_final_results_share_canonical_empty_evidence_output() -> None:
+    staged: dict[str, object] = {}
+    fresh_provider = EmptyEvidenceCardProvider()
+
+    _, fresh = await run_pipeline(fresh_provider, [segment(0)], staged)
+
+    resumed_provider = ResumeFinalOnlyProvider()
+    _, resumed = await run_pipeline(resumed_provider, [segment(0)], staged)
+
+    assert fresh.model_dump(mode="json") == {"cards": []}
+    assert resumed.model_dump(mode="json") == fresh.model_dump(mode="json")
+    assert staged["autonomous"] == fresh.model_dump(mode="json")
+    assert fresh_provider.calls == [
+        "autonomous-day-map",
+        "autonomous-final-analysis",
+    ]
+    assert resumed_provider.calls == []
+
+
+class DirectInvalidEvidenceThenValidProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.direct_requests = []
+
+    async def analyze_autonomous(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        self.direct_requests.append(request)
+        result = final_result()
+        if len(self.direct_requests) == 1:
+            result.cards[0].evidence_segment_ids = ["unknown-segment"]
+            for section in result.cards[0].content:
+                section.evidence_segment_ids = ["unknown-segment"]
+        return result
+
+
+@pytest.mark.asyncio
+async def test_direct_route_retries_raw_invalid_evidence_before_sanitization() -> None:
+    provider = DirectInvalidEvidenceThenValidProvider()
+    runner = IsolatedRunner(provider)
+    version = type("Version", (), {"id": "version-1"})()
+
+    result = await runner._direct_autonomous(
+        version,
+        [segment(0)],
+        [],
+        {"provider_id": "kimi", "model_id": "kimi-k2.5"},
+        {},
+        None,
+    )
+
+    assert result.cards
+    assert len(provider.direct_requests) == 2
+    assert "上一轮 JSON 或证据未通过校验" in provider.direct_requests[1].common_rules
+
+
 class ResumeFinalOnlyProvider(RecordingProvider):
     async def analyze_autonomous_day_map(self, *args, **kwargs):
         raise AssertionError("resume must use staged Day Map")
