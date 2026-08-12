@@ -12,6 +12,7 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "rate_limited",
         "provider_unavailable",
         "content_rejected",
+        "provider_input_rejected",
         "model_response_invalid",
         "model_output_truncated",
         "event_map_schema_invalid",
@@ -26,6 +27,9 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "autonomous_retrieval_evidence_invalid",
         "autonomous_final_schema_invalid",
         "autonomous_final_evidence_invalid",
+        "autonomous_day_map_evidence_invalid",
+        "autonomous_search_state_invalid",
+        "autonomous_final_source_invalid",
     }
 )
 

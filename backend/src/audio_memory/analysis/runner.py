@@ -19,6 +19,7 @@ from audio_memory.analysis.autonomous_context import (
 )
 from audio_memory.analysis.provider import ProviderAnalysisError
 from audio_memory.analysis.publisher import AnalysisOutcome
+from audio_memory.analysis.native_search import validate_search_round
 from audio_memory.analysis.clusters import (
     build_transcript_clusters,
     event_hints_for_cluster,
@@ -60,6 +61,14 @@ from audio_memory.prompts.autonomous_schema import (
     AutonomousRetrievalPlan,
     InformationNotebook,
 )
+from audio_memory.prompts.day_map_schema import (
+    MAX_SEARCH_ROUNDS,
+    AutonomousDayMap,
+    ExternalSource,
+    NativeSearchDecision,
+    SearchResultItem,
+    SearchRound,
+)
 from audio_memory.prompts.director_schema import DirectorResult
 from audio_memory.prompts.evidence import (
     EvidenceIntegrityError,
@@ -96,6 +105,32 @@ class LeaseLostError(RuntimeError):
 
 
 class StrictAnalysisProvider(Protocol):
+    async def analyze_autonomous_day_map(
+        self, request, provider_snapshot
+    ) -> AutonomousDayMap: ...
+
+    async def analyze_autonomous_search_loop(
+        self, request, provider_snapshot
+    ) -> NativeSearchDecision: ...
+
+    async def native_search(
+        self,
+        provider_id: str,
+        *,
+        queries: list[str],
+        round_number: int,
+        model_id: str | None = None,
+        timeout_seconds: float = 60,
+    ): ...
+
+    async def analyze_autonomous_final_analysis(
+        self,
+        request,
+        provider_snapshot,
+        *,
+        persisted_sources: list[ExternalSource],
+    ) -> AutonomousAnalysisResult: ...
+
     async def analyze_autonomous(
         self, request, provider_snapshot
     ) -> AutonomousAnalysisResult: ...
@@ -188,22 +223,26 @@ class AnalysisRunner:
         staged = self._json_object(version.staged_results_json)
         try:
             await self._require_generation(version, worker_owner_id)
-            context = plan_autonomous_context(transcript)
-            if isinstance(context, DirectContext):
-                result = await self._direct_autonomous(
-                    version, transcript, profile, provider_snapshot, staged, worker_owner_id
-                )
-                profile_transcript = transcript
-            else:
-                result, profile_transcript = await self._long_autonomous(
-                    version, context, transcript, profile, provider_snapshot, staged,
-                    worker_owner_id,
-                )
+            result, profile_transcript = await self._autonomous_with_fallback(
+                version,
+                transcript,
+                profile,
+                provider_snapshot,
+                staged,
+                worker_owner_id,
+            )
 
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)
             raw_delta = await self.profile_extractor.extract(
-                profile_transcript, result.cards, profile, provider_snapshot
+                profile_transcript, [], profile, provider_snapshot
+            )
+            raw_delta = self._filter_external_profile_candidates(
+                raw_delta,
+                [
+                    ExternalSource.model_validate(item)
+                    for item in staged.get("external_sources", [])
+                ],
             )
             await self._require_ownership(version.id, worker_owner_id)
             await self._require_generation(version, worker_owner_id)
@@ -247,6 +286,386 @@ class AnalysisRunner:
             await self._require_generation(version, worker_owner_id)
             await self._mark_failed(version.id, worker_owner_id)
             raise
+
+    async def _autonomous_with_fallback(
+        self,
+        version,
+        transcript,
+        profile,
+        provider_snapshot,
+        staged,
+        worker_owner_id,
+    ) -> tuple[AutonomousAnalysisResult, list[dict[str, object]]]:
+        """Prefer two full reads; compact only after a typed provider rejection."""
+        try:
+            result = await self._day_map_autonomous(
+                version,
+                transcript,
+                profile,
+                provider_snapshot,
+                staged,
+                worker_owner_id,
+            )
+            return result, transcript
+        except ProviderAnalysisError as exc:
+            if exc.code != "provider_input_rejected":
+                raise
+
+        context = plan_autonomous_context(transcript)
+        if isinstance(context, DirectContext):
+            result = await self._direct_autonomous(
+                version,
+                transcript,
+                profile,
+                provider_snapshot,
+                staged,
+                worker_owner_id,
+            )
+            return result, transcript
+        return await self._long_autonomous(
+            version,
+            context,
+            transcript,
+            profile,
+            provider_snapshot,
+            staged,
+            worker_owner_id,
+        )
+
+    async def _day_map_autonomous(
+        self,
+        version,
+        transcript,
+        profile,
+        provider_snapshot,
+        staged,
+        worker_owner_id,
+    ) -> AutonomousAnalysisResult:
+        if "day_map" in staged:
+            day_map = AutonomousDayMap.model_validate(staged["day_map"])
+        else:
+            request = self.composer.compose_autonomous_day_map(
+                transcript=transcript,
+                schema=AutonomousDayMap.model_json_schema(),
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            day_map = await self.provider.analyze_autonomous_day_map(
+                request, provider_snapshot
+            )
+            self._validate_day_map_evidence(day_map, transcript)
+            staged["day_map"] = day_map.model_dump(mode="json")
+            staged["search_rounds"] = []
+            staged["external_sources"] = []
+            await self._save_staged(version.id, staged, worker_owner_id)
+        self._validate_day_map_evidence(day_map, transcript)
+
+        rounds, external_sources = self._staged_search_state(staged)
+        pending = self._pending_search_round(rounds)
+        if pending is not None:
+            decision = pending.decision
+        elif not rounds:
+            decision = day_map.search_action
+        elif len(rounds) >= MAX_SEARCH_ROUNDS:
+            decision = NativeSearchDecision(
+                action="finalize",
+                rationale="Search round limit reached; finalize with available sources.",
+            )
+        elif rounds[-1].errors and not rounds[-1].sources:
+            decision = NativeSearchDecision(
+                action="finalize",
+                rationale="Native search was unavailable; continue from audio only.",
+            )
+        else:
+            decision = await self._next_search_decision(
+                version,
+                day_map,
+                rounds,
+                external_sources,
+                provider_snapshot,
+                worker_owner_id,
+            )
+
+        while decision.action == "search" and len(rounds) <= MAX_SEARCH_ROUNDS:
+            pending = self._pending_search_round(rounds)
+            if pending is None:
+                if len(rounds) >= MAX_SEARCH_ROUNDS:
+                    break
+                pending = SearchRound(
+                    round_number=len(rounds) + 1,
+                    decision=decision,
+                )
+                rounds.append(pending)
+                staged["search_rounds"] = [
+                    item.model_dump(mode="json") for item in rounds
+                ]
+                await self._save_staged(version.id, staged, worker_owner_id)
+
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            search_result = await self._native_search_with_retry(
+                provider_snapshot=provider_snapshot,
+                decision=pending.decision,
+                round_number=pending.round_number,
+            )
+            sources = list(search_result.sources)
+            configured_provider = str(provider_snapshot["provider_id"])
+            if search_result.provider_id != configured_provider or any(
+                item.provider_id != configured_provider for item in sources
+            ):
+                raise ProviderAnalysisError(
+                    "Native search source provider does not match the analysis provider",
+                    code="autonomous_search_state_invalid",
+                )
+            search_errors = list(search_result.errors)
+            if search_result.available and not sources and not search_errors:
+                search_errors.append("Native search returned no persistable sources.")
+            results = [
+                SearchResultItem(
+                    provider_result_id=item.provider_result_id,
+                    title=item.title,
+                    url=item.url,
+                    publisher=item.publisher,
+                    published_at=item.published_at,
+                    snippet=item.support_statement,
+                )
+                for item in sources
+            ]
+            completed = validate_search_round(
+                SearchRound(
+                    round_number=pending.round_number,
+                    decision=pending.decision,
+                    results=results,
+                    sources=sources,
+                    errors=search_errors,
+                )
+            )
+            rounds[-1] = completed
+            external_sources = self._canonical_external_sources(
+                [source for item in rounds for source in item.sources]
+            )
+            staged["search_rounds"] = [
+                item.model_dump(mode="json") for item in rounds
+            ]
+            staged["external_sources"] = [
+                item.model_dump(mode="json") for item in external_sources
+            ]
+            await self._save_staged(version.id, staged, worker_owner_id)
+
+            if not search_result.available or len(rounds) >= MAX_SEARCH_ROUNDS:
+                break
+            decision = await self._next_search_decision(
+                version,
+                day_map,
+                rounds,
+                external_sources,
+                provider_snapshot,
+                worker_owner_id,
+            )
+
+        if "autonomous" in staged:
+            result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
+        else:
+            request = self.composer.compose_autonomous_final_analysis(
+                transcript=transcript,
+                day_map=day_map,
+                external_sources=external_sources,
+                profile=profile,
+                schema=AutonomousAnalysisResult.model_json_schema(),
+            )
+            await self._require_ownership(version.id, worker_owner_id)
+            await self._require_generation(version, worker_owner_id)
+            result = await self.provider.analyze_autonomous_final_analysis(
+                request,
+                provider_snapshot,
+                persisted_sources=external_sources,
+            )
+            result = self._sanitize_autonomous_evidence(result, transcript)
+            self._validate_autonomous_evidence(result, transcript)
+            self._validate_external_source_references(result, external_sources)
+            staged["autonomous"] = result.model_dump(mode="json")
+            await self._save_staged(version.id, staged, worker_owner_id)
+        result = self._sanitize_autonomous_evidence(result, transcript)
+        self._validate_autonomous_evidence(result, transcript)
+        self._validate_external_source_references(result, external_sources)
+        return result
+
+    async def _native_search_with_retry(
+        self,
+        *,
+        provider_snapshot: dict[str, object],
+        decision: NativeSearchDecision,
+        round_number: int,
+    ):
+        last_error: ProviderAnalysisError | None = None
+        for attempt in range(2):
+            try:
+                return await self.provider.native_search(
+                    str(provider_snapshot["provider_id"]),
+                    queries=[item.query for item in decision.queries],
+                    round_number=round_number,
+                    model_id=str(provider_snapshot.get("model_id") or "") or None,
+                )
+            except ProviderAnalysisError as exc:
+                last_error = exc
+                if not exc.retriable or attempt == 1:
+                    raise
+                await asyncio.sleep(0.25 * (2**attempt))
+        raise last_error or ProviderAnalysisError("Native search request failed")
+
+    async def _next_search_decision(
+        self,
+        version,
+        day_map,
+        rounds,
+        external_sources,
+        provider_snapshot,
+        worker_owner_id,
+    ) -> NativeSearchDecision:
+        request = self.composer.compose_autonomous_search_loop(
+            day_map=day_map,
+            search_rounds=rounds,
+            external_sources=external_sources,
+            remaining_rounds=MAX_SEARCH_ROUNDS - len(rounds),
+            schema=NativeSearchDecision.model_json_schema(),
+        )
+        await self._require_ownership(version.id, worker_owner_id)
+        await self._require_generation(version, worker_owner_id)
+        return await self.provider.analyze_autonomous_search_loop(
+            request, provider_snapshot
+        )
+
+    @staticmethod
+    def _validate_day_map_evidence(
+        day_map: AutonomousDayMap, transcript: list[dict[str, object]]
+    ) -> None:
+        segment_ids = {str(item["segment_id"]) for item in transcript}
+        file_ids = {str(item["file_id"]) for item in transcript}
+        if any(
+            not set(scene.evidence_segment_ids).issubset(segment_ids)
+            or not set(scene.file_ids).issubset(file_ids)
+            for scene in day_map.scenes
+        ):
+            raise ProviderAnalysisError(
+                "Autonomous Day Map references unknown transcript evidence",
+                code="autonomous_day_map_evidence_invalid",
+            )
+
+    @staticmethod
+    def _pending_search_round(rounds: list[SearchRound]) -> SearchRound | None:
+        if not rounds:
+            return None
+        latest = rounds[-1]
+        if (
+            latest.decision.action == "search"
+            and not latest.results
+            and not latest.sources
+            and not latest.errors
+        ):
+            return latest
+        return None
+
+    @classmethod
+    def _staged_search_state(
+        cls, staged: dict[str, object]
+    ) -> tuple[list[SearchRound], list[ExternalSource]]:
+        raw_rounds = staged.get("search_rounds", [])
+        raw_sources = staged.get("external_sources", [])
+        if not isinstance(raw_rounds, list) or not isinstance(raw_sources, list):
+            raise ProviderAnalysisError(
+                "Stored autonomous search state is invalid",
+                code="autonomous_search_state_invalid",
+            )
+        try:
+            rounds = [
+                validate_search_round(SearchRound.model_validate(item))
+                for item in raw_rounds
+            ]
+            external_sources = cls._canonical_external_sources(
+                [ExternalSource.model_validate(item) for item in raw_sources]
+            )
+        except (ValueError, ValidationError) as exc:
+            raise ProviderAnalysisError(
+                "Stored autonomous search state is invalid",
+                code="autonomous_search_state_invalid",
+            ) from exc
+        if [item.round_number for item in rounds] != list(range(1, len(rounds) + 1)):
+            raise ProviderAnalysisError(
+                "Stored autonomous search rounds are not contiguous",
+                code="autonomous_search_state_invalid",
+            )
+        expected = cls._canonical_external_sources(
+            [source for item in rounds for source in item.sources]
+        )
+        if [item.model_dump(mode="json") for item in external_sources] != [
+            item.model_dump(mode="json") for item in expected
+        ]:
+            raise ProviderAnalysisError(
+                "Stored external sources do not match completed search rounds",
+                code="autonomous_search_state_invalid",
+            )
+        return rounds, external_sources
+
+    @staticmethod
+    def _canonical_external_sources(
+        sources: list[ExternalSource],
+    ) -> list[ExternalSource]:
+        canonical: dict[str, ExternalSource] = {}
+        for source in sources:
+            previous = canonical.get(source.source_id)
+            if previous is None:
+                canonical[source.source_id] = source
+                continue
+            if source.model_dump(exclude={"search_round"}) != previous.model_dump(
+                exclude={"search_round"}
+            ):
+                raise ProviderAnalysisError(
+                    "Conflicting external sources share a source ID",
+                    code="autonomous_search_state_invalid",
+                )
+            if source.search_round < previous.search_round:
+                canonical[source.source_id] = source
+        return list(canonical.values())
+
+    @staticmethod
+    def _validate_external_source_references(
+        result: AutonomousAnalysisResult, external_sources: list[ExternalSource]
+    ) -> None:
+        allowed = {item.source_id for item in external_sources}
+        referenced = {
+            source_id for card in result.cards for source_id in card.external_source_ids
+        }
+        if not referenced.issubset(allowed):
+            raise ProviderAnalysisError(
+                "Final cards reference an unknown external source",
+                code="autonomous_final_source_invalid",
+            )
+
+    @staticmethod
+    def _filter_external_profile_candidates(
+        candidates: list[dict[str, object]], external_sources: list[ExternalSource]
+    ) -> list[dict[str, object]]:
+        external_values = {
+            value
+            for source in external_sources
+            for value in (
+                source.url,
+                source.title,
+                source.publisher,
+                source.published_at,
+                source.support_statement,
+            )
+            if isinstance(value, str) and value
+        }
+        retained: list[dict[str, object]] = []
+        for candidate in candidates:
+            serialized = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+            if re.search(r"https?://", serialized, flags=re.IGNORECASE):
+                continue
+            if any(value in serialized for value in external_values):
+                continue
+            retained.append(candidate)
+        return retained
 
     async def _direct_autonomous(
         self, version, transcript, profile, provider_snapshot, staged, worker_owner_id

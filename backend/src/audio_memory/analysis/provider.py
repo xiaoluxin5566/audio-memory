@@ -515,6 +515,15 @@ class ProviderAnalysisClient:
                 retriable=True,
                 code="provider_unavailable",
             )
+        if self._explicit_input_rejection(response):
+            self._record_http_failure(
+                provider_id, resolved_model, scene_id, request_bytes, response_bytes,
+                segment_count, started, status_category, repair_attempted
+            )
+            raise ProviderAnalysisError(
+                "Provider explicitly rejected the analysis input size or context",
+                code="provider_input_rejected",
+            )
         if response.is_error:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
@@ -590,6 +599,27 @@ class ProviderAnalysisClient:
                 "Provider returned an invalid response", code="model_response_invalid"
             ) from exc
 
+    @staticmethod
+    def _explicit_input_rejection(response: httpx.Response) -> bool:
+        if response.status_code == 413:
+            return True
+        if response.status_code not in {400, 422}:
+            return False
+        body = response.text.lower()
+        return any(
+            marker in body
+            for marker in (
+                "context_length",
+                "context length",
+                "maximum context",
+                "input too long",
+                "request too large",
+                "payload too large",
+                "too many tokens",
+                "max input",
+            )
+        )
+
     def _record_http_failure(
         self,
         provider_id: str,
@@ -655,6 +685,23 @@ class ProviderAnalysisClient:
 class RemoteSceneAnalyzer:
     def __init__(self, client: ProviderAnalysisClient) -> None:
         self.client = client
+
+    async def native_search(
+        self,
+        provider_id: str,
+        *,
+        queries: list[str],
+        round_number: int,
+        model_id: str | None = None,
+        timeout_seconds: float = 60,
+    ) -> NativeSearchCallResult:
+        return await self.client.native_search(
+            provider_id,
+            queries=queries,
+            round_number=round_number,
+            model_id=model_id,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def analyze_event_map(self, request, provider_snapshot):
         return await request_with_one_repair(

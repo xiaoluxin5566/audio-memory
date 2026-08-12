@@ -36,7 +36,7 @@ def test_normal_28470_character_transcript_uses_one_complete_source_request() ->
     assert context.transcript == transcript
 
 
-def test_long_transcript_is_partitioned_in_source_order_without_splitting_segments() -> None:
+def test_long_transcript_fallback_is_partitioned_without_splitting_segments() -> None:
     transcript = [segment(index, "录" * 6_000) for index in range(6)]
 
     context = plan_autonomous_context(transcript)

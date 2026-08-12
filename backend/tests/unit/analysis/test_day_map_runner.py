@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import copy
+import json
+from contextlib import asynccontextmanager
+
+import httpx
+import pytest
+
+from audio_memory.analysis.native_search import normalize_search_results
+from audio_memory.analysis.provider import ProviderAnalysisClient, ProviderAnalysisError
+from audio_memory.analysis.publisher import AnalysisOutcome
+from audio_memory.analysis.runner import AnalysisRunner
+from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
+from audio_memory.prompts.day_map_schema import (
+    AutonomousDayMap,
+    ExternalSource,
+    NativeSearchDecision,
+    SearchResultItem,
+)
+from audio_memory.providers.adapters.base import NativeSearchCallResult
+from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
+
+
+def segment(index: int, text: str = "录音原文") -> dict[str, object]:
+    return {
+        "segment_id": f"seg_{index}",
+        "file_id": "file-1",
+        "file_name": "recording.m4a",
+        "start_ms": index * 1_000,
+        "end_ms": (index + 1) * 1_000,
+        "text": text,
+    }
+
+
+def decision(action: str = "finalize", query: str = "") -> dict[str, object]:
+    if action == "search":
+        return {
+            "action": "search",
+            "rationale": "需要核对外部事实。",
+            "queries": [{"query": query or "verify claim", "purpose": "核对"}],
+        }
+    return {"action": "finalize", "rationale": "原录音证据已足够。", "queries": []}
+
+
+def day_map(search_action: dict[str, object] | None = None) -> AutonomousDayMap:
+    return AutonomousDayMap.model_validate(
+        {
+            "overview": {
+                "title": "本次概览",
+                "summary": "录音包含一个值得回顾的单元。",
+                "scene_ids": ["free-scene"],
+            },
+            "scenes": [
+                {
+                    "scene_id": "free-scene",
+                    "title": "自由命名的现实单元",
+                    "description": "不使用服务端分类。",
+                    "evidence_segment_ids": ["seg_0"],
+                    "file_ids": ["file-1"],
+                    "start_ms": 0,
+                    "end_ms": 1_000,
+                    "recommend_deep_analysis": True,
+                    "recommendation_reason": "对用户有独立价值。",
+                    "external_verification_need": None,
+                }
+            ],
+            "search_action": search_action or decision(),
+        }
+    )
+
+
+def final_result(source_ids: list[str] | None = None) -> AutonomousAnalysisResult:
+    return AutonomousAnalysisResult.model_validate(
+        {
+            "cards": [
+                {
+                    "title": "最终分析",
+                    "summary": "依据原录音形成判断。",
+                    "external_source_ids": source_ids or [],
+                    "content": [
+                        {
+                            "type": "scene_reconstruction",
+                            "title": "场景还原",
+                            "body": "录音中出现了一个问题。",
+                            "evidence_segment_ids": ["seg_0"],
+                        },
+                        {
+                            "type": "analysis",
+                            "title": "分析",
+                            "body": "这个问题值得进一步处理。",
+                            "evidence_segment_ids": ["seg_0"],
+                        },
+                    ],
+                    "evidence_segment_ids": ["seg_0"],
+                }
+            ]
+        }
+    )
+
+
+def source(round_number: int) -> ExternalSource:
+    raw = SearchResultItem(
+        provider_result_id=f"result-{round_number}",
+        title=f"Source {round_number}",
+        url=f"https://example.test/{round_number}",
+        publisher="Example Publisher",
+        snippet=f"External support text {round_number}",
+    )
+    return normalize_search_results(
+        provider_id="kimi", round_number=round_number, results=[raw]
+    )[0]
+
+
+class RecordingProvider:
+    def __init__(self, *, initial: str = "finalize", followup: str = "finalize"):
+        self.initial = initial
+        self.followup = followup
+        self.calls: list[str] = []
+        self.native_calls: list[tuple[int, list[str]]] = []
+        self.final_sources: list[ExternalSource] = []
+        self.request_segment_counts: list[int] = []
+
+    async def analyze_autonomous_day_map(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        self.request_segment_counts.append(request.segment_count)
+        return day_map(decision(self.initial, "initial query"))
+
+    async def analyze_autonomous_search_loop(self, request, provider_snapshot):
+        self.calls.append(request.scene_id)
+        return NativeSearchDecision.model_validate(
+            decision(self.followup, f"query round {len(self.native_calls) + 1}")
+        )
+
+    async def native_search(
+        self, provider_id, *, queries, round_number, model_id=None, timeout_seconds=60
+    ):
+        self.native_calls.append((round_number, list(queries)))
+        item = source(round_number)
+        return NativeSearchCallResult(
+            provider_id=provider_id,
+            model_id=model_id or "kimi-k2.5",
+            tool_name="$web_search",
+            available=True,
+            sources=(item,),
+        )
+
+    async def analyze_autonomous_final_analysis(
+        self, request, provider_snapshot, *, persisted_sources
+    ):
+        self.calls.append(request.scene_id)
+        self.request_segment_counts.append(request.segment_count)
+        self.final_sources = list(persisted_sources)
+        return final_result([item.source_id for item in persisted_sources])
+
+
+class IsolatedRunner(AnalysisRunner):
+    def __init__(self, provider) -> None:
+        self.provider = provider
+        from audio_memory.prompts.composer import PromptComposer
+
+        self.composer = PromptComposer()
+        self.saved: list[dict[str, object]] = []
+
+    async def _require_ownership(self, *args):
+        return None
+
+    async def _require_generation(self, *args):
+        return None
+
+    async def _save_staged(self, version_id, staged, worker_owner_id):
+        self.saved.append(copy.deepcopy(staged))
+
+
+async def run_pipeline(provider, transcript, staged=None):
+    runner = IsolatedRunner(provider)
+    version = type("Version", (), {"id": "version-1"})()
+    result = await runner._day_map_autonomous(
+        version,
+        transcript,
+        [],
+        {"provider_id": "kimi", "model_id": "kimi-k2.5"},
+        staged if staged is not None else {},
+        None,
+    )
+    return runner, result
+
+
+@pytest.mark.asyncio
+async def test_full_transcript_is_the_default_above_the_compact_threshold() -> None:
+    transcript = [segment(index, "录" * 6_000) for index in range(6)]
+    provider = RecordingProvider()
+
+    await run_pipeline(provider, transcript)
+
+    assert provider.calls == ["autonomous-day-map", "autonomous-final-analysis"]
+    assert provider.request_segment_counts == [6, 6]
+    assert provider.native_calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_search_day_map_goes_straight_to_forced_final_pass() -> None:
+    provider = RecordingProvider(initial="finalize")
+
+    runner, result = await run_pipeline(provider, [segment(0)])
+
+    assert result.cards[0].title == "最终分析"
+    assert provider.calls == ["autonomous-day-map", "autonomous-final-analysis"]
+    assert runner.saved[-1]["search_rounds"] == []
+    assert runner.saved[-1]["external_sources"] == []
+    assert "autonomous" in runner.saved[-1]
+
+
+@pytest.mark.asyncio
+async def test_supported_search_executes_and_checkpoints_at_most_five_rounds() -> None:
+    provider = RecordingProvider(initial="search", followup="search")
+
+    runner, _ = await run_pipeline(provider, [segment(0)])
+
+    assert [item[0] for item in provider.native_calls] == [1, 2, 3, 4, 5]
+    assert len(runner.saved[-1]["search_rounds"]) == 5
+    assert len(runner.saved[-1]["external_sources"]) == 5
+    assert len(provider.final_sources) == 5
+
+
+class UnsupportedSearchProvider(RecordingProvider):
+    async def native_search(
+        self, provider_id, *, queries, round_number, model_id=None, timeout_seconds=60
+    ):
+        self.native_calls.append((round_number, list(queries)))
+        return NativeSearchCallResult(
+            provider_id=provider_id,
+            model_id=model_id or "deepseek-v4-pro",
+            tool_name=None,
+            available=False,
+            errors=("Native web search is unavailable.",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_unsupported_native_search_continues_with_pure_audio() -> None:
+    provider = UnsupportedSearchProvider(initial="search")
+
+    runner, result = await run_pipeline(provider, [segment(0)])
+
+    assert result.cards
+    assert provider.native_calls == [(1, ["initial query"])]
+    assert provider.final_sources == []
+    assert runner.saved[-1]["search_rounds"][0]["errors"] == [
+        "Native web search is unavailable."
+    ]
+
+
+class TransientSearchProvider(RecordingProvider):
+    def __init__(self) -> None:
+        super().__init__(initial="search", followup="finalize")
+        self.attempts = 0
+
+    async def native_search(self, *args, **kwargs):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ProviderAnalysisError(
+                "temporary network failure", retriable=True, code="network_timeout"
+            )
+        return await super().native_search(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_transient_native_search_uses_the_existing_single_retry() -> None:
+    provider = TransientSearchProvider()
+
+    _, result = await run_pipeline(provider, [segment(0)])
+
+    assert result.cards
+    assert provider.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_executes_the_exact_staged_pending_round() -> None:
+    first_source = source(1)
+    staged = {
+        "day_map": day_map(decision("search", "ignored initial")).model_dump(mode="json"),
+        "search_rounds": [
+            {
+                "round_number": 1,
+                "decision": decision("search", "round one"),
+                "results": [
+                    {
+                        "provider_result_id": first_source.provider_result_id,
+                        "title": first_source.title,
+                        "url": first_source.url,
+                        "publisher": first_source.publisher,
+                        "published_at": first_source.published_at,
+                        "snippet": first_source.support_statement,
+                    }
+                ],
+                "sources": [first_source.model_dump(mode="json")],
+                "errors": [],
+            },
+            {
+                "round_number": 2,
+                "decision": decision("search", "resume exact query"),
+                "results": [],
+                "sources": [],
+                "errors": [],
+            },
+        ],
+        "external_sources": [first_source.model_dump(mode="json")],
+    }
+    provider = RecordingProvider(followup="finalize")
+
+    _, _ = await run_pipeline(provider, [segment(0)], staged)
+
+    assert "autonomous-day-map" not in provider.calls
+    assert provider.native_calls[0] == (2, ["resume exact query"])
+    assert all(round_number != 1 for round_number, _ in provider.native_calls)
+
+
+class FallbackRunner(IsolatedRunner):
+    def __init__(self, provider) -> None:
+        super().__init__(provider)
+        self.fallback_calls = 0
+
+    async def _long_autonomous(self, *args):
+        self.fallback_calls += 1
+        return final_result(), args[2]
+
+
+class RejectingProvider(RecordingProvider):
+    def __init__(self, code: str):
+        super().__init__()
+        self.code = code
+
+    async def analyze_autonomous_day_map(self, request, provider_snapshot):
+        raise ProviderAnalysisError("rejected", code=self.code)
+
+
+@pytest.mark.asyncio
+async def test_only_explicit_provider_input_rejection_uses_compact_route() -> None:
+    transcript = [segment(index, "录" * 6_000) for index in range(6)]
+    version = type("Version", (), {"id": "version-1"})()
+
+    ordinary = FallbackRunner(RejectingProvider("content_rejected"))
+    with pytest.raises(ProviderAnalysisError):
+        await ordinary._autonomous_with_fallback(
+            version, transcript, [], {"provider_id": "kimi"}, {}, None
+        )
+    assert ordinary.fallback_calls == 0
+
+    explicit = FallbackRunner(RejectingProvider("provider_input_rejected"))
+    result, profile_transcript = await explicit._autonomous_with_fallback(
+        version, transcript, [], {"provider_id": "kimi"}, {}, None
+    )
+    assert result.cards
+    assert profile_transcript == transcript
+    assert explicit.fallback_calls == 1
+
+
+class ConfiguredKeychain:
+    def read(self, provider_id: str) -> KeychainReadResult:
+        return KeychainReadResult(KeychainStatus.CONFIGURED, b"test-only-secret")
+
+
+@pytest.mark.asyncio
+async def test_provider_413_is_typed_as_explicit_input_rejection() -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"error": {"message": "request too large"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        with pytest.raises(ProviderAnalysisError) as raised:
+            await provider.generate(
+                "deepseek", system="rules", user="large input", scene_id="day-map"
+            )
+
+    assert raised.value.code == "provider_input_rejected"
+
+
+class RecordingProfileExtractor:
+    def __init__(self) -> None:
+        self.cards = None
+
+    async def extract(self, transcript, cards, existing, provider_snapshot):
+        self.cards = cards
+        return [
+            {
+                "subject_id": "user",
+                "dimension": "safe",
+                "value": {"statement": "原录音里的长期偏好"},
+                "confidence": 0.9,
+                "explicit": True,
+                "evidence_segment_ids": ["seg_0"],
+            },
+            {
+                "subject_id": "user",
+                "dimension": "polluted",
+                "value": {"source": "https://example.test/1"},
+                "confidence": 0.9,
+                "explicit": True,
+                "evidence_segment_ids": ["seg_0"],
+            },
+            {
+                "subject_id": "user",
+                "dimension": "external-text",
+                "value": {"statement": "External support text 1"},
+                "confidence": 0.9,
+                "explicit": True,
+                "evidence_segment_ids": ["seg_0"],
+            },
+        ]
+
+
+class FullRunHarness(AnalysisRunner):
+    def __init__(self, provider, extractor):
+        self.provider = provider
+        self.profile_extractor = extractor
+        self.publisher = self
+        self.generation_source = self
+        from audio_memory.prompts.composer import PromptComposer
+
+        self.composer = PromptComposer()
+        self.version = type(
+            "Version",
+            (),
+            {
+                "id": "version-1",
+                "source_job_id": "job-1",
+                "provider_id": "kimi",
+                "model_id": "kimi-k2.5",
+                "credential_generation": 1,
+                "profile_snapshot_json": "[]",
+                "staged_results_json": "{}",
+            },
+        )()
+        self.saved_candidates = None
+
+    async def _version(self, *args):
+        return self.version
+
+    async def _require_fixed_rules(self, *args):
+        return None
+
+    async def _require_ownership(self, *args):
+        return None
+
+    async def _require_generation(self, *args):
+        return None
+
+    async def _transcript(self, *args):
+        return [segment(0)]
+
+    async def _save_staged(self, version_id, staged, worker_owner_id):
+        self.version.staged_results_json = json.dumps(staged)
+
+    async def _save_profile_candidates(
+        self, version_id, raw_candidates, segment_ids, worker_owner_id
+    ):
+        self.saved_candidates = raw_candidates
+        return raw_candidates
+
+    @asynccontextmanager
+    async def publication_guard(self, provider_id):
+        yield 1
+
+    async def credential_generation(self, provider_id):
+        return 1
+
+    async def publish(self, *args, **kwargs):
+        return AnalysisOutcome("batch-1", 2, 0)
+
+
+@pytest.mark.asyncio
+async def test_profile_extraction_receives_only_transcript_based_evidence() -> None:
+    provider = RecordingProvider(initial="search", followup="finalize")
+    extractor = RecordingProfileExtractor()
+    runner = FullRunHarness(provider, extractor)
+
+    await runner.run("version-1")
+
+    assert extractor.cards == []
+    assert runner.saved_candidates is not None
+    assert [item["dimension"] for item in runner.saved_candidates] == ["safe"]

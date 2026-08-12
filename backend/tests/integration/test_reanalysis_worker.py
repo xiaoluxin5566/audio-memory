@@ -861,7 +861,7 @@ class FailingAnalysisProvider:
     def __init__(self, error) -> None:
         self.error = error
 
-    async def analyze_autonomous(self, request, provider_snapshot):
+    async def analyze_autonomous_day_map(self, request, provider_snapshot):
         raise self.error
 
     async def analyze_event_map(self, request, provider_snapshot):
