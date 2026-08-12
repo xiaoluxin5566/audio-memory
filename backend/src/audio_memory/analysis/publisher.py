@@ -13,7 +13,10 @@ from sqlalchemy import delete, func, select, update
 
 from audio_memory.analysis.profile import ProfileDelta
 from audio_memory.analysis.profile_rebuild import ProfileRebuilder
-from audio_memory.analysis.native_search import normalize_search_results
+from audio_memory.analysis.native_search import (
+    normalize_search_results,
+    validate_search_round,
+)
 from audio_memory.analysis.todos import reconcile_todos
 from audio_memory.analysis.versions import require_card_version
 from audio_memory.transcript_safety import pending_risk_review_exists
@@ -443,7 +446,7 @@ class VersionPublisher:
 
         day_map = AutonomousDayMap.model_validate(staged["day_map"])
         search_rounds = tuple(
-            SearchRound.model_validate(item)
+            validate_search_round(SearchRound.model_validate(item))
             for item in staged.get("search_rounds", [])
         )
         external_sources = tuple(

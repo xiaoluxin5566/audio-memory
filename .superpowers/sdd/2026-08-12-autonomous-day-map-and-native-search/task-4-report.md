@@ -175,3 +175,38 @@ npm run build
 
 Result: `15 passed`; Vite production build completed successfully with 37
 modules transformed, followed by successful Sites build preparation.
+
+## External review fix — round 2
+
+The publisher previously applied only the `SearchRound` Pydantic schema before
+persisting a round. That schema permits a structurally valid `finalize`
+decision alongside result rows; Task 1's `validate_search_round` state-machine
+boundary rejects that impossible state.
+
+A publication test stages a `finalize` decision with no queries but with new
+provider results and sources. Before the fix it failed with `DID NOT RAISE
+ValueError`, proving the round could publish. `_day_map_publication` now passes
+every parsed round through `validate_search_round` before provider/source
+re-derivation, aggregate validation, or any publication side effect.
+
+Focused publisher/search/feed verification:
+
+```text
+PYTHONPATH=backend/src backend/.venv/bin/pytest \
+  backend/tests/unit/analysis/test_day_map_publisher.py \
+  backend/tests/unit/analysis/test_native_search.py \
+  backend/tests/unit/content/test_feed_service.py -q
+```
+
+Result: `17 passed in 0.57s`.
+
+Relevant atomic publication, content API, and migration regressions:
+
+```text
+PYTHONPATH=backend/src backend/.venv/bin/pytest \
+  backend/tests/integration/test_atomic_batch_commit.py \
+  backend/tests/integration/test_content_api.py \
+  backend/tests/integration/test_analysis_version_migration.py -q
+```
+
+Result: `37 passed in 2.12s`. `git diff --check` also exited successfully.

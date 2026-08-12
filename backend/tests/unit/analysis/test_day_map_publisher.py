@@ -363,3 +363,38 @@ async def test_publication_rejects_fabricated_source_provenance(
             f"version-{field}", result, []
         )
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publication_rejects_finalize_round_with_new_results(tmp_path) -> None:
+    database = Database(tmp_path / "finalize-results.sqlite3")
+    await database.create_schema()
+    staged = staged_day_map()
+    staged["search_rounds"][0]["decision"] = {
+        "action": "finalize",
+        "rationale": "已有足够资料。",
+        "queries": [],
+    }
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-finalize", stage="ready_to_commit"))
+        session.add(
+            AnalysisVersion(
+                id="version-finalize",
+                source_job_id="job-finalize",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json=json.dumps(staged, ensure_ascii=False),
+                status="running",
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(ValueError, match="final search decision"):
+        await VersionPublisher(database).publish(
+            "version-finalize", autonomous_result(), []
+        )
+    await database.dispose()
