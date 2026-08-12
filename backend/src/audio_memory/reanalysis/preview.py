@@ -43,6 +43,12 @@ class PreviewTokenExpiredError(PreviewTokenInvalidError):
     pass
 
 
+class ReanalysisSourceSelectionError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def canonical_json(value: object) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -80,7 +86,7 @@ def current_fixed_rule_hashes() -> dict[str, str]:
                 "timeout_seconds": policy.timeout_seconds,
             }
             for name, policy in MODEL_REQUEST_POLICIES.items()
-            if name in {"autonomous", "autonomous-profile"}
+            if name.startswith("autonomous")
         }
     )
     return hashes
@@ -167,7 +173,12 @@ class ReanalysisPreviewBuilder:
         self.provider_coordinator = provider_coordinator
         self.signer = signer or PreviewSigner()
 
-    async def build(self, *, provider_binding=None) -> ReanalysisPreview:
+    async def build(
+        self,
+        *,
+        provider_binding=None,
+        source_batch_ids: tuple[str, ...] | None = None,
+    ) -> ReanalysisPreview:
         no_active_provider = False
         if provider_binding is not None:
             provider, generation = provider_binding
@@ -185,7 +196,7 @@ class ReanalysisPreviewBuilder:
                     state=ProviderStateName.UNCONFIGURED,
                 )
                 generation = 0
-        sources = await self._completed_sources()
+        sources = await self._completed_sources(source_batch_ids)
         prompt_documents = {
             scene_id: self.prompt_store.get(scene_id) for scene_id in PROMPT_SCENES
         }
@@ -224,6 +235,11 @@ class ReanalysisPreviewBuilder:
             transcript_character_count=character_count,
             estimated_calls_min=source_count * 2,
             estimated_calls_max=source_count * 6,
+            scope=(
+                "selected_completed_history"
+                if source_batch_ids is not None
+                else "all_completed_history"
+            ),
         )
         snapshot_hash = canonical_hash(snapshot.canonical_payload())
         token, expires_at = self.signer.sign(snapshot, snapshot_hash)
@@ -235,6 +251,7 @@ class ReanalysisPreviewBuilder:
         elif provider.state is not ProviderStateName.AVAILABLE:
             blockers.append(f"provider_{provider.state.value}")
         return ReanalysisPreview(
+            source_batch_ids=tuple(item.batch_id for item in sources),
             source_batch_count=source_count,
             audio_file_count=audio_count,
             transcript_character_count=character_count,
@@ -257,7 +274,16 @@ class ReanalysisPreviewBuilder:
             snapshot=snapshot,
         )
 
-    async def _completed_sources(self) -> list[SourceSnapshot]:
+    async def _completed_sources(
+        self, source_batch_ids: tuple[str, ...] | None = None
+    ) -> list[SourceSnapshot]:
+        if source_batch_ids is not None and len(source_batch_ids) != len(
+            set(source_batch_ids)
+        ):
+            raise ReanalysisSourceSelectionError(
+                "duplicate_source_batch_ids",
+                "Selected source batch IDs must be unique",
+            )
         async with self.database.session() as session:
             rows = (
                 await session.execute(
@@ -275,7 +301,7 @@ class ReanalysisPreviewBuilder:
                     .order_by(Batch.uploaded_at.desc(), Batch.id.desc())
                 )
             ).all()
-            sources: list[SourceSnapshot] = []
+            sources_by_id: dict[str, SourceSnapshot] = {}
             for batch_id, job_id in rows:
                 file_count = int(
                     await session.scalar(
@@ -294,16 +320,26 @@ class ReanalysisPreviewBuilder:
                 transcript_sha256 = await transcript_fingerprint_from_session(
                     session, job_id
                 )
-                sources.append(
-                    SourceSnapshot(
-                        batch_id=batch_id,
-                        job_id=job_id,
-                        audio_file_count=file_count,
-                        transcript_character_count=character_count,
-                        transcript_sha256=transcript_sha256,
-                    )
+                sources_by_id[batch_id] = SourceSnapshot(
+                    batch_id=batch_id,
+                    job_id=job_id,
+                    audio_file_count=file_count,
+                    transcript_character_count=character_count,
+                    transcript_sha256=transcript_sha256,
                 )
-            return sources
+            if source_batch_ids is None:
+                return list(sources_by_id.values())
+            missing = [
+                batch_id
+                for batch_id in source_batch_ids
+                if batch_id not in sources_by_id
+            ]
+            if missing:
+                raise ReanalysisSourceSelectionError(
+                    "source_batch_not_completed",
+                    "Every selected source batch must be completed and eligible",
+                )
+            return [sources_by_id[batch_id] for batch_id in source_batch_ids]
 
     async def _analysis_window_count(
         self, sources: list[SourceSnapshot]

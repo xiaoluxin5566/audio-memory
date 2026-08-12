@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from audio_memory.reanalysis.service import (
@@ -11,6 +11,7 @@ from audio_memory.reanalysis.service import (
     ReanalysisStateError,
     SnapshotChangedError,
 )
+from audio_memory.reanalysis.preview import ReanalysisSourceSelectionError
 
 
 router = APIRouter(prefix="/api/history/reanalysis-batches", tags=["reanalysis"])
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/api/history/reanalysis-batches", tags=["reanalysis"]
 
 class CreateReanalysisInput(BaseModel):
     preview_token: str = Field(min_length=1, max_length=16384)
+    source_batch_ids: list[str] | None = Field(default=None, max_length=100)
 
 
 def service_from(request: Request):
@@ -25,15 +27,26 @@ def service_from(request: Request):
 
 
 @router.get("/preview")
-async def preview_reanalysis(request: Request) -> dict[str, object]:
+async def preview_reanalysis(
+    request: Request,
+    source_batch_ids: list[str] | None = Query(default=None),
+) -> dict[str, object]:
     try:
-        preview = await service_from(request).preview()
+        preview = await service_from(request).preview(
+            None if source_batch_ids is None else tuple(source_batch_ids)
+        )
+    except ReanalysisSourceSelectionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except LookupError as exc:
         raise HTTPException(
             status_code=409,
             detail={"code": "provider_unavailable", "message": str(exc)},
         ) from exc
     return {
+        "source_batch_ids": list(preview.source_batch_ids),
         "source_batch_count": preview.source_batch_count,
         "audio_file_count": preview.audio_file_count,
         "transcript_character_count": preview.transcript_character_count,
@@ -61,7 +74,17 @@ async def create_reanalysis(
     payload: CreateReanalysisInput, request: Request
 ) -> dict[str, object]:
     try:
-        batch = await service_from(request).create_batch(payload.preview_token)
+        batch = await service_from(request).create_batch(
+            payload.preview_token,
+            None
+            if payload.source_batch_ids is None
+            else tuple(payload.source_batch_ids),
+        )
+    except ReanalysisSourceSelectionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except SnapshotChangedError as exc:
         raise HTTPException(
             status_code=409,

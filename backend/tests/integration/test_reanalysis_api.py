@@ -127,6 +127,96 @@ async def seed_source(database: Database) -> None:
         await session.commit()
 
 
+async def seed_second_source(database: Database, *, completed: bool = True) -> None:
+    async with database.session() as session:
+        session.add(
+            AnalysisJob(
+                id="job-2",
+                stage="completed" if completed else "failed",
+            )
+        )
+        session.add(
+            Batch(
+                id="batch-2",
+                job_id="job-2",
+                natural_date="2026-08-06",
+                uploaded_at="2026-08-06T12:00:00+00:00",
+            )
+        )
+        session.add_all(
+            [
+                JobFile(
+                    id="file-2a",
+                    job_id="job-2",
+                    original_name="second-a.mp3",
+                    extension=".mp3",
+                    size_bytes=5,
+                    sha256="b" * 64,
+                    position=0,
+                    temporary_path="/audio/second-a.mp3",
+                ),
+                JobFile(
+                    id="file-2b",
+                    job_id="job-2",
+                    original_name="second-b.mp3",
+                    extension=".mp3",
+                    size_bytes=5,
+                    sha256="c" * 64,
+                    position=1,
+                    temporary_path="/audio/second-b.mp3",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                Transcript(
+                    id="transcript-2a",
+                    job_file_id="file-2a",
+                    segment_index=0,
+                    segment_uid="file-2a:0",
+                    start_ms=0,
+                    end_ms=1000,
+                    text="second",
+                    words_json="[]",
+                    risk_classified=True,
+                ),
+                Transcript(
+                    id="transcript-2b",
+                    job_file_id="file-2b",
+                    segment_index=0,
+                    segment_uid="file-2b:0",
+                    start_ms=0,
+                    end_ms=1000,
+                    text="source",
+                    words_json="[]",
+                    risk_classified=True,
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(
+            AnalysisVersion(
+                id="version-2",
+                source_job_id="job-2",
+                batch_id="batch-2",
+                provider_id="kimi",
+                model_id="old",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                staged_results_json="{}",
+                priority=0,
+                status="completed" if completed else "failed",
+            )
+        )
+        await session.flush()
+        batch = await session.get(Batch, "batch-2")
+        assert batch is not None
+        batch.current_analysis_version_id = "version-2"
+        await session.commit()
+
+
 async def build_app(tmp_path: Path):
     from audio_memory.api.reanalysis import router
     from audio_memory.api.content import router as content_router
@@ -212,6 +302,89 @@ async def test_preview_create_replay_and_current_api_contract(tmp_path: Path) ->
     assert current.json()["status"] == "pending"
     assert current.json()["total"] == 1
     assert current.json()["pending"] == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subset_preview_and_create_are_bound_to_exact_completed_batch_ids(
+    tmp_path: Path,
+) -> None:
+    app, database, _publisher = await build_app(tmp_path)
+    await seed_second_source(database)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        preview = await client.get(
+            "/api/history/reanalysis-batches/preview",
+            params=[("source_batch_ids", "batch-2")],
+        )
+        assert preview.status_code == 200
+        payload = preview.json()
+        assert payload["source_batch_ids"] == ["batch-2"]
+        assert payload["source_batch_count"] == 1
+        assert payload["audio_file_count"] == 2
+        assert payload["transcript_character_count"] == 12
+
+        omitted_selection = await client.post(
+            "/api/history/reanalysis-batches",
+            headers=await session_headers(client, "subset-omitted"),
+            json={"preview_token": payload["preview_token"]},
+        )
+        wrong_selection = await client.post(
+            "/api/history/reanalysis-batches",
+            headers=await session_headers(client, "subset-wrong"),
+            json={
+                "preview_token": payload["preview_token"],
+                "source_batch_ids": ["batch-1"],
+            },
+        )
+        created = await client.post(
+            "/api/history/reanalysis-batches",
+            headers=await session_headers(client, "subset-create"),
+            json={
+                "preview_token": payload["preview_token"],
+                "source_batch_ids": ["batch-2"],
+            },
+        )
+
+    assert omitted_selection.status_code == 409
+    assert omitted_selection.json()["detail"]["code"] == "snapshot_changed"
+    assert wrong_selection.status_code == 409
+    assert wrong_selection.json()["detail"]["code"] == "snapshot_changed"
+    assert created.status_code == 201
+    assert [item["source_batch_id"] for item in created.json()["items"]] == [
+        "batch-2"
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "code"),
+    [
+        (
+            [("source_batch_ids", "batch-1"), ("source_batch_ids", "batch-1")],
+            "duplicate_source_batch_ids",
+        ),
+        ([("source_batch_ids", "missing")], "source_batch_not_completed"),
+        ([("source_batch_ids", "batch-2")], "source_batch_not_completed"),
+    ],
+)
+async def test_subset_preview_rejects_duplicate_unknown_and_incomplete_batches(
+    tmp_path: Path,
+    params: list[tuple[str, str]],
+    code: str,
+) -> None:
+    app, database, _publisher = await build_app(tmp_path)
+    await seed_second_source(database, completed=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        response = await client.get(
+            "/api/history/reanalysis-batches/preview",
+            params=params,
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == code
     await database.dispose()
 
 

@@ -294,14 +294,23 @@ class PromptComposer:
         external_sources: list[object],
         profile: list[dict[str, object]],
         schema: dict[str, object],
+        semantic_retry: bool = False,
     ) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["autonomous-final-analysis"]
+        rules = self._autonomous_final_analysis_rules()
+        if semantic_retry:
+            rules += (
+                "\n\n服务端校验反馈：上一轮 JSON 或证据未通过校验。"
+                "只引用 transcript_data 中逐字存在的 segment_id；"
+                "原句必须逐字出现在引用句段中。删除无法由原文支持的内容，"
+                "不要构造 ID。"
+            )
         return ModelRequest(
             scene_id="autonomous-final-analysis",
             prompt_version=1,
             schema_version=self.SCHEMA_VERSION,
             system_rules=self._autonomous_system_rules(),
-            common_rules=self._autonomous_final_analysis_rules(),
+            common_rules=rules,
             scene_prompt="",
             user_data="\n".join(
                 [

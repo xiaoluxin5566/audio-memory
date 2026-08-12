@@ -86,7 +86,7 @@ for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map
     await expect(page.getByText('模型分析失败')).toBeVisible()
     await expect(page.getByText(errorCode, { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '重新分析', exact: true }).click()
-    await expect(page.getByText('生成深度分析')).toBeVisible()
+    await expect(page.getByText('生成深度分析', { exact: true })).toBeVisible()
     await expect(page.getByText('准备本地转写')).toHaveCount(0)
     expect(retried).toBe(true)
   })

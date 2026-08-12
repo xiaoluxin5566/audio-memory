@@ -184,8 +184,9 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     await database.dispose()
 
 
-def test_fixed_rule_hashes_cover_only_active_autonomous_analysis() -> None:
+def test_fixed_rule_hashes_cover_only_active_autonomous_analysis(monkeypatch) -> None:
     from audio_memory.reanalysis.preview import current_fixed_rule_hashes
+    from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES
 
     baseline = current_fixed_rule_hashes()
 
@@ -196,6 +197,20 @@ def test_fixed_rule_hashes_cover_only_active_autonomous_analysis() -> None:
     assert "common-scene.md" not in baseline
     assert len(baseline["analysis_schemas"]) == 64
     assert len(baseline["analysis_parameters"]) == 64
+
+    original = MODEL_REQUEST_POLICIES["autonomous-final-analysis"]
+    monkeypatch.setitem(
+        MODEL_REQUEST_POLICIES,
+        "autonomous-final-analysis",
+        type(original)(
+            max_tokens=original.max_tokens,
+            timeout_seconds=original.timeout_seconds + 1,
+        ),
+    )
+
+    assert current_fixed_rule_hashes()["analysis_parameters"] != baseline[
+        "analysis_parameters"
+    ]
 
 
 @pytest.mark.asyncio
@@ -445,8 +460,11 @@ async def test_creation_fences_mutation_after_snapshot_read_until_commit(
     allow_creation = asyncio.Event()
     original_build = builder.build
 
-    async def paused_build(*, provider_binding=None):
-        result = await original_build(provider_binding=provider_binding)
+    async def paused_build(*, provider_binding=None, source_batch_ids=None):
+        result = await original_build(
+            provider_binding=provider_binding,
+            source_batch_ids=source_batch_ids,
+        )
         if provider_binding is not None:
             snapshot_read.set()
             await allow_creation.wait()

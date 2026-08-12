@@ -541,23 +541,34 @@ class AnalysisRunner:
         if "autonomous" in staged:
             result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
         else:
-            request = self.composer.compose_autonomous_final_analysis(
-                transcript=transcript,
-                day_map=day_map,
-                external_sources=external_sources,
-                profile=profile,
-                schema=AutonomousAnalysisResult.model_json_schema(),
-            )
-            await self._require_ownership(version.id, worker_owner_id)
-            await self._require_generation(version, worker_owner_id)
-            result = await self.provider.analyze_autonomous_final_analysis(
-                request,
-                provider_snapshot,
-                persisted_sources=external_sources,
-            )
-            result = self._sanitize_autonomous_evidence(result, transcript)
-            self._validate_autonomous_evidence(result, transcript)
-            self._validate_external_source_references(result, external_sources)
+            for attempt in range(2):
+                request = self.composer.compose_autonomous_final_analysis(
+                    transcript=transcript,
+                    day_map=day_map,
+                    external_sources=external_sources,
+                    profile=profile,
+                    schema=AutonomousAnalysisResult.model_json_schema(),
+                    semantic_retry=attempt > 0,
+                )
+                await self._require_ownership(version.id, worker_owner_id)
+                await self._require_generation(version, worker_owner_id)
+                result = await self.provider.analyze_autonomous_final_analysis(
+                    request,
+                    provider_snapshot,
+                    persisted_sources=external_sources,
+                )
+                try:
+                    result = self._sanitize_autonomous_evidence(result, transcript)
+                    self._validate_autonomous_evidence(result, transcript)
+                except ValueError as exc:
+                    if attempt == 0:
+                        continue
+                    raise ProviderAnalysisError(
+                        "Autonomous final evidence is invalid",
+                        code="autonomous_final_evidence_invalid",
+                    ) from exc
+                self._validate_external_source_references(result, external_sources)
+                break
             staged["autonomous"] = result.model_dump(mode="json")
             await self._save_staged(version.id, staged, worker_owner_id)
         result = self._sanitize_autonomous_evidence(result, transcript)

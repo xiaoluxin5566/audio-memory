@@ -14,6 +14,7 @@ from audio_memory.reanalysis.preview import (
     PreviewTokenExpiredError,
     PreviewTokenInvalidError,
     ReanalysisPreviewBuilder,
+    ReanalysisSourceSelectionError,
 )
 from audio_memory.reanalysis.types import ReanalysisBatchView, ReanalysisItemView
 
@@ -69,11 +70,22 @@ class ReanalysisService:
         self.publisher = publisher
         self._mutation_lock = asyncio.Lock()
 
-    async def preview(self):
-        return await self.preview_builder.build()
+    async def preview(self, source_batch_ids: tuple[str, ...] | None = None):
+        return await self.preview_builder.build(source_batch_ids=source_batch_ids)
 
-    async def create_batch(self, preview_token: str) -> ReanalysisBatchView:
+    async def create_batch(
+        self,
+        preview_token: str,
+        source_batch_ids: tuple[str, ...] | None = None,
+    ) -> ReanalysisBatchView:
         async with self._mutation_lock:
+            if source_batch_ids is not None and len(source_batch_ids) != len(
+                set(source_batch_ids)
+            ):
+                raise ReanalysisSourceSelectionError(
+                    "duplicate_source_batch_ids",
+                    "Selected source batch IDs must be unique",
+                )
             active = await self._active_batch()
             if active is not None:
                 return await self._view(active.id)
@@ -87,6 +99,22 @@ class ReanalysisService:
                 raise SnapshotChangedError("Preview token has no provider binding")
             if not provider_id:
                 raise PreviewBlockedError(["no_active_provider"])
+            expected_scope = (
+                "selected_completed_history"
+                if source_batch_ids is not None
+                else "all_completed_history"
+            )
+            if (
+                supplied.get("scope") != expected_scope
+                or (
+                    source_batch_ids is not None
+                    and supplied.get("source_batch_ids")
+                    != list(source_batch_ids)
+                )
+            ):
+                raise SnapshotChangedError(
+                    "Selected history does not match the signed preview"
+                )
             validation = await self.provider_coordinator.validate_saved(provider_id)
             if not bool(getattr(validation, "ok", False)):
                 raise PreviewBlockedError(["provider_validation_failed"])
@@ -98,7 +126,8 @@ class ReanalysisService:
                         await session.execute(text("BEGIN IMMEDIATE"))
                         try:
                             current = await self.preview_builder.build(
-                                provider_binding=provider_binding
+                                provider_binding=provider_binding,
+                                source_batch_ids=source_batch_ids,
                             )
                             self._require_matching_snapshot(supplied, current)
                             if current.blockers:
