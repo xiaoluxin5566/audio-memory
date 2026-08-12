@@ -57,29 +57,65 @@ test('feed groups cards by natural day and upload batch', () => {
 })
 
 
-test('position-zero batch overview shows its fixed title and summary', () => {
-  const normalized = normalizeFeed({ days: [{ date: '2026-08-12', cards: [{
-    id: 'overview-1',
-    batch_id: 'batch-1',
-    scene_id: 'batch_overview',
-    uploaded_at: '2026-08-12T10:00:00Z',
-    payload: {
+test('new batch keeps one batch overview first and resolves only its referenced external sources', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-12', cards: [
+    {
+      id: 'overview-1',
+      batch_id: 'batch-1',
       scene_id: 'batch_overview',
-      kind: 'batch_overview',
-      overview: {
-        title: '本次概览',
-        summary: '这段录音从亲子对话转向节目笔记。',
-        scene_ids: ['child-transition', 'media-note'],
+      uploaded_at: '2026-08-12T10:00:00Z',
+      payload: {
+        scene_id: 'batch_overview',
+        kind: 'batch_overview',
+        overview: {
+          title: '服务器可变标题',
+          summary: '这段录音从亲子对话转向节目笔记。',
+          scene_ids: ['child-transition', 'media-note'],
+        },
       },
+      qa: [],
     },
-    qa: [],
+    {
+      id: 'analysis-1',
+      batch_id: 'batch-1',
+      scene_id: 'analysis',
+      uploaded_at: '2026-08-12T10:00:00Z',
+      payload: { scene_id: 'analysis', cards: [{
+        title: '有外部资料的发现',
+        summary: '此卡仅引用一份外部资料。',
+        external_source_ids: ['source-kept'],
+        content: [],
+        quotes: [],
+        recommendations: [],
+      }] },
+      sources: [
+        { source_id: 'source-kept', title: '保留的研究', url: 'https://example.org/research' },
+        { source_id: 'source-hidden', title: '未引用的资料', url: 'https://example.net/hidden' },
+      ],
+      qa: [],
+    },
+  ] }] })
+
+  const [overview, card] = normalized.feed[0].cards
+  assert.equal(normalized.feed[0].cards.filter((item) => item.kind === 'batch_overview').length, 1)
+  assert.equal(overview.kind, 'batch_overview')
+  assert.equal(overview.title, '本次概览')
+  assert.equal(overview.summary, '这段录音从亲子对话转向节目笔记。')
+  assert.deepEqual(card.sources, [{ title: '保留的研究', url: 'https://example.org/research', domain: 'example.org' }])
+})
+
+
+test('historic feed cards without overview or sources keep rendering data', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-01', cards: [{
+    id: 'historic-card', batch_id: 'historic-batch', scene_id: 'meeting', uploaded_at: '2026-08-01T10:00:00Z',
+    payload: { card: { title: '旧会议', summary: '历史摘要' }, detail_sections: [] }, qa: [],
   }] }] })
 
-  assert.equal(normalized.feed[0].cards[0].title, '本次概览')
-  assert.equal(
-    normalized.feed[0].cards[0].summary,
-    '这段录音从亲子对话转向节目笔记。',
-  )
+  assert.deepEqual(normalized.feed[0].cards[0], {
+    id: 'historic-card', apiId: 'historic-card', sceneId: 'meeting', label: '会议纪要',
+    title: '旧会议', summary: '历史摘要', timeLabel: normalized.feed[0].uploadedAt,
+    meta: '查看 AI 分析详情', detailSections: [], details: {}, sources: [],
+  })
 })
 
 

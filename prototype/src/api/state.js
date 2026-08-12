@@ -306,6 +306,7 @@ function normalizeStrictCards(item, batch) {
       meta: '查看 AI 分析详情',
       detailSections: item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail),
       details: strictCardDetails(item.scene_id, detail),
+      sources: normalizeExternalSources(source, item.sources),
       evidence: (item.evidence ?? [])
         .find((group) => group.card_index === index)?.segments
         ?.map((segment) => ({
@@ -316,6 +317,42 @@ function normalizeStrictCards(item, batch) {
         })) ?? [],
     }
   })
+}
+
+function sourceDomain(url) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+function normalizeExternalSources(card, itemSources = []) {
+  const referencedIds = new Set(card.external_source_ids ?? [])
+  if (referencedIds.size === 0) return []
+  return itemSources
+    .filter((source) => referencedIds.has(source.source_id))
+    .map((source) => ({
+      title: source.title ?? '',
+      url: source.url ?? '',
+      domain: sourceDomain(source.url),
+    }))
+    .filter((source) => source.title && source.url)
+}
+
+function normalizeBatchOverview(item) {
+  const overview = item.payload?.overview
+  if (item.scene_id !== 'batch_overview' || item.payload?.kind !== 'batch_overview' || !overview) return null
+  return {
+    id: item.id,
+    apiId: item.id,
+    kind: 'batch_overview',
+    title: '本次概览',
+    summary: overview.summary ?? '',
+    sceneIds: overview.scene_ids ?? [],
+    timeLabel: timeLabel(item.uploaded_at),
+    sources: [],
+  }
 }
 
 
@@ -345,10 +382,16 @@ export function normalizeFeed(payload) {
           audio: [],
           transcript: '',
           cards: [],
+          overview: null,
           qa: {},
         })
       }
       const batch = batches.get(item.batch_id)
+      const overview = normalizeBatchOverview(item)
+      if (overview) {
+        batch.overview ??= overview
+        continue
+      }
       const strictCards = normalizeStrictCards(item, batch)
       if (strictCards) {
         batch.cards.push(...strictCards)
@@ -366,13 +409,19 @@ export function normalizeFeed(payload) {
           meta: '查看 AI 分析详情',
           detailSections: (item.payload?.detail_sections ?? []).map(normalizeSection),
           details: {},
+          sources: [],
         })
         batch.qa[item.id] = normalizeConversation(item.qa)
       }
     }
   }
   return {
-    feed: [...batches.values()].sort((a, b) => b.uploadedAtRaw.localeCompare(a.uploadedAtRaw)),
+    feed: [...batches.values()]
+      .map((batch) => ({
+        ...batch,
+        cards: batch.overview ? [batch.overview, ...batch.cards] : batch.cards,
+      }))
+      .sort((a, b) => b.uploadedAtRaw.localeCompare(a.uploadedAtRaw)),
     todos: (payload?.todos ?? []).map((item) => ({
       id: item.id,
       text: item.text,
