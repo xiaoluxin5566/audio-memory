@@ -276,6 +276,18 @@ class AnalysisVersion(Base):
     batch_overview_json: Mapped[str | None] = mapped_column(Text)
     search_rounds_json: Mapped[str | None] = mapped_column(Text)
     external_sources_json: Mapped[str | None] = mapped_column(Text)
+    pipeline_parameters_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
+    pipeline_parameters_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    pipeline_checkpoints_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
+    pipeline_metrics_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
     published_card_count: Mapped[int | None] = mapped_column(Integer)
     published_todo_count: Mapped[int | None] = mapped_column(Integer)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)

@@ -2,11 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  analysisBlocks,
   normalizeFeed,
   normalizeHistory,
   normalizePrompts,
   normalizeProviders,
 } from '../src/api/state.js'
+
+test('markdown report parser preserves verified image blocks', () => {
+  const blocks = analysisBlocks('![产品示意图](https://images.example.com/product.png)')
+  assert.deepEqual(blocks, [{ kind: 'image', alt: '产品示意图', src: 'https://images.example.com/product.png' }])
+})
 
 
 test('provider API becomes existing UI provider map without exposing keys', () => {
@@ -116,6 +122,69 @@ test('historic feed cards without overview or sources keep rendering data', () =
     title: '旧会议', summary: '历史摘要', timeLabel: normalized.feed[0].uploadedAt,
     meta: '查看 AI 分析详情', detailSections: [], details: {}, sources: [],
   })
+})
+
+test('single markdown report stays one card with runtime metrics', () => {
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-13', cards: [{
+    id: 'report-1', batch_id: 'batch-report', scene_id: 'analysis', uploaded_at: '2026-08-13T10:00:00Z',
+    payload: {
+      scene_id: 'analysis',
+      cards: [{ title: '你今天的综合报告', summary: '工作与家庭是主线。', evidence_segment_ids: ['s1'], external_source_ids: [] }],
+      reportMarkdown: '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。',
+      runtimeMetrics: { model_call_count: 8, input_tokens: 1000, output_tokens: 500, web_search_performed: false },
+    }, qa: [],
+  }] }] })
+
+  const [card] = normalized.feed[0].cards
+  assert.equal(normalized.feed[0].cards.length, 1)
+  assert.match(card.reportMarkdown, /^# 你今天的综合报告/)
+  assert.equal(card.runtimeMetrics.model_call_count, 8)
+  assert.deepEqual(card.detailSections, [])
+})
+
+test('single report keeps valid read-only annotations and drops invalid ones', () => {
+  const payload = (annotations) => ({ days: [{ date: '2026-08-14', cards: [{
+    id: 'report-annotations', batch_id: 'batch-report', scene_id: 'analysis', uploaded_at: '2026-08-14T10:00:00Z',
+    payload: {
+      scene_id: 'analysis', cards: [{ title: '报告', summary: '摘要' }],
+      reportMarkdown: '# 报告\n\n## 工作\n\n正文。', reportAnnotations: annotations,
+    }, qa: [],
+  }] }] })
+  const valid = [
+    { block_id: 'block_001', type: 'page_title' },
+    { block_id: 'block_002', type: 'section_heading' },
+    { block_id: 'block_003', type: 'paragraph' },
+  ]
+
+  assert.deepEqual(normalizeFeed(payload(valid)).feed[0].cards[0].reportAnnotations, valid)
+  assert.equal(normalizeFeed(payload([{ block_id: 'block_001', type: 'card' }])).feed[0].cards[0].reportAnnotations, null)
+  assert.equal(normalizeFeed(payload([{ block_id: 'block_001', type: 'paragraph', text: '禁止正文副本' }])).feed[0].cards[0].reportAnnotations, null)
+})
+
+test('structured report is normalized and preferred while markdown remains available', () => {
+  const reportDocument = {
+    schema_version: 1,
+    title: '结构化报告',
+    overview: {
+      summary: '你需要核实关键事实。',
+      rows: [{ phase: '下午', event: '完成面试。', improvement: '确认边界。', evidence_segment_ids: ['s1'] }],
+    },
+    sections: [{ title: '面试判断', blocks: [{ type: 'paragraph', text: '信息仍不完整。' }] }],
+    todos: [], evidence_segment_ids: ['s1'], external_source_ids: [],
+  }
+  const normalized = normalizeFeed({ days: [{ date: '2026-08-14', cards: [{
+    id: 'structured-1', batch_id: 'batch-1', scene_id: 'analysis', uploaded_at: '2026-08-14T10:00:00Z',
+    payload: {
+      scene_id: 'analysis',
+      cards: [{ title: '结构化报告', summary: '你需要核实关键事实。' }],
+      reportDocument,
+      reportMarkdown: '# 兼容内容\n\n## 核心结论\n\n旧内容。',
+    }, qa: [],
+  }] }] })
+
+  const [card] = normalized.feed[0].cards
+  assert.deepEqual(card.reportDocument, reportDocument)
+  assert.match(card.reportMarkdown, /^# 兼容内容/)
 })
 
 
@@ -279,4 +348,25 @@ test('selected old detail snapshot keeps its QA while a reopened published card 
 
   assert.deepEqual(selectedCard.batch.qa[selectedCard.card.id], [{ q: '旧问题', a: '旧回答' }])
   assert.deepEqual(publishedState.feed[0].qa[publishedState.feed[0].cards[0].id], [])
+})
+
+test('analysisBlocks preserves report heading levels for numbered reading hierarchy', () => {
+  const blocks = analysisBlocks('## 核心结论\n\n正文\n\n## 工作与职业选择\n\n### 午餐深谈\n\n内容')
+  const headings = blocks.filter((block) => block.kind === 'heading')
+
+  assert.deepEqual(headings, [
+    { kind: 'heading', level: 2, text: '核心结论' },
+    { kind: 'heading', level: 2, text: '工作与职业选择' },
+    { kind: 'heading', level: 3, text: '午餐深谈' },
+  ])
+})
+
+test('analysisBlocks preserves quoted source text as a quote block', () => {
+  const blocks = analysisBlocks('正文\n\n> “我是第一类人。”\n\n后文')
+
+  assert.deepEqual(blocks, [
+    { kind: 'paragraph', text: '正文' },
+    { kind: 'quote', text: '我是第一类人。' },
+    { kind: 'paragraph', text: '后文' },
+  ])
 })

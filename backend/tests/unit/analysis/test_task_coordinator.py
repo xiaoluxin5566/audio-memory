@@ -120,6 +120,35 @@ async def test_same_source_cannot_be_pending_or_running_twice(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_version_freezes_report_pipeline_parameters_and_empty_state(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "pipeline-parameters.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-parameters")
+    coordinator = AnalysisTaskCoordinator(database)
+
+    await coordinator.submit_new_upload(
+        request("job-parameters", batch_id=None, priority=0)
+    )
+
+    async with database.session() as session:
+        version = await session.scalar(select(AnalysisVersion))
+    assert version is not None
+    parameters = json.loads(version.pipeline_parameters_json)
+    assert parameters["provider_id"] == "kimi"
+    assert parameters["model_id"] == "kimi-k2.5"
+    assert parameters["fixed_rules_hash"] == PromptComposer.fixed_rules_hash()
+    assert [item["role"] for item in parameters["prompt_manifest"]] == [
+        item["role"] for item in PromptComposer.final_report_prompt_manifest()
+    ]
+    assert len(version.pipeline_parameters_fingerprint) == 64
+    assert json.loads(version.pipeline_checkpoints_json) == {}
+    assert json.loads(version.pipeline_metrics_json)["model_call_count"] == 0
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_restart_returns_running_request_to_pending(tmp_path) -> None:
     database = Database(tmp_path / "restart.sqlite3")
     await database.create_schema()

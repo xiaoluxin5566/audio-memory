@@ -46,6 +46,10 @@ from audio_memory.prompts.day_map_schema import (
     ExternalSource,
     SearchRound,
 )
+from audio_memory.prompts.report_schema import SingleReportDraft
+from audio_memory.analysis.markdown_report import MarkdownReportResult
+from audio_memory.analysis.direct_report_document import StructuredReportResult
+from audio_memory.analysis.pipeline_state import PipelineMetrics
 from audio_memory.prompts.store import PROMPT_SCENES
 
 
@@ -99,15 +103,48 @@ class VersionPublisher:
     async def publish(
         self,
         version_id: str,
-        results: list[SceneResultBase] | AutonomousAnalysisResult,
+        results: list[SceneResultBase] | AutonomousAnalysisResult | SingleReportDraft | MarkdownReportResult | StructuredReportResult,
         profile_candidates: list[ProfileDelta],
         *,
         worker_owner_id: str | None = None,
     ) -> AnalysisOutcome:
+        markdown_report = isinstance(
+            results, (SingleReportDraft, MarkdownReportResult, StructuredReportResult)
+        )
         autonomous = isinstance(results, AutonomousAnalysisResult)
-        if autonomous:
+        if markdown_report:
+            visible = [results]
+            if isinstance(results, SingleReportDraft):
+                report_todos = results.todos
+            elif isinstance(results, StructuredReportResult):
+                report_todos = results.document.todos
+            else:
+                report_todos = []
+            drafts = [
+                StrictTodoDraft(
+                    text=todo.text,
+                    action=todo.action,
+                    object=todo.object,
+                    owner_type=todo.owner_type,
+                    assignee_text=todo.assignee_text,
+                    due_at=todo.due_at,
+                    due_text=todo.due_text,
+                    intent_type="commitment",
+                    source_event_id=(
+                        "event_report_"
+                        + sha256(todo.source_scene_id.encode("utf-8")).hexdigest()[:16]
+                    ),
+                    source_context=(
+                        todo.next_step or todo.dependency or todo.text
+                    ),
+                    evidence_segment_ids=todo.evidence_segment_ids,
+                    confidence=todo.confidence,
+                )
+                for todo in report_todos
+            ]
+        elif autonomous:
             visible = list(results.cards)
-            drafts: list[StrictTodoDraft] = []
+            drafts = list(results.todos)
         else:
             by_scene = self._validated_scenes(results)
             visible = [
@@ -143,7 +180,7 @@ class VersionPublisher:
             day_map_publication = (
                 self._day_map_publication(version, visible) if autonomous else None
             )
-            published_card_count = len(visible) + int(day_map_publication is not None)
+            published_card_count = len(visible)
 
         destinations = self._move_first_publication_audio(
             version, batch_id, files
@@ -183,7 +220,11 @@ class VersionPublisher:
                 await self._finalize_audio_rows(
                     session, job.id, files, destinations
                 )
-                if autonomous and day_map_publication is not None:
+                if markdown_report:
+                    await self._insert_markdown_report(
+                        session, version, batch, results
+                    )
+                elif autonomous and day_map_publication is not None:
                     await self._replace_day_map_cards(
                         session,
                         version,
@@ -376,6 +417,60 @@ class VersionPublisher:
                 )
 
     @staticmethod
+    async def _insert_markdown_report(
+        session,
+        version: AnalysisVersion,
+        batch: Batch,
+        report: SingleReportDraft | MarkdownReportResult | StructuredReportResult,
+    ) -> None:
+        card_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"audio-memory-card:{version.id}:analysis:0",
+            )
+        )
+        if await session.get(Card, card_id) is not None:
+            return
+        metrics = PipelineMetrics.model_validate_json(
+            version.pipeline_metrics_json or "{}"
+        )
+        evidence_segment_ids = getattr(report, "evidence_segment_ids", [])
+        external_source_ids = getattr(report, "external_source_ids", [])
+        report_document = None
+        if isinstance(report, StructuredReportResult):
+            report_document = report.document.model_dump(mode="json")
+            evidence_segment_ids = report.document.evidence_segment_ids
+            external_source_ids = report.document.external_source_ids
+        payload = {
+            "scene_id": "analysis",
+            "cards": [
+                {
+                    "title": report.title,
+                    "summary": report.summary,
+                    "evidence_segment_ids": evidence_segment_ids,
+                    "external_source_ids": external_source_ids,
+                }
+            ],
+            "reportMarkdown": report.report_markdown,
+            "runtimeMetrics": metrics.model_dump(mode="json"),
+        }
+        report_annotations = getattr(report, "report_annotations", None)
+        if report_annotations:
+            payload["reportAnnotations"] = list(report_annotations)
+        if report_document is not None:
+            payload["reportDocument"] = report_document
+        session.add(
+            Card(
+                id=card_id,
+                batch_id=batch.id,
+                analysis_version_id=version.id,
+                scene_id="analysis",
+                position=0,
+                payload_json=json.dumps(payload, ensure_ascii=False),
+            )
+        )
+
+    @staticmethod
     async def _replace_day_map_cards(
         session,
         version: AnalysisVersion,
@@ -388,29 +483,7 @@ class VersionPublisher:
         await session.execute(
             delete(Card).where(Card.analysis_version_id == version.id)
         )
-        session.add(
-            Card(
-                id=str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"audio-memory-card:{version.id}:batch-overview:0",
-                    )
-                ),
-                batch_id=batch.id,
-                analysis_version_id=version.id,
-                scene_id="batch_overview",
-                position=0,
-                payload_json=json.dumps(
-                    {
-                        "scene_id": "batch_overview",
-                        "kind": "batch_overview",
-                        "overview": overview.model_dump(mode="json"),
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-        )
-        for position, card in enumerate(cards, start=1):
+        for position, card in enumerate(cards):
             session.add(
                 Card(
                     id=str(

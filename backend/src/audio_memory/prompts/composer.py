@@ -14,6 +14,9 @@ from audio_memory.analysis.dossiers import SceneDossier, dossiers_for_scene
 from audio_memory.prompts import evidence as evidence_policy
 from audio_memory.prompts.day_map_schema import ExternalSource
 from audio_memory.prompts.event_schema import EventMap
+from audio_memory.prompts.direct_report_schema import DirectReportDocument
+from audio_memory.prompts.direct_report_review_schema import DirectReportReview
+from audio_memory.prompts.direct_report_annotation_schema import DirectReportAnnotations
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
@@ -71,8 +74,218 @@ class ModelRequest:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DirectReportRequest:
+    scene_id: str
+    instructions: str
+    user_data: str
+    max_tokens: int
+    timeout_seconds: float
+    segment_count: int
+    schema_json: str
+    response_format: str = "json_object"
+
+
 class PromptComposer:
     SCHEMA_VERSION = 5
+
+    @classmethod
+    def default_user_analysis_goal(cls) -> str:
+        return cls._fixed_prompt("user-analysis-goal.md")
+
+    def compose_direct_report(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(DirectReportDocument.model_json_schema())
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report.md"),
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_direct_report_markdown(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        instructions = "\n\n".join(
+            [
+                self._legacy_direct_report_system_prompt(),
+                self._legacy_direct_report_prompt(),
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json="",
+            response_format="text",
+        )
+
+    def compose_direct_report_review(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        initial_report_markdown: str,
+        sections,
+        gate_failures: tuple[str, ...],
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(DirectReportReview.model_json_schema())
+        section_index = [
+            {
+                "section_id": item.section_id,
+                "title": item.title,
+                "markdown": item.markdown,
+            }
+            for item in sections
+        ]
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-review.md"),
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                self._untrusted_packet("deterministic_gate_failures", list(gate_failures)),
+                self._untrusted_packet("report_section_index", section_index),
+                "<untrusted_initial_report_markdown>\n"
+                + initial_report_markdown
+                + "\n</untrusted_initial_report_markdown>",
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-review",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_direct_report_annotations(self, *, blocks) -> DirectReportRequest:
+        schema_json = self._schema_json(DirectReportAnnotations.model_json_schema())
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-annotations.md"),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = self._untrusted_packet(
+            "immutable_report_blocks",
+            [
+                {"block_id": item.block_id, "markdown": item.markdown}
+                for item in blocks
+            ],
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-annotations",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=8_192,
+            timeout_seconds=300,
+            segment_count=0,
+            schema_json=schema_json,
+        )
+
+    @classmethod
+    def _legacy_direct_report_system_prompt(cls) -> str:
+        prompt = cls._fixed_prompt("direct-report-system.md")
+        prompt = prompt.replace(
+            "你是 Audio Memory 的全天录音分析师。你的任务是完整理解本次输入，并输出符合给定 Schema 的语义化报告内容。",
+            "你是 Audio Memory 的全天录音分析师。你的任务是完整理解本次输入，并直接输出可展示给读者的最终 Markdown 报告。",
+        )
+        return prompt.replace(
+            "只输出一个符合 Schema 的 JSON 对象，不要输出 Markdown、HTML、代码围栏、解释或额外文字。Schema 只规定内容语义；不要添加任何界面呈现信息。",
+            "只输出最终 Markdown，不要输出 JSON，不要包裹 Markdown 代码围栏，不要解释你如何完成任务。",
+        )
+
+    @classmethod
+    def _legacy_direct_report_prompt(cls) -> str:
+        analytical_rules = cls._fixed_prompt("direct-report.md").split(
+            "\n\n## 内容结构契约", 1
+        )[0]
+        return analytical_rules + "\n\n" + cls._fixed_prompt("direct-report-markdown.md")
+
+    @classmethod
+    def final_report_prompt_manifest(cls) -> tuple[dict[str, object], ...]:
+        prompt_sources = (
+            ("user-analysis-goal", ("user-analysis-goal.md",)),
+            ("direct-report-system", ("direct-report-system.md",)),
+            ("direct-report", ("direct-report.md",)),
+        )
+        manifest: list[dict[str, object]] = []
+        for role, filenames in prompt_sources:
+            content = "\n\n".join(cls._fixed_prompt(name) for name in filenames)
+            manifest.append(
+                {
+                    "role": role,
+                    "files": filenames,
+                    "sha256": sha256(content.encode("utf-8")).hexdigest(),
+                    "content": content,
+                }
+            )
+        schema_content = cls._schema_json(DirectReportDocument.model_json_schema())
+        manifest.append(
+            {
+                "role": "direct-report-schema",
+                "files": (),
+                "sha256": sha256(schema_content.encode("utf-8")).hexdigest(),
+                "content": schema_content,
+            }
+        )
+        return tuple(manifest)
 
     @classmethod
     def autonomous_prompt_documents(cls) -> tuple[dict[str, object], ...]:
@@ -628,7 +841,12 @@ class PromptComposer:
 
     @staticmethod
     def _schema_json(schema: dict[str, object]) -> str:
-        return json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _event_map_transcript(

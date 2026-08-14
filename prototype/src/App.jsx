@@ -7,12 +7,13 @@ import {
 } from './store.js';
 import { api } from './api/client.js';
 import { uploadFile } from './api/upload.js';
-import { normalizeFeed, normalizeHistory, normalizePrompts } from './api/state.js';
+import { analysisBlocks, normalizeFeed, normalizeHistory, normalizePrompts } from './api/state.js';
 import { useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
 import { useReanalysis } from './hooks/useReanalysis.js';
 import { ReanalysisModal } from './components/ReanalysisModal.jsx';
 import { getReanalysisView, isActiveReanalysis } from './api/state.js';
+import { buildReportEventMap } from './reportPresentation.js';
 import './styles.css';
 
 const ROUTES = { '/': 'feed', '/history': 'history', '/settings/prompts': 'prompts' };
@@ -281,8 +282,8 @@ function JobPanel({ job, onRetry, onCancel }) {
   if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
   if (job.stage === 'failed') return <div className="job-card error"><b>模型分析失败</b>{job.error_code && <code>{job.error_code}</code>}<p>已保留完整转写；可修改当前厂商后重新分析，不会再次执行 Whisper。</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>重新分析</button></div></div>;
   const transcribing = job.stage === 'transcribing';
-  const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : '生成深度分析';
-  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />自主分析、隐藏画像与发布<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
+  const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : 'DeepSeek 正在阅读全文并生成报告';
+  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {
@@ -320,23 +321,9 @@ export function FeedbackModal({ rating, comment, onRating, onComment, onSubmit, 
 }
 
 function CardDetail({ card, batch, onClose, onToast }) {
-  const [question, setQuestion] = useState('');
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [rating, setRating] = useState('');
   const [comment, setComment] = useState('');
-  const [qa, setQa] = useState(batch.qa?.[card.id] ?? []);
-  async function ask() {
-    if (!question.trim()) return;
-    const response = await api.askCard(card.apiId ?? card.id, question.trim());
-    const pairs = [];
-    for (let index = 0; index < response.messages.length; index += 2) {
-      const user = response.messages[index];
-      const assistant = response.messages[index + 1];
-      if (user?.role === 'user' && assistant?.role === 'assistant') pairs.push({ q: user.content, a: assistant.content });
-    }
-    setQa(pairs);
-    setQuestion('');
-  }
   async function submitFeedback(selectedRating = rating) {
     const submission = getFeedbackFormState(selectedRating, comment);
     if (!submission.canSubmit) return;
@@ -347,7 +334,58 @@ function CardDetail({ card, batch, onClose, onToast }) {
   function closeFeedback() {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}<ExternalSources sources={card.sources} />{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}{qa.length > 0 && <section className="qa-section"><h2>对话记录</h2>{qa.map((item, index) => <div className="qa-pair" key={`${item.q}-${index}`}><div className="chat-message user"><div className="chat-bubble">{item.q}</div></div><div className="chat-message assistant"><div className="chat-bubble">{item.a}</div></div></div>)}</section>}<section className="ask-section"><h2>继续追问</h2><p>仅围绕当前{card.label}内容回答。</p><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：帮我把最关键的下一步说得更具体" /><button className="primary" onClick={ask}>发送</button></div></section></div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  const presentation = card.reportDocument ? null : buildReportEventMap(card.reportMarkdown);
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} />}{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+}
+
+function ReportEventMap({ presentation }) {
+  return <section className="report-event-map" aria-labelledby="report-event-map-title"><div className="report-event-map-intro"><h2 id="report-event-map-title">今天发生了什么，重点改进什么</h2><p>{presentation.summary}</p></div><div className="report-event-table-wrap"><table className="report-event-table"><thead><tr><th>阶段</th><th>发生的事</th><th>对应的改进</th></tr></thead><tbody>{presentation.events.map((event) => <tr key={event.kind}><td><strong>{event.phase}</strong></td><td>{event.event}</td><td><strong>{event.improvementTitle}</strong>{event.improvementDetail && <p>{event.improvementDetail}</p>}</td></tr>)}</tbody></table></div></section>;
+}
+
+function omitMarkdownSection(markdown, sectionTitle) {
+  const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
+  let skipping = false;
+  return lines.filter((line) => {
+    const heading = /^##\s+(.+)$/.exec(line.trim());
+    if (heading) skipping = heading[1].trim() === sectionTitle;
+    return !skipping;
+  }).join('\n');
+}
+
+function StructuredReport({ document }) {
+  return <article className="markdown-report structured-report"><section className="report-event-map"><div className="report-event-map-intro"><h2>今天发生了什么，重点改进什么</h2><p>{document.overview.summary}</p></div><div className="report-event-table-wrap"><table className="report-event-table"><thead><tr><th>阶段</th><th>发生的事</th><th>对应的改进</th></tr></thead><tbody>{document.overview.rows.map((row, index) => <tr key={`${row.phase}-${index}`}><td><strong>{row.phase}</strong></td><td>{row.event}</td><td>{row.improvement}</td></tr>)}</tbody></table></div></section><div className="structured-sections">{document.sections.map((section, sectionIndex) => {
+    let subsectionIndex = 0;
+    return <section className="structured-section" key={`${section.title}-${sectionIndex}`}><h2 className="analysis-section-heading"><span>{sectionIndex + 1}</span>{section.title}</h2><div className="structured-blocks">{section.content ? section.content.split(/\n\s*\n/).filter(Boolean).map((paragraph, paragraphIndex) => <p className="analysis-paragraph" key={paragraphIndex}>{paragraph}</p>) : section.blocks.map((block, blockIndex) => {
+      const currentSubsection = ['subsection', 'subheading'].includes(block.type) ? subsectionIndex + 1 : subsectionIndex;
+      if (['subsection', 'subheading'].includes(block.type)) subsectionIndex = currentSubsection;
+      return <StructuredBlock block={block} sectionNumber={sectionIndex + 1} subsectionNumber={currentSubsection} key={`${block.type}-${blockIndex}`} />;
+    })}</div></section>;
+  })}</div></article>;
+}
+
+function StructuredBlock({ block, sectionNumber, subsectionNumber }) {
+  if (block.type === 'paragraph') return <p className="analysis-paragraph">{block.text}</p>;
+  if (block.type === 'source_quote') return <blockquote className="analysis-quote structured-source-quote">“{block.text}”</blockquote>;
+  if (block.type === 'quote') return <blockquote className="analysis-quote structured-source-quote">“{block.text.replace(/^“|”$/g, '')}”</blockquote>;
+  if (block.type === 'suggested_wording') return <blockquote className="analysis-quote structured-suggested-wording">“{block.text}”</blockquote>;
+  if (block.type === 'bullet_list') return <ul className="analysis-key-points">{block.items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>;
+  if (block.type === 'numbered_list') return <ol className="analysis-insight-grid">{block.items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ol>;
+  if (block.type === 'table') return <div className="analysis-matrix-wrap"><table className="analysis-matrix"><thead><tr>{block.columns.map((column, index) => <th key={`${column}-${index}`}>{column}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table></div>;
+  if (block.type === 'subsection') return <section className="structured-subsection"><h3 className="analysis-subheading"><span>{sectionNumber}.{subsectionNumber}</span>{block.title}</h3><div className="structured-blocks">{block.blocks.map((child, index) => <StructuredBlock block={child} sectionNumber={sectionNumber} subsectionNumber={subsectionNumber} key={`${child.type}-${index}`} />)}</div></section>;
+  if (block.type === 'subheading') return <h3 className="analysis-subheading"><span>{sectionNumber}.{subsectionNumber}</span>{block.title}</h3>;
+  return null;
+}
+
+function MarkdownReport({ markdown = '', annotations = null, omitCoreConclusion = false }) {
+  const title = String(markdown).split('\n').find((line) => /^#\s+/.test(line))?.replace(/^#\s+/, '') || '';
+  const body = String(markdown).replace(/^#\s+.*(?:\r?\n|$)/, '');
+  const reportBody = omitCoreConclusion ? omitMarkdownSection(body, '核心结论') : body;
+  return <article className="markdown-report" data-annotation-mode={annotations ? 'model' : 'markdown'}><AnalysisBlocks blocks={analysisBlocks(reportBody, 'full-report', title)} /></article>;
+}
+
+function RuntimeMetrics({ metrics }) {
+  if (!metrics) return null;
+  return <section className="runtime-metrics"><h2>数据范围与运行信息</h2><table className="runtime-metrics-table"><tbody><tr><th>模型调用</th><td>{metrics.model_call_count ?? 0} 次</td></tr><tr><th>输入 Token</th><td>{metrics.input_tokens ?? 0}</td></tr><tr><th>输出 Token</th><td>{metrics.output_tokens ?? 0}</td></tr><tr><th>联网核验</th><td>{metrics.web_search_performed ? '已进行' : '未进行'}</td></tr></tbody></table></section>;
 }
 
 function ExternalSources({ sources = [] }) {
@@ -389,12 +427,18 @@ function RichInline({ text = '' }) {
 }
 
 function AnalysisBlocks({ blocks = [] }) {
+  let majorSectionNumber = 0;
+  let minorSectionNumber = 0;
   return <div className="analysis-blocks">{blocks.map((block, index) => {
+    if (block.kind === 'image') return <figure className="report-image" key={index}><img src={block.src} alt={block.alt} loading="lazy" referrerPolicy="no-referrer" />{block.alt && <figcaption>{block.alt}</figcaption>}</figure>;
+    if (block.kind === 'quote') return <blockquote className="analysis-quote" key={index}>“{block.text}”</blockquote>;
+    if (block.kind === 'heading' && block.level === 2) { majorSectionNumber += 1; minorSectionNumber = 0; return <h2 className="analysis-section-heading" key={index}><span>{majorSectionNumber}</span>{block.text}</h2>; }
+    if (block.kind === 'heading' && block.level >= 3) { minorSectionNumber += 1; return <h3 className="analysis-subheading" key={index}><span>{majorSectionNumber}.{minorSectionNumber}</span>{block.text}</h3>; }
     if (block.kind === 'heading') return <h3 className="analysis-subheading" key={index}>{block.text}</h3>;
     if (block.kind === 'bullet-list') return <ul className="analysis-key-points" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ul>;
     if (block.kind === 'timeline') return <ol className="analysis-timeline" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ol>;
     if (block.kind === 'cause-chain') return <div className="analysis-cause-chain" key={index}>{block.items.map((item, itemIndex) => <div className="cause-step" key={`${item}-${itemIndex}`}><span><RichInline text={item} /></span>{itemIndex < block.items.length - 1 && <b aria-hidden="true">→</b>}</div>)}</div>;
-    if (block.kind === 'numbered-list') return <div className="analysis-insight-grid" key={index}>{block.items.map((item, itemIndex) => { const parts = item.split(/[：:]/); const label = parts.length > 1 ? parts.shift() : `${itemIndex + 1}`; return <article key={item}><span>{String(itemIndex + 1).padStart(2, '0')}</span><h4>{label}</h4><p><RichInline text={parts.length ? parts.join('：') : item} /></p></article>; })}</div>;
+    if (block.kind === 'numbered-list') return <ol className="analysis-insight-grid" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ol>;
     if (block.kind === 'matrix') return <div className="analysis-matrix-wrap" key={index}><table className="analysis-matrix"><thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}>{cell}</th>)}</tr></thead><tbody>{block.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><RichInline text={cell} /></td>)}</tr>)}</tbody></table></div>;
     return <p className="analysis-paragraph" key={index}><RichInline text={block.text} /></p>;
   })}</div>;

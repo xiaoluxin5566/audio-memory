@@ -354,6 +354,7 @@ class ProviderAnalysisClient:
         timeout_seconds: float = 120,
         segment_count: int = 0,
         repair_attempted: bool = False,
+        thinking_enabled: bool | None = None,
     ) -> str:
         async with self._remote_lock:
             return await self._generate_serialized(
@@ -366,6 +367,35 @@ class ProviderAnalysisClient:
                 timeout_seconds=timeout_seconds,
                 segment_count=segment_count,
                 repair_attempted=repair_attempted,
+                thinking_enabled=thinking_enabled,
+            )
+
+    async def generate_markdown(
+        self,
+        provider_id: str,
+        *,
+        system: str,
+        user: str,
+        model_id: str | None = None,
+        scene_id: str = "direct-report",
+        max_tokens: int | None = None,
+        timeout_seconds: float = 900,
+        segment_count: int = 0,
+    ) -> str:
+        async with self._remote_lock:
+            return await self._generate_serialized(
+                provider_id,
+                system=system,
+                user=user,
+                model_id=model_id,
+                scene_id=scene_id,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+                segment_count=segment_count,
+                repair_attempted=False,
+                thinking_enabled=True,
+                response_format="text",
+                reasoning_effort="high",
             )
 
     async def _generate_serialized(
@@ -380,6 +410,9 @@ class ProviderAnalysisClient:
         timeout_seconds: float = 120,
         segment_count: int = 0,
         repair_attempted: bool = False,
+        thinking_enabled: bool | None = None,
+        response_format: str = "json_object",
+        reasoning_effort: str | None = None,
     ) -> str:
         read = self.keychain.read(provider_id)
         if read.status is not KeychainStatus.CONFIGURED or read.secret is None:
@@ -402,6 +435,9 @@ class ProviderAnalysisClient:
                     timeout_seconds=timeout_seconds,
                     segment_count=segment_count,
                     repair_attempted=repair_attempted,
+                    thinking_enabled=thinking_enabled,
+                    response_format=response_format,
+                    reasoning_effort=reasoning_effort,
                 )
             except ProviderAnalysisError as exc:
                 last_error = exc
@@ -423,6 +459,9 @@ class ProviderAnalysisClient:
         timeout_seconds: float,
         segment_count: int,
         repair_attempted: bool,
+        thinking_enabled: bool | None,
+        response_format: str,
+        reasoning_effort: str | None,
     ) -> str:
         config = PROVIDER_CONFIGS[provider_id]
         resolved_model = model_id or config.model_id
@@ -442,12 +481,19 @@ class ProviderAnalysisClient:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0,
                 "stream": False,
-                "response_format": {"type": "json_object"},
+                "response_format": {"type": response_format},
             }
+            if response_format == "json_object":
+                payload["temperature"] = 0
             if max_tokens is not None:
                 payload["max_tokens"] = max_tokens
+            if thinking_enabled is not None:
+                payload["thinking"] = {
+                    "type": "enabled" if thinking_enabled else "disabled"
+                }
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
         payload = self.adapters[provider_id].analysis_payload(payload)
         request_bytes = len(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
@@ -740,6 +786,24 @@ class RemoteSceneAnalyzer:
             request=request,
             provider_snapshot=provider_snapshot,
             parse=lambda raw: parse_scene_output(raw, expected_scene=scene_id),
+        )
+
+    async def analyze_structured(
+        self,
+        request,
+        provider_snapshot,
+        *,
+        result_type: type[BaseModel],
+        invalid_code: str,
+        repair_rules: str = "",
+    ) -> BaseModel:
+        """Run a report-pipeline phase through one strict repair boundary."""
+        return await self._analyze_autonomous_phase_with_one_repair(
+            request=request,
+            provider_snapshot=provider_snapshot,
+            parse=result_type.model_validate_json,
+            invalid_code=invalid_code,
+            repair_rules=repair_rules,
         )
 
     async def analyze_autonomous(self, request, provider_snapshot) -> AutonomousAnalysisResult:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from hashlib import sha256
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from audio_memory.models import (
     ReanalysisItem,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.analysis.pipeline_state import PipelineMetrics
 from audio_memory.reanalysis.preview import (
     current_fixed_rule_hashes,
     transcript_fingerprint_from_session,
@@ -233,6 +235,30 @@ class AnalysisTaskCoordinator:
             request.profile_snapshot, ensure_ascii=False, sort_keys=True
         )
         fixed_rules_hash = PromptComposer.fixed_rules_hash()
+        prompt_manifest = [
+            {
+                "role": item["role"],
+                "files": item["files"],
+                "sha256": item["sha256"],
+            }
+            for item in PromptComposer.final_report_prompt_manifest()
+        ]
+        pipeline_parameters = {
+            "provider_id": request.provider_id,
+            "model_id": request.model_id,
+            "credential_generation": request.credential_generation,
+            "fixed_rules_hash": fixed_rules_hash,
+            "prompt_manifest": prompt_manifest,
+        }
+        pipeline_parameters_json = json.dumps(
+            pipeline_parameters,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        pipeline_parameters_fingerprint = sha256(
+            pipeline_parameters_json.encode("utf-8")
+        ).hexdigest()
         version_id = str(uuid4())
         async with self._condition:
             async with self.maintenance_guard():
@@ -349,6 +375,12 @@ class AnalysisTaskCoordinator:
                             event_map_json=request.event_map_json,
                             event_map_hash=request.event_map_hash,
                             staged_results_json="{}",
+                            pipeline_parameters_json=pipeline_parameters_json,
+                            pipeline_parameters_fingerprint=(
+                                pipeline_parameters_fingerprint
+                            ),
+                            pipeline_checkpoints_json="{}",
+                            pipeline_metrics_json=PipelineMetrics().model_dump_json(),
                             priority=request.priority,
                             status="pending",
                             reanalysis_batch_id=(

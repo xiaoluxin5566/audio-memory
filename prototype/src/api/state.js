@@ -1,3 +1,23 @@
+import { normalizeReportDocument } from '../reportDocument.js'
+
+const REPORT_ANNOTATION_TYPES = new Set([
+  'page_title', 'overview', 'section_heading', 'subheading', 'paragraph',
+  'quote', 'bullet_list', 'numbered_list', 'table',
+])
+
+function normalizeReportAnnotations(value) {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const seen = new Set()
+  const annotations = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Object.keys(item).some((key) => !['block_id', 'type'].includes(key))) return null
+    if (!/^block_\d{3,}$/.test(item.block_id) || !REPORT_ANNOTATION_TYPES.has(item.type) || seen.has(item.block_id)) return null
+    seen.add(item.block_id)
+    annotations.push({ block_id: item.block_id, type: item.type })
+  }
+  return annotations
+}
+
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI' }
 const SCENE_LABELS = {
   analysis: 'AI 深度分析',
@@ -212,7 +232,7 @@ function isTableDivider(line) {
   return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
 }
 
-function analysisBlocks(body = '', sectionType = '', title = '') {
+export function analysisBlocks(body = '', sectionType = '', title = '') {
   const lines = String(body).replace(/\r\n/g, '\n').split('\n')
   const blocks = []
   let currentHeading = ''
@@ -221,9 +241,28 @@ function analysisBlocks(body = '', sectionType = '', title = '') {
     const line = lines[index].trim()
     if (!line) { index += 1; continue }
 
+    if (/^>\s?/.test(line)) {
+      const quotedLines = []
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quotedLines.push(lines[index].trim().replace(/^>\s?/, ''))
+        index += 1
+      }
+      const text = quotedLines.join(' ').trim().replace(/^[“”"']+|[“”"']+$/g, '')
+      blocks.push({ kind: 'quote', text })
+      continue
+    }
+
+    const image = /^!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)$/.exec(line)
+    if (image) {
+      blocks.push({ kind: 'image', alt: image[1], src: image[2] })
+      index += 1
+      continue
+    }
+
     if (/^\*\*[^*]+\*\*$/.test(line) || /^#{2,4}\s+/.test(line)) {
+      const markdownHeading = /^(#{2,4})\s+/.exec(line)
       currentHeading = line.replace(/^#{2,4}\s+/, '').replace(/^\*\*|\*\*$/g, '')
-      blocks.push({ kind: 'heading', text: currentHeading })
+      blocks.push({ kind: 'heading', ...(markdownHeading ? { level: markdownHeading[1].length } : {}), text: currentHeading })
       index += 1
       continue
     }
@@ -304,7 +343,11 @@ function normalizeStrictCards(item, batch) {
       summary: (item.scene_id === 'analysis' ? source.summary : shell.summary) ?? '',
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',
-      detailSections: item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail),
+      detailSections: payload.reportMarkdown ? [] : (item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail)),
+      reportMarkdown: typeof payload.reportMarkdown === 'string' ? payload.reportMarkdown : '',
+      reportDocument: normalizeReportDocument(payload.reportDocument),
+      reportAnnotations: normalizeReportAnnotations(payload.reportAnnotations),
+      runtimeMetrics: payload.runtimeMetrics && typeof payload.runtimeMetrics === 'object' ? payload.runtimeMetrics : null,
       details: strictCardDetails(item.scene_id, detail),
       sources: normalizeExternalSources(source, item.sources),
       evidence: (item.evidence ?? [])

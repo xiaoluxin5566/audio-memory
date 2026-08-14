@@ -76,6 +76,25 @@ def test_initial_migration_creates_all_phase_one_tables(tmp_path: Path) -> None:
     }.issubset(tables)
 
 
+def test_report_pipeline_state_migration_adds_checkpoint_columns(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "report-pipeline-state.sqlite3"
+
+    run_migrations(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(analysis_versions)")
+        }
+
+    assert columns["pipeline_parameters_json"][3] == 1
+    assert columns["pipeline_parameters_fingerprint"][3] == 1
+    assert columns["pipeline_checkpoints_json"][3] == 1
+    assert columns["pipeline_metrics_json"][3] == 1
+
+
 def test_structured_transcript_migration_adds_required_metadata(tmp_path: Path) -> None:
     database_path = tmp_path / "structured.sqlite3"
 

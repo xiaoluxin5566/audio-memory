@@ -35,13 +35,11 @@ from audio_memory.transcription.engine import MLXWhisperEngine
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 from audio_memory.prompts.store import PromptStore
-from audio_memory.analysis.runner import AnalysisRunner
+from audio_memory.analysis.single_report_runner import SingleReportRunner
 from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
-    RemoteProfileExtractor,
     RemoteQuestionAnswerer,
-    RemoteSceneAnalyzer,
 )
 from audio_memory.analysis.publisher import AnalysisPublisher
 from audio_memory.content.service import ContentService
@@ -135,10 +133,9 @@ def create_app(
                 keychain_repository, analysis_http_client
             )
             analysis_publisher = AnalysisPublisher(database, resolved_paths)
-            analysis_runner = AnalysisRunner(
+            analysis_runner = SingleReportRunner(
                 database=database,
-                provider=RemoteSceneAnalyzer(analysis_client),
-                profile_extractor=RemoteProfileExtractor(analysis_client),
+                provider=analysis_client,
                 publisher=analysis_publisher,
                 generation_source=coordinator,
             )

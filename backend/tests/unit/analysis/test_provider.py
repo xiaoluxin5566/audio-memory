@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from audio_memory.analysis import provider as provider_module
 from audio_memory.analysis import windows as windows_module
@@ -47,6 +48,21 @@ class DirectorClient:
                 ]
             }
         )
+
+
+class StructuredResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str
+
+
+class StructuredClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        self.calls.append({"provider_id": provider_id, **kwargs})
+        return self.responses.pop(0)
 
 
 def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
@@ -113,6 +129,63 @@ async def test_remote_analyzer_parses_director_result_through_strict_boundary() 
 
 
 @pytest.mark.asyncio
+async def test_remote_analyzer_runs_any_new_phase_through_strict_schema() -> None:
+    client = StructuredClient(['{"status":"ready"}'])
+    analyzer = RemoteSceneAnalyzer(client)
+    request = type(
+        "Request",
+        (),
+        {
+            "rendered_instructions": "rules",
+            "user_data": "data",
+            "scene_id": "writing-prepare",
+            "max_tokens": 8_192,
+            "timeout_seconds": 180,
+            "segment_count": 0,
+        },
+    )()
+
+    result = await analyzer.analyze_structured(
+        request,
+        {"provider_id": "deepseek", "model_id": "deepseek-v4-pro"},
+        result_type=StructuredResult,
+        invalid_code="writing_prepare_invalid",
+    )
+
+    assert result == StructuredResult(status="ready")
+    assert client.calls[0]["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_remote_analyzer_repairs_invalid_new_phase_only_once() -> None:
+    client = StructuredClient(["{}", '{"status":"ready"}'])
+    analyzer = RemoteSceneAnalyzer(client)
+    request = type(
+        "Request",
+        (),
+        {
+            "rendered_instructions": "rules",
+            "user_data": "data",
+            "scene_id": "writer-session",
+            "max_tokens": 32_768,
+            "timeout_seconds": 300,
+            "segment_count": 0,
+        },
+    )()
+
+    result = await analyzer.analyze_structured(
+        request,
+        {"provider_id": "deepseek", "model_id": "deepseek-v4-pro"},
+        result_type=StructuredResult,
+        invalid_code="writer_session_invalid",
+    )
+
+    assert result.status == "ready"
+    assert [call["repair_attempted"] for call in client.calls] == [False, True]
+    assert "validation_feedback" in str(client.calls[1]["user"])
+
+
+@pytest.mark.asyncio
 async def test_deepseek_request_is_bounded_and_enables_thinking() -> None:
     captured: dict[str, object] = {}
 
@@ -157,6 +230,71 @@ async def test_deepseek_request_is_bounded_and_enables_thinking() -> None:
     assert timeout["read"] == 180.0
     assert provider.usage_totals == {"input_tokens": 9, "output_tokens": 4}
     assert len(provider.parameter_fingerprint) == 64
+
+
+@pytest.mark.asyncio
+async def test_deepseek_markdown_request_uses_text_mode_and_reasoning_effort() -> None:
+    captured: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "# 今日报告"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.generate_markdown(
+            "deepseek",
+            system="system rules",
+            user="full transcript",
+            model_id="deepseek-v4-pro",
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=10,
+        )
+
+    assert result == "# 今日报告"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert payload["response_format"] == {"type": "text"}
+    assert "temperature" not in payload
+
+
+@pytest.mark.asyncio
+async def test_deepseek_scan_can_explicitly_disable_thinking() -> None:
+    captured: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 4},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        await provider.generate(
+            "deepseek",
+            system="Return JSON.",
+            user="scan window",
+            scene_id="historical-scan",
+            max_tokens=4_096,
+            thinking_enabled=False,
+        )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["thinking"] == {"type": "disabled"}
 
 
 @pytest.mark.asyncio

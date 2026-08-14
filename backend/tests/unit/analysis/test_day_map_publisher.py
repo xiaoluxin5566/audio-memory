@@ -10,6 +10,10 @@ from audio_memory.analysis.publisher import VersionPublisher
 from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, AnalysisVersion, Card
 from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
+from audio_memory.prompts.report_schema import SingleReportDraft
+from audio_memory.analysis.markdown_report import MarkdownReportResult
+from audio_memory.analysis.direct_report_document import StructuredReportResult
+from audio_memory.prompts.direct_report_schema import DirectReportDocument
 
 
 SOURCE_ID = (
@@ -42,28 +46,169 @@ def autonomous_result() -> AutonomousAnalysisResult:
                     ],
                     "evidence_segment_ids": ["seg_0_0"],
                 },
-                {
-                    "title": "节目笔记",
-                    "summary": "记下了一个值得延展的观点。",
-                    "content": [
-                        {
-                            "type": "scene_reconstruction",
-                            "title": "场景还原",
-                            "body": "收听节目时做了口述笔记。",
-                            "evidence_segment_ids": ["seg_0_1"],
-                        },
-                        {
-                            "type": "analysis",
-                            "title": "核心分析",
-                            "body": "可以转成待验证的内容选题。",
-                            "evidence_segment_ids": ["seg_0_1"],
-                        },
-                    ],
-                    "evidence_segment_ids": ["seg_0_1"],
-                },
             ]
         }
     )
+
+
+def markdown_report() -> SingleReportDraft:
+    return SingleReportDraft(
+        title="今天最值得关注的三件事",
+        summary="工作决策、家庭分工和亲子互动都有后续事项。",
+        report_markdown=(
+            "# 核心结论\n\n你今天最需要推进的是工作决策闭环。\n\n"
+            "## 重要时间轴\n\n- 09:00 项目讨论\n\n"
+            "## 数据范围与质量\n\n本次逐字稿覆盖完整。"
+        ),
+        todos=[
+            {
+                "text": "确认一期范围",
+                "action": "确认",
+                "object": "一期范围",
+                "owner_type": "user",
+                "assignee_text": "你",
+                "due_at": None,
+                "due_text": "未明确",
+                "dependency": "等待设计评估",
+                "next_step": "整理两个方案",
+                "source_scene_id": "scene-work-1",
+                "evidence_segment_ids": ["seg_0_0"],
+                "confidence": 0.9,
+            }
+        ],
+        evidence_segment_ids=["seg_0_0"],
+        external_source_ids=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_markdown_report_publishes_exactly_one_card_with_metrics(tmp_path) -> None:
+    database = Database(tmp_path / "markdown-publisher.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-markdown", stage="ready_to_commit"))
+        session.add(
+            AnalysisVersion(
+                id="version-markdown",
+                source_job_id="job-markdown",
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="rules",
+                staged_results_json="{}",
+                pipeline_metrics_json=json.dumps(
+                    {
+                        "model_call_count": 6,
+                        "input_tokens": 12000,
+                        "output_tokens": 3000,
+                        "model_duration_ms": 9000,
+                    }
+                ),
+                status="running",
+            )
+        )
+        await session.commit()
+
+    outcome = await VersionPublisher(database).publish(
+        "version-markdown", markdown_report(), []
+    )
+
+    async with database.session() as session:
+        cards = list(await session.scalars(select(Card)))
+    assert outcome.card_count == 1
+    assert len(cards) == 1
+    payload = json.loads(cards[0].payload_json)
+    assert payload["reportMarkdown"].startswith("# 核心结论")
+    assert payload["runtimeMetrics"]["model_call_count"] == 6
+    assert payload["cards"][0]["title"] == "今天最值得关注的三件事"
+    assert outcome.todo_count == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_markdown_report_publishes_one_card_without_model_todos(tmp_path) -> None:
+    database = Database(tmp_path / "native-markdown.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-native", stage="analyzing"))
+        session.add(AnalysisVersion(
+            id="version-native", source_job_id="job-native", provider_id="deepseek",
+            model_id="deepseek-v4-pro", credential_generation=1,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash="rules", staged_results_json="{}", status="running",
+        ))
+        await session.commit()
+
+    outcome = await VersionPublisher(database).publish(
+        "version-native",
+        MarkdownReportResult.from_markdown(
+            "# 今日分析\n\n## 核心结论\n\n今天最重要的是推进项目闭环。"
+        ),
+        [],
+    )
+
+    async with database.session() as session:
+        cards = list(await session.scalars(select(Card)))
+    assert outcome.card_count == 1
+    assert outcome.todo_count == 0
+    assert json.loads(cards[0].payload_json)["reportMarkdown"].startswith("# 今日分析")
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_structured_report_publishes_document_and_markdown_compatibility(tmp_path) -> None:
+    database = Database(tmp_path / "structured-publisher.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-structured", stage="analyzing"))
+        session.add(AnalysisVersion(
+            id="version-structured", source_job_id="job-structured", provider_id="deepseek",
+            model_id="deepseek-v4-pro", credential_generation=1,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash="rules", staged_results_json="{}", status="running",
+        ))
+        await session.commit()
+    document = DirectReportDocument.model_validate(
+        {
+            "schema_version": 1,
+            "title": "今天的三个判断",
+            "overview": {
+                "summary": "你需要先核实关键事实。",
+                "rows": [
+                    {
+                        "phase": "下午",
+                        "event": "完成面试。",
+                        "improvement": "确认岗位边界。",
+                        "evidence_segment_ids": ["seg_0_0"],
+                    }
+                ],
+            },
+            "sections": [
+                {
+                    "title": "面试判断",
+                    "blocks": [{"type": "paragraph", "text": "你仍缺少岗位信息。"}],
+                }
+            ],
+            "todos": [],
+            "evidence_segment_ids": ["seg_0_0"],
+            "external_source_ids": [],
+        }
+    )
+
+    await VersionPublisher(database).publish(
+        "version-structured", StructuredReportResult.from_document(document), []
+    )
+
+    async with database.session() as session:
+        card = await session.scalar(select(Card))
+    payload = json.loads(card.payload_json)
+    assert payload["reportDocument"]["schema_version"] == 1
+    assert payload["reportDocument"]["overview"]["rows"]
+    assert payload["reportMarkdown"].startswith("# 今天的三个判断")
+    assert payload["cards"][0]["summary"] == payload["reportDocument"]["overview"]["summary"]
+    await database.dispose()
 
 
 def staged_day_map() -> dict[str, object]:
@@ -192,19 +337,9 @@ async def test_day_map_publication_is_idempotent_and_persists_provenance(
         version = await session.get(AnalysisVersion, "version-1")
 
     assert first == second
-    assert first.card_count == 3
-    assert [card.scene_id for card in cards] == [
-        "batch_overview",
-        "analysis",
-        "analysis",
-    ]
-    assert [card.position for card in cards] == [0, 1, 2]
-    assert sum(card.scene_id == "batch_overview" for card in cards) == 1
-    assert json.loads(cards[0].payload_json) == {
-        "scene_id": "batch_overview",
-        "kind": "batch_overview",
-        "overview": staged["day_map"]["overview"],
-    }
+    assert first.card_count == 1
+    assert [card.scene_id for card in cards] == ["analysis"]
+    assert [card.position for card in cards] == [0]
     assert version is not None
     assert json.loads(version.batch_overview_json) == staged["day_map"]["overview"]
     assert json.loads(version.search_rounds_json) == staged["search_rounds"]

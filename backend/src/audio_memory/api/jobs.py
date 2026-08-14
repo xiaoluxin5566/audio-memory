@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field as PydanticField
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.prompts.store import PROMPT_SCENES
+from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
 
@@ -99,14 +99,19 @@ async def snapshot_analysis_request(
     model_id: str,
     credential_generation: int,
 ) -> AnalysisRequest:
-    prompt_store = request.app.state.prompt_store
     prompts = {
-        scene_id: {
-            "version": document.version,
-            "content": document.content,
-        }
-        for scene_id in PROMPT_SCENES
-        for document in [prompt_store.get(scene_id)]
+        "user-analysis-goal": {
+            "version": 1,
+            "content": PromptComposer.default_user_analysis_goal(),
+        },
+        "direct-report": {
+            "version": 1,
+            "content": PromptComposer._fixed_prompt("direct-report.md"),
+        },
+        "direct-report-system": {
+            "version": 1,
+            "content": PromptComposer._fixed_prompt("direct-report-system.md"),
+        },
     }
     database = request.app.state.database
     async with database.session() as session:
