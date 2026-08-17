@@ -41,6 +41,7 @@ class KeychainRepository:
         "kimi": "provider:kimi",
         "deepseek": "provider:deepseek",
         "openai": "provider:openai",
+        "glm": "provider:glm",
     }
 
     def __init__(self, client: SecurityClient) -> None:

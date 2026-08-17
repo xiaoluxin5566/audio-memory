@@ -36,6 +36,13 @@ test('successful provider configuration activates it and closes the modal', asyn
   assert.ok(submitBody.indexOf('activateProvider') < submitBody.indexOf('onClose()'))
 })
 
+test('report preview does not wait for the live history API before rendering', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../src/api/client.js', import.meta.url), 'utf8'))
+  const api = source.slice(source.indexOf('export const api'), source.length)
+
+  assert.match(api, /history:\s*\(\)\s*=>\s*isReportPreview\(\)\s*\?\s*Promise\.resolve\(\{\s*days:\s*\[\]\s*\}\)/)
+})
+
 
 test('mutating requests use one memory-only local session and an action idempotency key', async () => {
   const client = await import(`../src/api/client.js?session-headers=${Date.now()}`)

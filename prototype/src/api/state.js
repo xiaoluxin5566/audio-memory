@@ -18,7 +18,7 @@ function normalizeReportAnnotations(value) {
   return annotations
 }
 
-const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI' }
+const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI', glm: 'GLM' }
 const SCENE_LABELS = {
   analysis: 'AI 深度分析',
   meeting: '会议纪要',
@@ -38,7 +38,7 @@ function timeLabel(value) {
 
 
 export function normalizeProviders(payload) {
-  const providers = Object.fromEntries(['kimi', 'deepseek', 'openai'].map((id) => [id, {
+  const providers = Object.fromEntries(['kimi', 'deepseek', 'openai', 'glm'].map((id) => [id, {
     name: PROVIDER_NAMES[id],
     modelName: '',
     configured: false,
@@ -48,6 +48,7 @@ export function normalizeProviders(payload) {
     error: '',
     errorCode: null,
     cooldownUntil: null,
+    models: [],
   }]))
   for (const item of payload?.providers ?? []) {
     if (!providers[item.provider_id]) continue
@@ -62,6 +63,10 @@ export function normalizeProviders(payload) {
       error: item.error_message ?? '',
       errorCode: item.error_code ?? null,
       cooldownUntil: item.cooldown_until ?? null,
+      models: (item.model_options ?? []).map((model) => ({
+        id: model.model_id,
+        label: model.label,
+      })),
     }
   }
   return {
@@ -241,6 +246,12 @@ export function analysisBlocks(body = '', sectionType = '', title = '') {
     const line = lines[index].trim()
     if (!line) { index += 1; continue }
 
+    if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(line)) {
+      blocks.push({ kind: 'divider' })
+      index += 1
+      continue
+    }
+
     if (/^>\s?/.test(line)) {
       const quotedLines = []
       while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
@@ -297,11 +308,40 @@ export function analysisBlocks(body = '', sectionType = '', title = '') {
       while (index < lines.length) {
         const match = /^\d+[.)]\s+(.+)$/.exec(lines[index].trim())
         if (!match) break
-        items.push(match[1])
+        const item = {
+          ordinal: Number.parseInt(lines[index].trim(), 10),
+          text: match[1],
+          continuation: [],
+        }
         index += 1
+        while (index < lines.length) {
+          while (index < lines.length && !lines[index].trim()) index += 1
+          if (index >= lines.length) break
+          const next = lines[index].trim()
+          if (/^\d+[.)]\s+/.test(next)) break
+          if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(next)) break
+          if (/^(?:[-*]\s+|#{2,4}\s+)/.test(next) || /^\*\*[^*]+\*\*$/.test(next)) break
+          if ((next.match(/(?:→|->)/g) ?? []).length >= 2) break
+          if (next.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1])) break
+          const continuation = [next]
+          index += 1
+          while (index < lines.length && lines[index].trim()) {
+            const continuationLine = lines[index].trim()
+            if (/^(?:[-*]\s+|\d+[.)]\s+|#{2,4}\s+)/.test(continuationLine) || /^\*\*[^*]+\*\*$/.test(continuationLine)) break
+            continuation.push(continuationLine)
+            index += 1
+          }
+          item.continuation.push(continuation.join(' '))
+        }
+        items.push(item)
       }
       const timelineContext = /(推进|过程|时间线|转折|循环|链条|路径|阶段|如何形成)/i.test(currentHeading || `${sectionType} ${title}`)
-      blocks.push({ kind: timelineContext ? 'timeline' : 'numbered-list', items })
+      blocks.push({
+        kind: timelineContext ? 'timeline' : 'numbered-list',
+        items: timelineContext
+          ? items.map((item) => [item.text, ...item.continuation].join(' '))
+          : items,
+      })
       continue
     }
 
@@ -315,7 +355,7 @@ export function analysisBlocks(body = '', sectionType = '', title = '') {
     index += 1
     while (index < lines.length && lines[index].trim()) {
       const next = lines[index].trim()
-      if (/^(?:[-*]\s+|\d+[.)]\s+|#{2,4}\s+)/.test(next) || /^\*\*[^*]+\*\*$/.test(next) || (next.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1]))) break
+      if (/^(?:[-*]\s+|\d+[.)]\s+|#{2,4}\s+)/.test(next) || /^(?:-{3,}|\*{3,}|_{3,})$/.test(next) || /^\*\*[^*]+\*\*$/.test(next) || (next.includes('|') && index + 1 < lines.length && isTableDivider(lines[index + 1]))) break
       paragraph.push(next)
       index += 1
     }
@@ -347,6 +387,7 @@ function normalizeStrictCards(item, batch) {
       reportMarkdown: typeof payload.reportMarkdown === 'string' ? payload.reportMarkdown : '',
       reportDocument: normalizeReportDocument(payload.reportDocument),
       reportAnnotations: normalizeReportAnnotations(payload.reportAnnotations),
+      reportQuality: payload.reportQuality && typeof payload.reportQuality === 'object' ? payload.reportQuality : null,
       runtimeMetrics: payload.runtimeMetrics && typeof payload.runtimeMetrics === 'object' ? payload.runtimeMetrics : null,
       details: strictCardDetails(item.scene_id, detail),
       sources: normalizeExternalSources(source, item.sources),

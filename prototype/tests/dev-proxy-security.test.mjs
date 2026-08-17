@@ -120,6 +120,7 @@ test('loopback Vite proxy preserves the backend same-origin mutation boundary', 
       },
       body: '{}',
     })
+    const reportPreview = await fetch(`${devOrigin}/output/deepseek-historical-report-preview.json`)
 
     assert.equal(crossSiteSession.status, 403)
     assert.equal(crossSiteMetadataSession.status, 403)
@@ -127,6 +128,12 @@ test('loopback Vite proxy preserves the backend same-origin mutation boundary', 
     assert.equal(mutation.status, 201)
     assert.equal(crossSite.status, 403)
     assert.equal(missingOrigin.status, 403)
+    assert.equal(reportPreview.status, 200)
+    assert.match(reportPreview.headers.get('content-type') ?? '', /application\/json/)
+    const previewPayload = await reportPreview.json()
+    assert.ok(previewPayload.days?.length >= 1)
+    assert.ok(previewPayload.days[0].cards?.[0]?.payload?.cards?.[0]?.title)
+    assert.ok(previewPayload.days[0].cards?.[0]?.payload?.reportMarkdown)
     assert.deepEqual(await mutation.json(), { calls: 1 })
     const count = await fetch(`${backendOrigin}/api/count`)
     assert.deepEqual(await count.json(), { calls: 1 })

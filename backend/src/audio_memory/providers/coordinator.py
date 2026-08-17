@@ -41,6 +41,8 @@ class MetadataStore(Protocol):
 
     async def update_generation(self, provider_id: str, generation: int) -> None: ...
 
+    async def update_model(self, provider_id: str, model_id: str) -> None: ...
+
 
 class ProviderStateCoordinator:
     def __init__(
@@ -87,6 +89,9 @@ class ProviderStateCoordinator:
             )
             for row in await self._metadata.list_all():
                 provider_id = str(getattr(row, "provider_id"))
+                stored_model = str(getattr(row, "default_model_id", "") or "")
+                if PROVIDER_CONFIGS[provider_id].supports_model(stored_model):
+                    self._set_model(provider_id, stored_model)
                 self._generations[provider_id] = int(
                     getattr(row, "credential_generation", 0)
                 )
@@ -107,6 +112,30 @@ class ProviderStateCoordinator:
                 await self._metadata.activate(provider_id)
             self._set_active(provider_id)
             return self._states[provider_id]
+
+    async def select_model(self, provider_id: str, model_id: str) -> ProviderState:
+        config = PROVIDER_CONFIGS[provider_id]
+        if not config.supports_model(model_id):
+            raise ValueError("Unsupported model")
+        read = self._keychain.read(provider_id)
+        if read.status is not KeychainStatus.CONFIGURED or read.secret is None:
+            raise LookupError("Configure this provider before selecting a model")
+        validator = self._validators[provider_id]
+        validate_model = getattr(validator, "validate_model", None)
+        result = (
+            await validate_model(read.secret, model_id=model_id)
+            if validate_model is not None
+            else await validator.validate(read.secret)
+        )
+        if not result.ok:
+            raise ValueError(result.message or "Selected model validation failed")
+        async with self._state_lock:
+            if self._metadata is not None:
+                await self._metadata.update_model(provider_id, model_id)
+            self._set_model(provider_id, model_id)
+            self._set_state(provider_id, ProviderStateName.AVAILABLE, validated=True)
+        await self._persist_state(provider_id)
+        return self._states[provider_id]
 
     async def snapshot_active(self) -> ProviderState:
         active, _generation = await self.snapshot_active_with_generation()
@@ -156,6 +185,20 @@ class ProviderStateCoordinator:
                 error_message=item.error_message,
                 cooldown_until=item.cooldown_until,
             )
+
+    def _set_model(self, provider_id: str, model_id: str) -> None:
+        item = self._states[provider_id]
+        self._states[provider_id] = ProviderState(
+            provider_id=item.provider_id,
+            display_name=item.display_name,
+            model_id=model_id,
+            active=item.active,
+            state=item.state,
+            last_validated_at=item.last_validated_at,
+            error_code=item.error_code,
+            error_message=item.error_message,
+            cooldown_until=item.cooldown_until,
+        )
 
     async def validate_saved(self, provider_id: str) -> ValidationResult:
         generation = self._generations[provider_id]
@@ -218,10 +261,24 @@ class ProviderStateCoordinator:
         return result
 
     async def validate_candidate(
-        self, provider_id: str, session_id: str, candidate: bytes
+        self,
+        provider_id: str,
+        session_id: str,
+        candidate: bytes,
+        *,
+        model_id: str | None = None,
     ) -> ValidationResult:
+        selected_model = model_id or self._states[provider_id].model_id
+        if not PROVIDER_CONFIGS[provider_id].supports_model(selected_model):
+            raise ValueError("Unsupported model")
         candidate_id = str(uuid4())
-        task = asyncio.create_task(self._validators[provider_id].validate(candidate))
+        validator = self._validators[provider_id]
+        validate_model = getattr(validator, "validate_model", None)
+        task = asyncio.create_task(
+            validate_model(candidate, model_id=selected_model)
+            if validate_model is not None
+            else validator.validate(candidate)
+        )
         key = (provider_id, session_id)
         prior = self._candidates.get(key)
         if prior is not None:
@@ -262,6 +319,11 @@ class ProviderStateCoordinator:
                         )
                     else:
                         replacement_result = result
+                        if self._metadata is not None:
+                            await self._metadata.update_model(
+                                provider_id, selected_model
+                            )
+                        self._set_model(provider_id, selected_model)
                         self._set_state(provider_id, ProviderStateName.AVAILABLE)
                 await self._persist_state(provider_id)
             return replacement_result

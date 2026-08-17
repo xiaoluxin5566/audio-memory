@@ -22,6 +22,31 @@ class KimiAdapter(ChatCompletionsAdapter):
             tool_name="$web_search",
         )
 
+    def validation_payload(self, *, model_id: str | None = None) -> dict[str, object]:
+        payload = super().validation_payload(model_id=model_id)
+        payload.pop("temperature", None)
+        payload.pop("max_tokens", None)
+        if (model_id or self.config.model_id) == self.config.model_id:
+            payload["reasoning_effort"] = "low"
+            payload["max_completion_tokens"] = 64
+        else:
+            payload["max_tokens"] = 64
+        return payload
+
+    def analysis_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        if payload.get("model") != self.config.model_id:
+            return payload
+        normalized = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"temperature", "thinking", "max_tokens"}
+        }
+        max_tokens = payload.get("max_tokens")
+        if isinstance(max_tokens, int):
+            normalized["max_completion_tokens"] = max_tokens
+        normalized["reasoning_effort"] = "low"
+        return normalized
+
     def native_search_payload(
         self,
         *,
@@ -44,13 +69,15 @@ class KimiAdapter(ChatCompletionsAdapter):
                     "content": "\n".join(f"- {query}" for query in queries),
                 },
             ]
-        return {
+        payload: dict[str, object] = {
             "model": model_id,
             "messages": list(messages),
-            "temperature": 0,
             "stream": False,
             "tools": [self._WEB_SEARCH_TOOL],
         }
+        if model_id == self.config.model_id:
+            payload["reasoning_effort"] = "low"
+        return payload
 
     def native_search_tool_messages(self, body: object) -> list[dict[str, object]] | None:
         choice = self._choice(body)
