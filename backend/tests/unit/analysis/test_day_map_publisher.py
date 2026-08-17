@@ -12,6 +12,7 @@ from audio_memory.models import AnalysisJob, AnalysisVersion, Card
 from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
 from audio_memory.prompts.report_schema import SingleReportDraft
 from audio_memory.analysis.markdown_report import MarkdownReportResult
+from audio_memory.analysis.direct_report_pipeline import ReportQualityMetadata
 from audio_memory.analysis.direct_report_document import StructuredReportResult
 from audio_memory.prompts.direct_report_schema import DirectReportDocument
 
@@ -154,6 +155,38 @@ async def test_native_markdown_report_publishes_one_card_without_model_todos(tmp
     assert outcome.card_count == 1
     assert outcome.todo_count == 0
     assert json.loads(cards[0].payload_json)["reportMarkdown"].startswith("# 今日分析")
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_markdown_report_publishes_quality_metadata(tmp_path) -> None:
+    database = Database(tmp_path / "quality-metadata.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-quality", stage="analyzing"))
+        session.add(AnalysisVersion(
+            id="version-quality", source_job_id="job-quality", provider_id="deepseek",
+            model_id="deepseek-v4-pro", credential_generation=1,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash="rules", staged_results_json="{}", status="running",
+        ))
+        await session.commit()
+    report = MarkdownReportResult.from_markdown("# 今日分析\n\n## 工作\n\n正文。")
+    report = MarkdownReportResult(
+        title=report.title, summary=report.summary,
+        report_markdown=report.report_markdown,
+        quality_metadata=ReportQualityMetadata(
+            report_version="v2", audit_status="completed",
+            quality_score=88, quality_score_scope="v2_final_audit",
+            quality_passed=True,
+        ),
+    )
+
+    await VersionPublisher(database).publish("version-quality", report, [])
+
+    async with database.session() as session:
+        card = (await session.scalars(select(Card))).one()
+    assert json.loads(card.payload_json)["reportQuality"]["quality_score"] == 88
     await database.dispose()
 
 

@@ -1,0 +1,350 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from audio_memory.analysis.single_report_runner import SingleReportRunner
+from audio_memory.db import Database
+from audio_memory.models import AnalysisJob, AnalysisVersion, JobFile, Transcript
+from audio_memory.prompts.composer import PromptComposer
+
+
+V1 = """# Career choice
+
+## 今天发生了什么，重点改进什么
+
+The career discussion matters.
+
+| 阶段 | 发生的事 | 对应的改进 |
+| --- | --- | --- |
+| Day | Discussed a startup | Verify the role |
+
+## Work
+
+The reader plans to found a startup. This paragraph contains useful context that must remain.
+
+## Next step
+
+Verify the role and company.
+
+## 数据范围与判断边界
+
+Identity remains uncertain.
+"""
+
+V2_SECTION = """## Work
+
+The reader is considering joining a startup. This paragraph contains useful context that must remain."""
+
+
+def audit_payload(*, mode: str, issue: bool, passed: bool | None = None) -> dict[str, object]:
+    total = 69 if issue else 91
+    issues = []
+    unresolved = []
+    if issue:
+        issues = [{
+            "issue_id": "issue_001",
+            "severity": "major",
+            "issue_type": "factual_error",
+            "section_id": "section_002",
+            "problem": "Founding and joining are confused.",
+            "importance": "The central career decision is wrong.",
+            "required_change": "State that the reader considered joining.",
+            "affected_claims": ["plans to found"],
+            "evidence_segment_ids": ["seg_0_0"],
+            "evidence_excerpts": [{"segment_id": "seg_0_0", "text": "I am considering joining a startup."}],
+            "context_excerpts": [],
+            "allow_deletion_or_compression": False,
+        }]
+        unresolved = ["issue_001"]
+    return {
+        "audit_mode": mode,
+        "rubric_version": 1,
+        "passed": (not issue) if passed is None else passed,
+        "scores": {
+            "factual_accuracy": 20 if issue else 28,
+            "important_coverage": 20 if issue else 23,
+            "analysis_depth": 15 if issue else 18,
+            "actionability": 9 if issue else 13,
+            "expression_structure": 5 if issue else 9,
+            "total": total,
+        },
+        "deductions": [{"dimension": "factual_accuracy", "points": 10, "reason": "Wrong career decision."}] if issue else [],
+        "coverage": {
+            "full_transcript_reviewed": mode == "full_v1_audit",
+            "reviewed_segment_count": 1 if mode in {"chunk_v1_audit", "full_v1_audit"} else None,
+            "total_segment_count": 1 if mode in {"chunk_v1_audit", "full_v1_audit"} else None,
+            "unreviewed_ranges": [],
+            "summary": "Complete full audit." if mode == "full_v1_audit" else "Bounded final audit.",
+        },
+        "issues": issues,
+        "unresolved_issue_ids": unresolved,
+        "summary": "Audit result.",
+    }
+
+
+class PipelineProvider:
+    def __init__(
+        self,
+        *,
+        v1_audit: dict[str, object] | Exception,
+        revision: dict[str, object] | Exception | None = None,
+        final_audit: dict[str, object] | Exception | None = None,
+    ) -> None:
+        self.v1_audit = v1_audit
+        self.revision = revision
+        self.final_audit = final_audit
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_markdown(self, provider_id: str, **kwargs: object) -> str:
+        self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+        return V1
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+        value = {
+            "direct-report-audit-chunk": (
+                self.v1_audit if isinstance(self.v1_audit, Exception)
+                else audit_payload(mode="chunk_v1_audit", issue=bool(self.v1_audit["issues"]))
+            ),
+            "direct-report-audit-merge": self.v1_audit,
+            "direct-report-revision": self.revision,
+            "direct-report-audit-final": self.final_audit,
+        }[str(kwargs["scene_id"])]
+        if isinstance(value, Exception):
+            raise value
+        assert value is not None
+        return json.dumps(value, ensure_ascii=False)
+
+
+class GenerationSource:
+    async def credential_generation(self, provider_id: str) -> int:
+        return 1
+
+
+class Publisher:
+    def __init__(self) -> None:
+        self.reports = []
+
+    async def publish(self, version_id, result, profile_candidates, **kwargs):
+        self.reports.append(result)
+        return {"version_id": version_id}
+
+
+async def seed(database: Database) -> None:
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-1", stage="analyzing"))
+        session.add(JobFile(
+            id="file-1", job_id="job-1", original_name="day.mp3",
+            extension=".mp3", size_bytes=10, sha256="a" * 64,
+            duration_ms=10_000, recording_started_at=None,
+            recording_time_source="unknown", timezone="Asia/Shanghai",
+            position=0, temporary_path="/tmp/day.mp3",
+        ))
+        session.add(Transcript(
+            id="transcript-1", job_file_id="file-1", segment_index=0,
+            speaker_id="speaker_1", start_ms=0, end_ms=1_000,
+            text="I am considering joining a startup.", words_json="[]",
+            risk_classified=True, is_reliable=True,
+        ))
+        session.add(AnalysisVersion(
+            id="version-1", source_job_id="job-1", provider_id="deepseek",
+            model_id="deepseek-v4-pro", credential_generation=1,
+            prompt_snapshot_json=json.dumps({"user-analysis-goal": {"content": "Analyze the day.", "version": 1}}),
+            profile_snapshot_json="[]", fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+            staged_results_json="{}", status="running", worker_owner_id="worker-1",
+        ))
+        await session.commit()
+
+
+def revision_payload() -> dict[str, object]:
+    return {
+        "revisions": [{
+            "section_id": "section_002",
+            "title": "Work",
+            "revised_markdown": V2_SECTION,
+            "issues_resolved": ["issue_001"],
+            "evidence_segment_ids": ["seg_0_0"],
+            "removes_repetition": False,
+            "repetition_reason": None,
+        }],
+        "unresolved_issue_ids": [],
+        "revision_summary": "Corrected the career decision.",
+    }
+
+
+def audit_with_major_and_minor() -> dict[str, object]:
+    payload = audit_payload(mode="full_v1_audit", issue=True)
+    payload["issues"].append({
+        "issue_id": "issue_002", "severity": "minor",
+        "issue_type": "actionability", "section_id": "section_003",
+        "problem": "The next step lacks a deadline.",
+        "importance": "It is harder to execute.",
+        "required_change": "Add a tomorrow deadline.",
+        "affected_claims": ["Verify the role and company."],
+        "evidence_segment_ids": [], "evidence_excerpts": [],
+        "context_excerpts": [], "allow_deletion_or_compression": False,
+    })
+    payload["unresolved_issue_ids"].append("issue_002")
+    return payload
+
+
+def revision_for_all_issues() -> dict[str, object]:
+    payload = revision_payload()
+    payload["revisions"].append({
+        "section_id": "section_003", "title": "Next step",
+        "revised_markdown": "## Next step\n\nVerify the role and company tomorrow.",
+        "issues_resolved": ["issue_002"], "evidence_segment_ids": [],
+        "removes_repetition": False, "repetition_reason": None,
+    })
+    return payload
+
+
+async def run_with(tmp_path, provider: PipelineProvider):
+    database = Database(tmp_path / "report.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    publisher = Publisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=publisher,
+        generation_source=GenerationSource(),
+    )
+    await runner.run("version-1", "worker-1")
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        staged = json.loads(version.staged_results_json)
+    await database.dispose()
+    return publisher.reports[0], staged
+
+
+@pytest.mark.asyncio
+async def test_clean_segmented_v1_audit_publishes_v1_after_merge(tmp_path) -> None:
+    provider = PipelineProvider(
+        v1_audit=audit_payload(mode="full_v1_audit", issue=False)
+    )
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert [call["scene_id"] for call in provider.calls] == [
+        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge"
+    ]
+    assert report.report_markdown.startswith(V1.strip())
+    assert "本次报告：" in report.report_markdown
+    assert "首次全量审核：91 分" in report.report_markdown
+    assert report.quality_metadata.audit_status == "completed"
+    assert report.quality_metadata.quality_score == 91
+    assert staged["direct_report_publication_metadata"]["report_version"] == "v1"
+
+
+@pytest.mark.asyncio
+async def test_material_issue_runs_bounded_revision_and_final_audit(tmp_path) -> None:
+    provider = PipelineProvider(
+        v1_audit=audit_payload(mode="full_v1_audit", issue=True),
+        revision=revision_payload(),
+        final_audit=audit_payload(mode="revision_final_audit", issue=False),
+    )
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert [call["scene_id"] for call in provider.calls] == [
+        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge",
+        "direct-report-revision", "direct-report-audit-final",
+    ]
+    assert "considering joining a startup" in report.report_markdown
+    assert "untrusted_transcript" not in str(provider.calls[3]["user"])
+    assert "untrusted_transcript" not in str(provider.calls[4]["user"])
+    assert report.quality_metadata.report_version == "v2"
+    assert report.quality_metadata.quality_score_scope == "v2_final_audit"
+    assert staged["direct_report_v2_final_audit"]["scores"]["total"] == 91
+    assert "定向修改增益：69 → 91（+22）；" in report.report_markdown
+    assert "定向终审，非全量回归" not in report.report_markdown
+
+
+@pytest.mark.asyncio
+async def test_revision_authorizes_every_audit_issue_section_regardless_of_severity(tmp_path) -> None:
+    provider = PipelineProvider(
+        v1_audit=audit_with_major_and_minor(),
+        revision=revision_for_all_issues(),
+        final_audit=audit_payload(mode="revision_final_audit", issue=False),
+    )
+
+    report, _ = await run_with(tmp_path, provider)
+
+    assert report.quality_metadata.report_version == "v2"
+    assert "company tomorrow" in report.report_markdown
+    revision_request = str(provider.calls[3]["user"])
+    assert '"section_id":"section_002"' in revision_request
+    assert '"section_id":"section_003"' in revision_request
+
+
+@pytest.mark.asyncio
+async def test_minor_only_audit_issues_still_run_revision(tmp_path) -> None:
+    audit = audit_payload(mode="full_v1_audit", issue=False)
+    audit["issues"] = [audit_with_major_and_minor()["issues"][1]]
+    audit["unresolved_issue_ids"] = ["issue_002"]
+    audit["passed"] = True
+    revision = revision_for_all_issues()
+    revision["revisions"] = [revision["revisions"][1]]
+    provider = PipelineProvider(
+        v1_audit=audit,
+        revision=revision,
+        final_audit=audit_payload(mode="revision_final_audit", issue=False),
+    )
+
+    report, _ = await run_with(tmp_path, provider)
+
+    assert [call["scene_id"] for call in provider.calls] == [
+        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge",
+        "direct-report-revision", "direct-report-audit-final",
+    ]
+    assert report.quality_metadata.report_version == "v2"
+
+
+@pytest.mark.asyncio
+async def test_v1_audit_transport_failure_publishes_unaudited_v1(tmp_path) -> None:
+    provider = PipelineProvider(v1_audit=RuntimeError("audit timeout"))
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert report.report_markdown.startswith(V1.strip())
+    assert "质量评分：未完成" in report.report_markdown
+    assert report.quality_metadata.audit_status == "completed_unaudited"
+    assert report.quality_metadata.quality_score is None
+    assert staged["direct_report_v1_audit_error"]["type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_revision_failure_publishes_scored_v1(tmp_path) -> None:
+    provider = PipelineProvider(
+        v1_audit=audit_payload(mode="full_v1_audit", issue=True),
+        revision=RuntimeError("revision timeout"),
+    )
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert report.report_markdown.startswith(V1.strip())
+    assert "首次全量审核：69 分" in report.report_markdown
+    assert report.quality_metadata.audit_status == "completed_v1_revision_failed"
+    assert report.quality_metadata.quality_score == 69
+    assert report.quality_metadata.quality_score_scope == "v1_full_audit"
+    assert staged["direct_report_v2_revision_error"]["type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_final_audit_failure_publishes_v2_with_v1_score_scope(tmp_path) -> None:
+    provider = PipelineProvider(
+        v1_audit=audit_payload(mode="full_v1_audit", issue=True),
+        revision=revision_payload(),
+        final_audit=RuntimeError("final audit timeout"),
+    )
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert "considering joining a startup" in report.report_markdown
+    assert report.quality_metadata.audit_status == "completed_v2_final_audit_degraded"
+    assert report.quality_metadata.quality_score == 69
+    assert report.quality_metadata.quality_score_scope == "v1_pre_revision"
+    assert staged["direct_report_v2_final_audit_error"]["type"] == "RuntimeError"

@@ -457,6 +457,9 @@ class VersionPublisher:
         report_annotations = getattr(report, "report_annotations", None)
         if report_annotations:
             payload["reportAnnotations"] = list(report_annotations)
+        quality_metadata = getattr(report, "quality_metadata", None)
+        if quality_metadata is not None:
+            payload["reportQuality"] = quality_metadata.as_dict()
         if report_document is not None:
             payload["reportDocument"] = report_document
         session.add(

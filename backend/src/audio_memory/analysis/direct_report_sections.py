@@ -7,6 +7,10 @@ from typing import Protocol
 
 _SECTION_HEADING = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _PAGE_TITLE = re.compile(r"^#(?!#)\s+(.+?)\s*$", re.MULTILINE)
+_OVERVIEW_HEADING_ALIASES = {
+    "今天发生了什么，重点应该改什么",
+}
+_CANONICAL_OVERVIEW_HEADING = "今天发生了什么，重点改进什么"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +29,28 @@ class SectionRevisionLike(Protocol):
     evidence_segment_ids: object
     removes_repetition: bool
     repetition_reason: str | None
+
+
+def normalize_report_headings(markdown: str) -> str:
+    """Normalize observed model variants of fixed structural headings."""
+    lines = markdown.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("## "):
+            continue
+        title = stripped[3:].strip()
+        if title not in _OVERVIEW_HEADING_ALIASES:
+            continue
+        ending = "\n" if line.endswith("\n") else ""
+        lines[index] = f"## {_CANONICAL_OVERVIEW_HEADING}{ending}"
+    return "".join(lines)
+
+
+def _normalize_section_title(title: str) -> str:
+    normalized = title.strip()
+    if normalized in _OVERVIEW_HEADING_ALIASES:
+        return _CANONICAL_OVERVIEW_HEADING
+    return normalized
 
 
 def replace_report_title(markdown: str, title: str | None) -> str:
@@ -57,8 +83,11 @@ def apply_section_revisions(
     markdown: str,
     revisions: tuple[SectionRevisionLike, ...],
     valid_segment_ids: set[str],
+    *,
+    allowed_title_change_ids: set[str] | None = None,
 ) -> str:
     sections = {item.section_id: item for item in split_report_sections(markdown)}
+    allowed_title_changes = allowed_title_change_ids or set()
     seen: set[str] = set()
     replacements: list[tuple[int, int, str]] = []
     for revision in revisions:
@@ -68,23 +97,25 @@ def apply_section_revisions(
         section = sections.get(revision.section_id)
         if section is None:
             raise ValueError(f"unknown section: {revision.section_id}")
-        if revision.title.strip() != section.title:
+        revised_markdown = normalize_report_headings(revision.revised_markdown)
+        title_changed = _normalize_section_title(revision.title) != section.title
+        if title_changed and revision.section_id not in allowed_title_changes:
             raise ValueError(f"section title mismatch: {revision.section_id}")
-        expected_heading = f"## {section.title}"
-        if revision.revised_markdown.splitlines()[0].strip() != expected_heading:
+        expected_heading = f"## {revision.title if title_changed else section.title}"
+        if revised_markdown.splitlines()[0].strip() != expected_heading:
             raise ValueError(f"section title mismatch: {revision.section_id}")
         evidence_ids = tuple(str(item) for item in revision.evidence_segment_ids)
         unknown_ids = set(evidence_ids) - valid_segment_ids
         if unknown_ids:
             raise ValueError(f"unknown evidence segment ids: {sorted(unknown_ids)}")
         minimum_length = int(len(section.markdown) * 0.70)
-        if len(revision.revised_markdown) < minimum_length:
+        if len(revised_markdown) < minimum_length:
             allowed = revision.removes_repetition and bool(
                 revision.repetition_reason and revision.repetition_reason.strip()
             )
             if not allowed:
                 raise ValueError(f"abnormally short section revision: {revision.section_id}")
-        replacement = revision.revised_markdown.rstrip()
+        replacement = revised_markdown.rstrip()
         if section.end < len(markdown):
             replacement += "\n\n"
         elif markdown.endswith("\n"):

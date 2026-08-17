@@ -12,7 +12,7 @@ from audio_memory.providers.types import ProviderStateName, ValidationResult
 
 class MemoryKeychain:
     def __init__(self) -> None:
-        self.values = {"kimi": None, "deepseek": None, "openai": None}
+        self.values = {"kimi": None, "deepseek": None, "openai": None, "glm": None}
 
     def read(self, provider_id: str):
         secret = self.values[provider_id]

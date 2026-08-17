@@ -17,7 +17,12 @@ from audio_memory.providers.types import (
 
 class FakeKeychain:
     def __init__(self) -> None:
-        self.values = {"kimi": b"saved", "deepseek": None, "openai": None}
+        self.values = {
+            "kimi": b"saved",
+            "deepseek": None,
+            "openai": None,
+            "glm": None,
+        }
 
     def read(self, provider_id: str) -> KeychainReadResult:
         value = self.values[provider_id]
@@ -61,6 +66,9 @@ class RecordingMetadata:
 
     async def update_validation(self, provider_id: str, **kwargs) -> None:
         self.events.append("validation")
+
+    async def update_model(self, provider_id: str, model_id: str) -> None:
+        self.events.append(f"model:{model_id}")
 
 
 @pytest.mark.asyncio

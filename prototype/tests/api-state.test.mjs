@@ -131,6 +131,7 @@ test('single markdown report stays one card with runtime metrics', () => {
       scene_id: 'analysis',
       cards: [{ title: '你今天的综合报告', summary: '工作与家庭是主线。', evidence_segment_ids: ['s1'], external_source_ids: [] }],
       reportMarkdown: '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。',
+      reportQuality: { report_version: 'v2', audit_status: 'completed', quality_score: 88 },
       runtimeMetrics: { model_call_count: 8, input_tokens: 1000, output_tokens: 500, web_search_performed: false },
     }, qa: [],
   }] }] })
@@ -139,6 +140,7 @@ test('single markdown report stays one card with runtime metrics', () => {
   assert.equal(normalized.feed[0].cards.length, 1)
   assert.match(card.reportMarkdown, /^# 你今天的综合报告/)
   assert.equal(card.runtimeMetrics.model_call_count, 8)
+  assert.equal(card.reportQuality.quality_score, 88)
   assert.deepEqual(card.detailSections, [])
 })
 
@@ -297,7 +299,11 @@ test('imported event and insight cards expose native labels and finding metadata
   assert.deepEqual(card.detailSections[2].blocks.map((block) => block.kind), ['heading', 'timeline', 'cause-chain', 'heading', 'numbered-list', 'heading', 'matrix'])
   assert.deepEqual(card.detailSections[2].blocks[1].items, ['不认同方向', '说服失败', '降低投入'])
   assert.deepEqual(card.detailSections[2].blocks[2].items, ['不认同方向', '说服失败', '降低投入', '结果变差'])
-  assert.deepEqual(card.detailSections[2].blocks[4].items, ['行业脱节：需要补课', '逃离投射：可能美化机会', '经验错配：方法不能直接复用'])
+  assert.deepEqual(card.detailSections[2].blocks[4].items, [
+    { ordinal: 1, text: '行业脱节：需要补课', continuation: [] },
+    { ordinal: 2, text: '逃离投射：可能美化机会', continuation: [] },
+    { ordinal: 3, text: '经验错配：方法不能直接复用', continuation: [] },
+  ])
   assert.deepEqual(card.detailSections[2].blocks[6].rows, [
     ['维度', '其中一方', '另一方'],
     ['核心诉求', '产品目标清晰', '尽快推进'],
@@ -368,5 +374,36 @@ test('analysisBlocks preserves quoted source text as a quote block', () => {
     { kind: 'paragraph', text: '正文' },
     { kind: 'quote', text: '我是第一类人。' },
     { kind: 'paragraph', text: '后文' },
+  ])
+})
+
+test('analysisBlocks keeps numbered recommendations with continuation paragraphs in one list', () => {
+  const blocks = analysisBlocks(`具体建议：
+
+1. **辅导前先设时间上限。**
+
+数学辅导控制在 15–20 分钟。
+
+2. **不要连续换三种说法。**
+
+一次只保留一种解释。
+
+3. **把验证拆成更小的问题。**
+
+先检查一组数字关系。
+
+---
+
+后续章节。`)
+  const list = blocks.find((block) => block.kind === 'numbered-list')
+  assert.deepEqual(list.items.map((item) => item.ordinal), [1, 2, 3])
+  assert.deepEqual(list.items.map((item) => item.continuation), [
+    ['数学辅导控制在 15–20 分钟。'],
+    ['一次只保留一种解释。'],
+    ['先检查一组数字关系。'],
+  ])
+  assert.deepEqual(blocks.slice(-2), [
+    { kind: 'divider' },
+    { kind: 'paragraph', text: '后续章节。' },
   ])
 })

@@ -216,10 +216,17 @@ button{cursor:pointer}
 .modal>p{font-size:10px;color:#6c7683;line-height:1.6;margin:0}
 .feedback-modal{width:min(560px,100%)}
 .feedback-modal .rating-row{margin-top:18px}
-.provider-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:18px 0 14px}
+.provider-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:18px 0 14px}
 .provider-tabs button{border:1px solid #dbe0e7;background:#fff;border-radius:9px;padding:10px 7px;font-size:10px}
 .provider-tabs button.active{border-color:#6377d5;background:#f1f3ff;color:#4e62bb}
 .provider-tabs small{font-size:7px;color:#43805a;display:block;margin-top:3px}
+.model-picker{margin:0 0 14px}
+.model-picker>b{display:block;font-size:10px;margin-bottom:7px}
+.model-picker>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.model-picker button{display:flex;flex-direction:column;align-items:flex-start;gap:4px;border:1px solid #dbe0e7;background:#fff;border-radius:9px;padding:10px 11px;text-align:left}
+.model-picker button.active{border-color:#6377d5;background:#f1f3ff;color:#4e62bb;box-shadow:0 0 0 1px #6377d5 inset}
+.model-picker strong{font-size:10px}
+.model-picker span{font-size:8px;color:#6c7683}
 .provider-modal label{font-size:10px;font-weight:700}
 .provider-modal input{width:100%;border:1px solid #d7dde5;border-radius:9px;padding:10px 11px;margin-top:6px;font-size:11px}
 .validation{font-size:9px;border-radius:8px;padding:8px 10px;margin-top:8px}
@@ -273,3 +280,7 @@ to{opacity:1;transform:none}
 .structured-section:first-child>.analysis-section-heading{margin-top:24px;padding-top:0;border-top:0}.structured-subsection{display:grid;gap:8px}.structured-report>.report-event-map{max-width:none}
 @media(max-width:900px){.report-event-table{min-width:680px}}
 .quality-warning{padding:12px 14px;border-radius:10px;background:#fff4dc;color:#7a5116;font-size:13px;line-height:1.6}
+.report-quality-status { display: inline-flex; margin-top: 8px; padding: 4px 10px; border-radius: 999px; background: #e9f5ee; color: #27613d; font-size: 12px; font-weight: 700; }
+.report-quality-status.completed_unaudited,
+.report-quality-status.completed_v1_revision_failed,
+.report-quality-status.completed_v2_final_audit_degraded { background: #fff4dc; color: #7a5512; }

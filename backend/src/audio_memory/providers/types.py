@@ -9,6 +9,7 @@ class ProviderId(StrEnum):
     KIMI = "kimi"
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
+    GLM = "glm"
 
 
 class ProviderStateName(StrEnum):
@@ -22,6 +23,10 @@ class ProviderStateName(StrEnum):
 
 class ValidationErrorCode(StrEnum):
     INVALID_KEY = "invalid_key"
+    IP_NOT_AUTHORIZED = "ip_not_authorized"
+    OPENAI_AUTHENTICATION_REJECTED = "openai_authentication_rejected"
+    PROVIDER_AUTHENTICATION_REJECTED = "provider_authentication_rejected"
+    PROVIDER_REQUEST_REJECTED = "provider_request_rejected"
     PERMISSION_DENIED = "permission_denied"
     INSUFFICIENT_BALANCE = "insufficient_balance"
     RATE_LIMITED = "rate_limited"
@@ -34,12 +39,22 @@ class ValidationErrorCode(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderModel:
+    model_id: str
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderConfig:
     provider_id: ProviderId
     display_name: str
     endpoint: str
     model_id: str
     api_style: str = "chat_completions"
+    models: tuple[ProviderModel, ...] = ()
+
+    def supports_model(self, model_id: str) -> bool:
+        return any(item.model_id == model_id for item in self.models)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +83,21 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         ProviderId.KIMI,
         "Kimi",
         "https://api.moonshot.cn/v1/chat/completions",
-        "kimi-k2.5",
+        "kimi-k3",
+        models=(
+            ProviderModel("kimi-k3", "最高质量"),
+            ProviderModel("kimi-k2.6", "最高性价比"),
+        ),
     ),
     "deepseek": ProviderConfig(
         ProviderId.DEEPSEEK,
         "DeepSeek",
         "https://api.deepseek.com/chat/completions",
         "deepseek-v4-pro",
+        models=(
+            ProviderModel("deepseek-v4-pro", "最高质量"),
+            ProviderModel("deepseek-v4-flash", "最高性价比"),
+        ),
     ),
     "openai": ProviderConfig(
         ProviderId.OPENAI,
@@ -82,5 +105,19 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         "https://api.openai.com/v1/responses",
         "gpt-5-mini",
         "responses",
+        (
+            ProviderModel("gpt-5", "最高质量"),
+            ProviderModel("gpt-5-mini", "最高性价比"),
+        ),
+    ),
+    "glm": ProviderConfig(
+        ProviderId.GLM,
+        "GLM",
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "glm-5.2",
+        models=(
+            ProviderModel("glm-5.2", "最高质量"),
+            ProviderModel("glm-4.7-flash", "最高性价比"),
+        ),
     ),
 }

@@ -22,7 +22,7 @@ from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
 from audio_memory.api.content import router as content_router
 from audio_memory.api.reanalysis import router as reanalysis_router
-from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
+from audio_memory.providers.adapters import DeepSeekAdapter, GLMAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
 from audio_memory.providers.types import PROVIDER_CONFIGS
@@ -112,6 +112,7 @@ def create_app(
                 "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
                 "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
                 "openai": OpenAIAdapter(PROVIDER_CONFIGS["openai"]),
+                "glm": GLMAdapter(PROVIDER_CONFIGS["glm"]),
             }
             validators = {}
             keychain_repository = KeychainRepository(MacSecurityClient())

@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import httpx
+import pytest
+from fastapi import FastAPI
+
+from audio_memory.api.providers import router
+from audio_memory.providers.coordinator import ProviderStateCoordinator
+from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
+from audio_memory.providers.types import ValidationResult
+
+
+class ConfiguredKeychain:
+    def __init__(self) -> None:
+        self.values = {
+            "kimi": b"kimi-key",
+            "deepseek": b"deepseek-key",
+            "openai": b"openai-key",
+            "glm": b"glm-key",
+        }
+
+    def read(self, provider_id: str) -> KeychainReadResult:
+        return KeychainReadResult(KeychainStatus.CONFIGURED, self.values[provider_id])
+
+    def replace(self, provider_id: str, candidate: bytes) -> None:
+        self.values[provider_id] = candidate
+
+
+class ModelRecordingValidator:
+    def __init__(self) -> None:
+        self.models: list[str] = []
+
+    async def validate(self, secret: bytes) -> ValidationResult:
+        return await self.validate_model(secret, model_id=None)
+
+    async def validate_model(
+        self, secret: bytes, *, model_id: str | None = None
+    ) -> ValidationResult:
+        assert secret
+        self.models.append(model_id or "")
+        return ValidationResult(ok=True)
+
+
+@pytest.fixture
+def model_app() -> FastAPI:
+    app = FastAPI()
+    keychain = ConfiguredKeychain()
+    validators = {
+        provider_id: ModelRecordingValidator() for provider_id in keychain.values
+    }
+    app.state.validators = validators
+    app.state.provider_coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators=validators,
+    )
+    app.include_router(router)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_provider_catalog_exposes_curated_models_and_glm(model_app: FastAPI) -> None:
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/providers")
+
+    assert response.status_code == 200
+    providers = {item["provider_id"]: item for item in response.json()["providers"]}
+    assert providers["kimi"]["model_options"] == [
+        {"model_id": "kimi-k3", "label": "最高质量"},
+        {"model_id": "kimi-k2.6", "label": "最高性价比"},
+    ]
+    assert providers["glm"]["model_options"] == [
+        {"model_id": "glm-5.2", "label": "最高质量"},
+        {"model_id": "glm-4.7-flash", "label": "最高性价比"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_selecting_model_validates_and_updates_provider_snapshot(
+    model_app: FastAPI,
+) -> None:
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/providers/kimi/model", json={"model_id": "kimi-k2.6"}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model_id"] == "kimi-k2.6"
+    assert model_app.state.validators["kimi"].models == ["kimi-k2.6"]
+    snapshot = model_app.state.provider_coordinator.state("kimi")
+    assert snapshot.model_id == "kimi-k2.6"
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_model_outside_curated_catalog(model_app: FastAPI) -> None:
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/providers/glm/model", json={"model_id": "glm-user-entered"}
+        )
+
+    assert response.status_code == 422
+    assert model_app.state.validators["glm"].models == []
+
+
+@pytest.mark.asyncio
+async def test_first_key_validation_uses_the_selected_model(model_app: FastAPI) -> None:
+    model_app.state.provider_coordinator._keychain.values["kimi"] = b"old-key"
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/providers/kimi/key",
+            headers={"X-Configuration-Session": "settings"},
+            json={"api_key": "new-key", "model_id": "kimi-k2.6"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model_id"] == "kimi-k2.6"
+    assert model_app.state.validators["kimi"].models == ["kimi-k2.6"]

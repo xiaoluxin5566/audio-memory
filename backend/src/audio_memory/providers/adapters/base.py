@@ -44,9 +44,9 @@ class NativeSearchCallResult:
 class ChatCompletionsAdapter:
     config: ProviderConfig
 
-    def validation_payload(self) -> dict[str, object]:
+    def validation_payload(self, *, model_id: str | None = None) -> dict[str, object]:
         return {
-            "model": self.config.model_id,
+            "model": model_id or self.config.model_id,
             "messages": [{"role": "user", "content": "Reply exactly: OK"}],
             "temperature": 0,
             "max_tokens": 4,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from audio_memory.prompts.schemas import StrictTodoDraft
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -43,25 +45,28 @@ class AutonomousCard(EvidencedModel):
     title: str = Field(min_length=1, max_length=240)
     summary: str = Field(min_length=1, max_length=4_000)
     external_source_ids: list[str] = Field(default_factory=list)
-    content: list[AutonomousSection] = Field(
-        min_length=2,
-        json_schema_extra={
-            "prefixItems": [
-                {
-                    "properties": {
-                        "type": {"const": "scene_reconstruction"}
-                    }
-                }
-            ],
-            "contains": {"properties": {"type": {"const": "analysis"}}},
-            "minContains": 1,
-        },
-    )
+    content: list[AutonomousSection] = Field(min_length=1)
     quotes: list[AutonomousQuote] = Field(default_factory=list)
     recommendations: list[AutonomousRecommendation] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_three_stage_structure(self):
+        no_value = (
+            self.title == "本次内容报告"
+            and self.summary == "本次内容无有价值信息"
+            and len(self.content) == 1
+            and self.content[0].type == "empty"
+            and self.content[0].title == "本次内容无有价值信息"
+            and self.content[0].body == "本次内容无有价值信息"
+            and not self.content[0].items
+            and not self.content[0].evidence_segment_ids
+            and not self.quotes
+            and not self.recommendations
+            and not self.evidence_segment_ids
+            and not self.external_source_ids
+        )
+        if no_value:
+            return self
         if not self.content or self.content[0].type != "scene_reconstruction":
             raise ValueError("first content section must be scene_reconstruction")
         if not any(section.type == "analysis" for section in self.content[1:]):
@@ -72,7 +77,8 @@ class AutonomousCard(EvidencedModel):
 
 
 class AutonomousAnalysisResult(StrictModel):
-    cards: list[AutonomousCard] = Field(default_factory=list)
+    cards: list[AutonomousCard] = Field(min_length=1, max_length=1)
+    todos: list[StrictTodoDraft] = Field(default_factory=list)
 
 
 class InformationNote(EvidencedModel):

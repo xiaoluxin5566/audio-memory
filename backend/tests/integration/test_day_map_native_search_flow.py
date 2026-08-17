@@ -403,22 +403,18 @@ async def test_old_batch_stays_visible_and_sources_never_enter_profile(
     cards = [card for day in feed["days"] for card in day["cards"]]
     new_cards = [card for card in cards if card["batch_id"] == "batch-new"]
     old_cards = [card for card in cards if card["batch_id"] == "batch-old"]
-    assert outcome.card_count == 2
-    assert [card["scene_id"] for card in new_cards] == [
-        "batch_overview",
-        "analysis",
-    ]
-    assert sum(card["scene_id"] == "batch_overview" for card in new_cards) == 1
+    assert outcome.card_count == 1
+    assert [card["scene_id"] for card in new_cards] == ["analysis"]
     assert old_cards[0]["payload"]["cards"][0]["title"] == "历史卡片"
     assert "sources" not in old_cards[0]
-    assert new_cards[1]["sources"][0]["url"] == "https://evidence.example/1"
-    assert new_cards[1]["evidence"][0]["segments"] == [
+    assert new_cards[0]["sources"][0]["url"] == "https://evidence.example/1"
+    assert new_cards[0]["evidence"][0]["segments"] == [
         {
             "segment_id": "seg_0_0",
             "start_ms": 0,
             "end_ms": 1_000,
             "playback_url": (
-                f"/api/cards/{new_cards[1]['id']}/evidence/seg_0_0/audio"
+                f"/api/cards/{new_cards[0]['id']}/evidence/seg_0_0/audio"
             ),
         },
         {
@@ -426,7 +422,7 @@ async def test_old_batch_stays_visible_and_sources_never_enter_profile(
             "start_ms": 1_000,
             "end_ms": 2_000,
             "playback_url": (
-                f"/api/cards/{new_cards[1]['id']}/evidence/seg_0_1/audio"
+                f"/api/cards/{new_cards[0]['id']}/evidence/seg_0_1/audio"
             ),
         },
     ]

@@ -197,7 +197,7 @@ class ProviderMetadataRepository:
                                 default_model_id=model_id,
                             )
                         )
-                    else:
+                    elif not row.default_model_id:
                         row.default_model_id = model_id
 
     async def list_all(self) -> list[ProviderMetadata]:
@@ -244,3 +244,11 @@ class ProviderMetadataRepository:
                 if row is None:
                     raise LookupError(f"Unknown provider: {provider_id}")
                 row.credential_generation = generation
+
+    async def update_model(self, provider_id: str, model_id: str) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                row = await session.get(ProviderMetadata, provider_id)
+                if row is None:
+                    raise LookupError(f"Unknown provider: {provider_id}")
+                row.default_model_id = model_id

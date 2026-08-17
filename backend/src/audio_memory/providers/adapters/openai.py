@@ -16,9 +16,9 @@ class OpenAIAdapter(ChatCompletionsAdapter):
             reason="Native web search is not available for this configured provider.",
         )
 
-    def validation_payload(self) -> dict[str, object]:
+    def validation_payload(self, *, model_id: str | None = None) -> dict[str, object]:
         return {
-            "model": self.config.model_id,
+            "model": model_id or self.config.model_id,
             "input": "Reply exactly: OK",
             "max_output_tokens": 4,
             "store": False,

@@ -34,7 +34,7 @@ from audio_memory.prompts.day_map_schema import (
 from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest, PromptComposer
 from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
-from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
+from audio_memory.providers.adapters import DeepSeekAdapter, GLMAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.adapters.base import NativeSearchCallResult
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
@@ -132,7 +132,7 @@ def _analysis_parameter_fingerprint() -> str:
         },
         "transient_total_attempts": 2,
         "schema_total_attempts": 2,
-        "scene_concurrency": 1,
+        "scene_concurrency": {"default": 1, "direct_report_audit_chunk": 6},
         "analysis_windows": {
             "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
             "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
@@ -161,6 +161,7 @@ class ProviderAnalysisClient:
         self.keychain = keychain
         self.client = client
         self._remote_lock = asyncio.Lock()
+        self._parallel_audit_limit = asyncio.Semaphore(6)
         self.usage_totals = {"input_tokens": 0, "output_tokens": 0}
         self.request_diagnostics: list[ProviderRequestDiagnostic] = []
         self.parameter_fingerprint = _analysis_parameter_fingerprint()
@@ -168,6 +169,7 @@ class ProviderAnalysisClient:
             "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
             "openai": OpenAIAdapter(PROVIDER_CONFIGS["openai"]),
+            "glm": GLMAdapter(PROVIDER_CONFIGS["glm"]),
         }
 
     async def native_search(
@@ -355,8 +357,10 @@ class ProviderAnalysisClient:
         segment_count: int = 0,
         repair_attempted: bool = False,
         thinking_enabled: bool | None = None,
+        allow_parallel: bool = False,
     ) -> str:
-        async with self._remote_lock:
+        lock = self._parallel_audit_limit if allow_parallel else self._remote_lock
+        async with lock:
             return await self._generate_serialized(
                 provider_id,
                 system=system,

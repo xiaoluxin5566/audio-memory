@@ -115,6 +115,10 @@ export async function apiRequest(path, options = {}) {
   return payload
 }
 
+function isReportPreview() {
+  return new URLSearchParams(window.location.search).get('reportPreview') === 'deepseek'
+}
+
 
 function isInvalidSession(response, payload) {
   return response.status === 401 && payload?.detail?.code === 'invalid_session'
@@ -124,13 +128,17 @@ export const api = {
   providers: () => apiRequest('/providers'),
   validateConfiguredProviders: () => apiRequest('/providers/validate-configured', { method: 'POST' }),
   validateProvider: (id) => apiRequest(`/providers/${id}/validate`, { method: 'POST' }),
-  saveProviderKey: (id, apiKey, sessionId) => apiRequest(`/providers/${id}/key`, {
+  saveProviderKey: (id, apiKey, sessionId, modelId) => apiRequest(`/providers/${id}/key`, {
     method: 'PUT',
     headers: { 'X-Configuration-Session': sessionId },
-    body: JSON.stringify({ api_key: apiKey }),
+    body: JSON.stringify({ api_key: apiKey, model_id: modelId }),
   }),
   cancelCandidate: (id, sessionId) => apiRequest(`/providers/${id}/candidate/${sessionId}`, { method: 'DELETE' }),
   activateProvider: (id) => apiRequest(`/providers/${id}/activate`, { method: 'POST' }),
+  selectProviderModel: (id, modelId) => apiRequest(`/providers/${id}/model`, {
+    method: 'PUT',
+    body: JSON.stringify({ model_id: modelId }),
+  }),
   createJob: () => apiRequest('/jobs', { method: 'POST' }),
   activeJob: () => apiRequest('/jobs/active'),
   job: (id) => apiRequest(`/jobs/${id}`),
@@ -139,8 +147,10 @@ export const api = {
   retryAnalysis: (id) => apiRequest(`/jobs/${id}/retry-analysis`, { method: 'POST' }),
   cancelJob: (id) => apiRequest(`/jobs/${id}`, { method: 'DELETE' }),
   removeFile: (jobId, fileId) => apiRequest(`/jobs/${jobId}/files/${fileId}`, { method: 'DELETE' }),
-  feed: () => apiRequest('/feed'),
-  history: () => apiRequest('/history'),
+  feed: () => isReportPreview()
+    ? fetch('/output/deepseek-historical-report-preview.json').then((response) => response.json())
+    : apiRequest('/feed'),
+  history: () => isReportPreview() ? Promise.resolve({ days: [] }) : apiRequest('/history'),
   reanalysisPreview: () => apiRequest('/history/reanalysis-batches/preview'),
   currentReanalysis: () => apiRequest('/history/reanalysis-batches/current'),
   createReanalysis: (previewToken, idempotencyKey) => apiRequest('/history/reanalysis-batches', {
@@ -161,7 +171,6 @@ export const api = {
   }),
   updateTodo: (id, patch) => apiRequest(`/todos/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteTodo: (id) => apiRequest(`/todos/${id}`, { method: 'DELETE' }),
-  askCard: (id, question) => apiRequest(`/cards/${id}/questions`, { method: 'POST', body: JSON.stringify({ question }) }),
   feedback: (id, rating, explanation) => apiRequest(`/cards/${id}/feedback`, { method: 'POST', body: JSON.stringify({ rating, explanation }) }),
   clearHistory: () => apiRequest('/history', { method: 'DELETE', body: JSON.stringify({ confirm: true }) }),
 }

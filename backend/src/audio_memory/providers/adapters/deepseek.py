@@ -22,8 +22,8 @@ class DeepSeekAdapter(ChatCompletionsAdapter):
             "thinking": payload.get("thinking", {"type": "enabled"}),
         }
 
-    def validation_payload(self) -> dict[str, object]:
-        payload = super().validation_payload()
+    def validation_payload(self, *, model_id: str | None = None) -> dict[str, object]:
+        payload = super().validation_payload(model_id=model_id)
         payload["thinking"] = {"type": "disabled"}
         payload["max_tokens"] = 8
         return payload

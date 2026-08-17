@@ -5,6 +5,12 @@ import { readFileSync } from 'node:fs';
 const appSource = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
 
+test('web UI does not expose prompt navigation or a prompt route', () => {
+  assert.doesNotMatch(appSource, /Prompt 设置/);
+  assert.doesNotMatch(appSource, /\/settings\/prompts/);
+  assert.doesNotMatch(appSource, /api\.prompts\(\)/);
+});
+
 test('detail page removes continuation questions and conversation history', () => {
   const detail = appSource.slice(
     appSource.indexOf('function CardDetail'),
@@ -13,6 +19,19 @@ test('detail page removes continuation questions and conversation history', () =
 
   assert.equal(detail.indexOf('className="qa-section"'), -1);
   assert.equal(detail.indexOf('className="ask-section"'), -1);
+});
+
+test('report detail distinguishes all audit completion states', () => {
+  assert.match(appSource, /已完成（未审计）/);
+  assert.match(appSource, /已完成（V1）/);
+  assert.match(appSource, /已完成（V2），V1审计/);
+  assert.match(appSource, /已完成\$\{score\}/);
+});
+
+test('report preview auto-opens only once so detail can be closed to the two-day feed', () => {
+  assert.match(appSource, /const reportPreviewOpened = useRef\(false\)/);
+  assert.match(appSource, /reportPreviewOpened\.current/);
+  assert.match(appSource, /reportPreviewOpened\.current = true/);
 });
 
 test('detail does not expose the question API', () => {

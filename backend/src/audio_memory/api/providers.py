@@ -24,6 +24,7 @@ class ProviderView(BaseModel):
     error_code: str | None
     error_message: str | None
     cooldown_until: datetime | None
+    model_options: list[dict[str, str]]
 
     @classmethod
     def from_state(cls, state: ProviderState) -> ProviderView:
@@ -37,6 +38,10 @@ class ProviderView(BaseModel):
             error_code=state.error_code.value if state.error_code else None,
             error_message=state.error_message,
             cooldown_until=state.cooldown_until,
+            model_options=[
+                {"model_id": item.model_id, "label": item.label}
+                for item in PROVIDER_CONFIGS[state.provider_id].models
+            ],
         )
 
 
@@ -46,6 +51,11 @@ class ProviderList(BaseModel):
 
 class KeyInput(BaseModel):
     api_key: str = Field(min_length=1, max_length=4096)
+    model_id: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class ModelInput(BaseModel):
+    model_id: str = Field(min_length=1, max_length=120)
 
 
 def coordinator_from(request: Request) -> ProviderStateCoordinator:
@@ -98,7 +108,10 @@ async def save_provider_key(
     coordinator = coordinator_from(request)
     result = await asyncio.wait_for(
         coordinator.validate_candidate(
-            provider_id, session_id, payload.api_key.encode("utf-8")
+            provider_id,
+            session_id,
+            payload.api_key.encode("utf-8"),
+            model_id=payload.model_id,
         ),
         timeout=20,
     )
@@ -126,4 +139,21 @@ async def activate_provider(provider_id: str, request: Request) -> ProviderView:
         state = await coordinator.activate(provider_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ProviderView.from_state(state)
+
+
+@router.put("/{provider_id}/model")
+async def select_provider_model(
+    provider_id: str, payload: ModelInput, request: Request
+) -> ProviderView:
+    ensure_provider(provider_id)
+    coordinator = coordinator_from(request)
+    try:
+        state = await asyncio.wait_for(
+            coordinator.select_model(provider_id, payload.model_id), timeout=20
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return ProviderView.from_state(state)

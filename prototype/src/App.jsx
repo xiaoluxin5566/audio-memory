@@ -7,7 +7,7 @@ import {
 } from './store.js';
 import { api } from './api/client.js';
 import { uploadFile } from './api/upload.js';
-import { analysisBlocks, normalizeFeed, normalizeHistory, normalizePrompts } from './api/state.js';
+import { analysisBlocks, normalizeFeed, normalizeHistory } from './api/state.js';
 import { useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
 import { useReanalysis } from './hooks/useReanalysis.js';
@@ -16,8 +16,8 @@ import { getReanalysisView, isActiveReanalysis } from './api/state.js';
 import { buildReportEventMap } from './reportPresentation.js';
 import './styles.css';
 
-const ROUTES = { '/': 'feed', '/history': 'history', '/settings/prompts': 'prompts' };
-const ROUTE_PATHS = { feed: '/', history: '/history', prompts: '/settings/prompts' };
+const ROUTES = { '/': 'feed', '/history': 'history' };
+const ROUTE_PATHS = { feed: '/', history: '/history' };
 const sceneClass = { analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
 const providerStateLabel = {
   initializing: '正在读取本地配置',
@@ -44,11 +44,10 @@ export function App() {
   const [selectedCard, setSelectedCard] = useState(null);
   const [toast, setToast] = useState('');
   const [editingTodo, setEditingTodo] = useState(null);
-  const [promptScene, setPromptScene] = useState('autonomous-analysis');
-  const [promptDraft, setPromptDraft] = useState('');
   const fileInput = useRef(null);
   const pendingUploadFiles = useRef([]);
   const lastFinishedReanalysis = useRef(null);
+  const reportPreviewOpened = useRef(false);
   const reanalysis = useReanalysis();
 
   const refreshContent = useCallback(async () => {
@@ -62,13 +61,6 @@ export function App() {
     }));
   }, []);
 
-  const refreshPrompts = useCallback(async () => {
-    const prompts = normalizePrompts(await api.prompts());
-    setState((current) => ({ ...current, prompts: { ...current.prompts, ...prompts } }));
-    setPromptScene((current) => prompts[current] ? current : Object.keys(prompts)[0] || current);
-    setPromptDraft((current) => current || prompts['autonomous-analysis']?.current || Object.values(prompts)[0]?.current || '');
-  }, []);
-
   useEffect(() => {
     setState((current) => ({
       ...current,
@@ -79,8 +71,17 @@ export function App() {
 
   useEffect(() => {
     refreshContent().catch(() => setToast('无法读取本地历史，请确认服务已启动'));
-    refreshPrompts().catch(() => setToast('Prompt 加载失败'));
-  }, [refreshContent, refreshPrompts]);
+  }, [refreshContent]);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('reportPreview') !== 'deepseek') return;
+    if (reportPreviewOpened.current) return;
+    const batch = state.feed[0];
+    const card = batch?.cards.find((item) => item.reportMarkdown);
+    if (batch && card) {
+      reportPreviewOpened.current = true;
+      setSelectedCard({ card, batch });
+    }
+  }, [state.feed]);
   useEffect(() => {
     api.activeJob().then((job) => {
       if (!job) return;
@@ -261,7 +262,6 @@ export function App() {
         </div>
       )}
       {route === 'history' && <History state={state} />}
-      {route === 'prompts' && <PromptSettings state={state} scene={promptScene} setScene={(id) => { setPromptScene(id); setPromptDraft(state.prompts[id]?.current || ''); }} draft={promptDraft} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
@@ -271,7 +271,7 @@ export function App() {
 }
 
 function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear }) {
-  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div></div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史'], ['prompts', 'Prompt 设置']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
+  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div></div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
 }
 
 function UploadFile({ file, onRemove }) {
@@ -335,7 +335,20 @@ function CardDetail({ card, batch, onClose, onToast }) {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
   const presentation = card.reportDocument ? null : buildReportEventMap(card.reportMarkdown);
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p></div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} />}{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p>{card.reportQuality && <ReportQualityStatus quality={card.reportQuality} />}</div><div className="detail-header-actions"><button className="feedback-trigger" onClick={() => setFeedbackOpen(true)}>意见反馈</button><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} />}{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+}
+
+export function reportQualityLabel(quality) {
+  if (!quality) return '';
+  const score = Number.isInteger(quality.quality_score) ? `，${quality.quality_score}分` : '';
+  if (quality.audit_status === 'completed_unaudited') return '已完成（未审计）';
+  if (quality.audit_status === 'completed_v1_revision_failed') return `已完成（V1）${score}`;
+  if (quality.audit_status === 'completed_v2_final_audit_degraded') return `已完成（V2），V1审计${quality.quality_score}分`;
+  return `已完成${score}`;
+}
+
+function ReportQualityStatus({ quality }) {
+  return <span className={`report-quality-status ${quality.audit_status}`}>{reportQualityLabel(quality)}</span>;
 }
 
 function ReportEventMap({ presentation }) {
@@ -432,13 +445,19 @@ function AnalysisBlocks({ blocks = [] }) {
   return <div className="analysis-blocks">{blocks.map((block, index) => {
     if (block.kind === 'image') return <figure className="report-image" key={index}><img src={block.src} alt={block.alt} loading="lazy" referrerPolicy="no-referrer" />{block.alt && <figcaption>{block.alt}</figcaption>}</figure>;
     if (block.kind === 'quote') return <blockquote className="analysis-quote" key={index}>“{block.text}”</blockquote>;
+    if (block.kind === 'divider') return <hr className="analysis-divider" key={index} />;
     if (block.kind === 'heading' && block.level === 2) { majorSectionNumber += 1; minorSectionNumber = 0; return <h2 className="analysis-section-heading" key={index}><span>{majorSectionNumber}</span>{block.text}</h2>; }
     if (block.kind === 'heading' && block.level >= 3) { minorSectionNumber += 1; return <h3 className="analysis-subheading" key={index}><span>{majorSectionNumber}.{minorSectionNumber}</span>{block.text}</h3>; }
     if (block.kind === 'heading') return <h3 className="analysis-subheading" key={index}>{block.text}</h3>;
     if (block.kind === 'bullet-list') return <ul className="analysis-key-points" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ul>;
     if (block.kind === 'timeline') return <ol className="analysis-timeline" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ol>;
     if (block.kind === 'cause-chain') return <div className="analysis-cause-chain" key={index}>{block.items.map((item, itemIndex) => <div className="cause-step" key={`${item}-${itemIndex}`}><span><RichInline text={item} /></span>{itemIndex < block.items.length - 1 && <b aria-hidden="true">→</b>}</div>)}</div>;
-    if (block.kind === 'numbered-list') return <ol className="analysis-insight-grid" key={index}>{block.items.map((item) => <li key={item}><RichInline text={item} /></li>)}</ol>;
+    if (block.kind === 'numbered-list') return <ol className="analysis-insight-grid" key={index}>{block.items.map((item, itemIndex) => {
+      const structured = typeof item === 'object' && item !== null;
+      const text = structured ? item.text : item;
+      const continuation = structured ? item.continuation ?? [] : [];
+      return <li key={`${structured ? item.ordinal : itemIndex}-${text}`} value={structured ? item.ordinal : undefined}><RichInline text={text} />{continuation.map((paragraph, paragraphIndex) => <p key={`${paragraph}-${paragraphIndex}`}><RichInline text={paragraph} /></p>)}</li>;
+    })}</ol>;
     if (block.kind === 'matrix') return <div className="analysis-matrix-wrap" key={index}><table className="analysis-matrix"><thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}>{cell}</th>)}</tr></thead><tbody>{block.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><RichInline text={cell} /></td>)}</tr>)}</tbody></table></div>;
     return <p className="analysis-paragraph" key={index}><RichInline text={block.text} /></p>;
   })}</div>;
@@ -465,14 +484,11 @@ function History({ state }) {
   return <main className="page-container"><div className="page-heading"><h1>音频历史</h1><p>已完成分析的音频会自动保存在本机。</p></div>{state.history.length === 0 ? <div className="page-empty"><h2>还没有历史音频</h2><p>完成一次整批分析后，音频会出现在这里。</p></div> : state.history.map((batch) => <section className="history-day" key={batch.id}><div className="date-divider"><b>{batch.date}</b></div><div className="history-batch"><div className="history-batch-title"><b>{batch.uploadedAt} 上传</b><span>{batch.files.length} 个音频</span></div><div className="audio-list">{batch.files.map((file, index) => <div className="audio-row" key={`${file.name}-${index}`}><div className="audio-type">{file.type}</div><div><b>{file.name}</b><span>{file.size} · {file.duration}</span></div><div className="audio-time"><b>{file.time}</b><span>本地文件</span></div></div>)}</div></div></section>)}</main>;
 }
 
-function PromptSettings({ state, scene, setScene, draft }) {
-  const prompts = Object.entries(state.prompts).filter(([, prompt]) => prompt.source === 'versioned-code');
-  const active = state.prompts[scene] ?? prompts[0]?.[1];
-  return <main className="page-container prompt-page"><div className="page-heading"><h1>Prompt 设置</h1><p>这里展示当前分析流程实际使用的生产 Prompt。</p></div><div className="prompt-workspace"><aside><h2>生产 Prompt</h2>{prompts.map(([id, prompt]) => <button key={id} className={scene === id ? 'active' : ''} onClick={() => setScene(id)}><span>{prompt.label}</span><small>v{prompt.version}</small></button>)}</aside><section className="prompt-editor"><div className="prompt-editor-head"><div><h2>{active?.label ?? '正在加载'}</h2><p>版本化来源：自主分析规范</p></div></div><div className="prompt-info">当前生产 Prompt，由程序版本化维护。修改需通过代码、测试与重新发布；旧六场景仅保留历史兼容，不参与新分析。</div><textarea className="prompt-textarea" readOnly value={draft} /><div className="prompt-actions"><span>当前为只读状态</span></div></section></div></main>;
-}
-
 function ProviderModal({ state, refresh, onClose, onToast }) {
   const [providerId, setProviderId] = useState(state.activeProvider);
+  const [modelId, setModelId] = useState(
+    state.providers[state.activeProvider]?.modelName || ''
+  );
   const [key, setKey] = useState('');
   const [status, setStatus] = useState({ type: '', message: '' });
   const [checking, setChecking] = useState(false);
@@ -499,7 +515,7 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
     setChecking(true); setStatus({ type: '', message: '' });
     candidateProviders.current.add(providerId);
     try {
-      await api.saveProviderKey(providerId, key, sessionId.current);
+      await api.saveProviderKey(providerId, key, sessionId.current, modelId);
       candidateProviders.current.delete(providerId);
       await api.activateProvider(providerId);
       await refresh();
@@ -518,11 +534,25 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
   async function activate() {
     await api.activateProvider(providerId); await refresh(); onToast(`已切换到 ${state.providers[providerId].name}`); onClose();
   }
+  async function chooseModel(nextModelId) {
+    setModelId(nextModelId);
+    setStatus({ type: '', message: '' });
+    if (!selected.configured || nextModelId === selected.modelName) return;
+    setChecking(true);
+    try {
+      await api.selectProviderModel(providerId, nextModelId);
+      await refresh();
+      setStatus({ type: 'success', message: '模型已切换并校验成功' });
+    } catch (error) {
+      setModelId(selected.modelName);
+      setStatus({ type: 'error', message: error.message });
+    } finally { setChecking(false); }
+  }
   async function close() {
     await Promise.all([...candidateProviders.current].map((id) => api.cancelCandidate(id, sessionId.current).catch(() => {})));
     onClose();
   }
-  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置分析模型</h1><p>选择预制厂商并填写 API Key，保存时会立即校验是否可用。</p><div className="provider-tabs">{Object.entries(state.providers).map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setKey(''); setStatus({ type: '', message: '' }); }}>{provider.name}{provider.configured && <small>已配置</small>}</button>)}</div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim()} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置分析模型</h1><p>选择厂商和具体模型，再填写 API Key；保存时会立即校验是否可用。</p><div className="provider-tabs">{Object.entries(state.providers).map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setModelId(provider.modelName || provider.models[0]?.id || ''); setKey(''); setStatus({ type: '', message: '' }); }}>{provider.name}{provider.configured && <small>已配置</small>}</button>)}</div><div className="model-picker"><b>选择具体模型</b><div>{selected.models.map((model) => <button type="button" key={model.id} className={modelId === model.id ? 'active' : ''} disabled={checking} onClick={() => chooseModel(model.id)}><strong>{model.id}</strong><span>{model.label}</span></button>)}</div></div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim() || !modelId} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
 }
 
 function ClearModal({ onClose, onConfirm }) {
