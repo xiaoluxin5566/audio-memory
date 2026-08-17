@@ -78,7 +78,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
 
     assert result.available is True
     assert result.provider_id == "kimi"
-    assert result.model_id == "kimi-k2.5"
+    assert result.model_id == "kimi-k3"
     assert result.tool_name == "$web_search"
     assert result.errors == ()
     assert len(result.sources) == 1
