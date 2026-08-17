@@ -147,19 +147,16 @@ def test_autonomous_composition_uses_approved_advisor_contract() -> None:
         schema={"type": "object"},
     )
 
-    assert "全文默认直接称呼“你”" in request.common_rules
-    assert "场景还原与核心观点" in request.common_rules
-    assert "分析、问题与点评" in request.common_rules
-    assert "针对性建议" in request.common_rules
-    assert "有关联不等于属于同一张卡" in request.common_rules
-    assert "同一次完整面试通常是一张卡" in request.common_rules
-    assert "当前工作系统与职业状态诊断" in request.common_rules
-    assert "完整教育公司面试不得与多家公司求职市场观察合并" in request.common_rules
-    assert "不得在建议话术中发明数字" in request.common_rules
-    assert "quotes" in request.common_rules
-    assert "必须始终返回空数组" in request.common_rules
-    assert '"content"' in request.common_rules
-    assert '"recommendations"' in request.common_rules
+    assert "面对面交流的专业分析师" in request.common_rules
+    assert "直接使用“你”" in request.common_rules
+    assert "完整 Markdown" in request.common_rules
+    assert "一张摘要卡的标题" in request.common_rules
+    assert "核心结论" in request.common_rules
+    assert "禁止统一套用" in request.common_rules
+    assert "数据范围与质量" in request.common_rules
+    assert "家庭沟通" in request.common_rules
+    assert "健康与身体状态" in request.common_rules
+    assert "本次内容无有价值信息" in request.common_rules
 
 
 def test_autonomous_transcript_never_sends_speaker_id() -> None:

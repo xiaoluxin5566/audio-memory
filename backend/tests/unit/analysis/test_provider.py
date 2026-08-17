@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -79,6 +80,37 @@ def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
     changed = provider_module._analysis_parameter_fingerprint()
     assert changed != baseline
     assert "PRIVATE_FIXTURE_TEXT" not in changed
+
+
+@pytest.mark.asyncio
+async def test_provider_can_run_explicit_parallel_audit_calls(monkeypatch) -> None:
+    async with httpx.AsyncClient() as http_client:
+        client = ProviderAnalysisClient(ConfiguredKeychain(), http_client)
+        active = 0
+        max_active = 0
+
+        async def fake_generate(*args: object, **kwargs: object) -> str:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return str(kwargs["scene_id"])
+
+        monkeypatch.setattr(client, "_generate_serialized", fake_generate)
+        results = await asyncio.gather(
+            client.generate(
+                "deepseek", system="rules", user="chunk 1",
+                scene_id="audit-chunk-1", allow_parallel=True,
+            ),
+            client.generate(
+                "deepseek", system="rules", user="chunk 2",
+                scene_id="audit-chunk-2", allow_parallel=True,
+            ),
+        )
+
+    assert results == ["audit-chunk-1", "audit-chunk-2"]
+    assert max_active == 2
 
 
 def transcript() -> list[dict[str, object]]:

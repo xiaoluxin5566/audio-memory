@@ -132,7 +132,7 @@ def _analysis_parameter_fingerprint() -> str:
         },
         "transient_total_attempts": 2,
         "schema_total_attempts": 2,
-        "scene_concurrency": 1,
+        "scene_concurrency": {"default": 1, "direct_report_audit_chunk": 6},
         "analysis_windows": {
             "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
             "max_span_ms": analysis_windows.ANALYSIS_WINDOW_MAX_SPAN_MS,
@@ -161,6 +161,7 @@ class ProviderAnalysisClient:
         self.keychain = keychain
         self.client = client
         self._remote_lock = asyncio.Lock()
+        self._parallel_audit_limit = asyncio.Semaphore(6)
         self.usage_totals = {"input_tokens": 0, "output_tokens": 0}
         self.request_diagnostics: list[ProviderRequestDiagnostic] = []
         self.parameter_fingerprint = _analysis_parameter_fingerprint()
@@ -355,8 +356,10 @@ class ProviderAnalysisClient:
         segment_count: int = 0,
         repair_attempted: bool = False,
         thinking_enabled: bool | None = None,
+        allow_parallel: bool = False,
     ) -> str:
-        async with self._remote_lock:
+        lock = self._parallel_audit_limit if allow_parallel else self._remote_lock
+        async with lock:
             return await self._generate_serialized(
                 provider_id,
                 system=system,

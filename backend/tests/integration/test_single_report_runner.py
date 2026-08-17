@@ -37,12 +37,27 @@ def valid_markdown(body: str = "工作讨论是今天的主线。") -> str:
 说话人身份仍需结合上下文判断。"""
 
 
+def valid_clean_audit(mode: str = "full_v1_audit") -> dict[str, object]:
+    return {
+        "audit_mode": mode, "rubric_version": 1, "passed": True,
+        "scores": {"factual_accuracy": 28, "important_coverage": 23,
+                   "analysis_depth": 18, "actionability": 13,
+                   "expression_structure": 9, "total": 91},
+        "deductions": [],
+        "coverage": {"full_transcript_reviewed": mode == "full_v1_audit",
+                     "reviewed_segment_count": 1, "total_segment_count": 1,
+                     "unreviewed_ranges": [], "summary": "已完整审查。"},
+        "issues": [], "unresolved_issue_ids": [], "summary": "通过。",
+    }
+
+
 class FakeProvider:
-    def __init__(self, *, structured_response: str | None = None, markdown_responses: list[str] | None = None, review_response: dict[str, object] | None = None, annotation_response: dict[str, object] | None = None) -> None:
+    def __init__(self, *, structured_response: str | None = None, markdown_responses: list[str] | None = None, review_response: dict[str, object] | None = None, review_responses: list[dict[str, object]] | None = None, annotation_response: dict[str, object] | None = None) -> None:
         self.calls: list[dict[str, object]] = []
         self.structured_response = structured_response
         self.markdown_responses = list(markdown_responses or [valid_markdown()])
         self.review_response = review_response or {"review_passed": True, "issues": [], "revised_sections": []}
+        self.review_responses = list(review_responses or [])
         self.annotation_response = annotation_response
 
     async def generate_markdown(self, provider_id: str, **kwargs: object) -> str:
@@ -51,10 +66,15 @@ class FakeProvider:
 
     async def generate(self, provider_id: str, **kwargs: object) -> str:
         scene_id = kwargs.get("scene_id")
+        if scene_id in {"direct-report-audit-chunk", "direct-report-audit-merge"}:
+            self.calls.append({"method": "audit", "provider_id": provider_id, **kwargs})
+            mode = "chunk_v1_audit" if scene_id == "direct-report-audit-chunk" else "full_v1_audit"
+            return json.dumps(valid_clean_audit(mode), ensure_ascii=False)
         method = "review" if scene_id == "direct-report-review" else "annotations" if scene_id == "direct-report-annotations" else "structured"
         self.calls.append({"method": method, "provider_id": provider_id, **kwargs})
         if method == "review":
-            return json.dumps(self.review_response, ensure_ascii=False)
+            response = self.review_responses.pop(0) if self.review_responses else self.review_response
+            return json.dumps(response, ensure_ascii=False)
         if method == "annotations":
             if self.annotation_response is not None:
                 return json.dumps(self.annotation_response, ensure_ascii=False)
@@ -158,9 +178,9 @@ async def test_single_report_runner_calls_provider_once_with_profile_and_full_tr
 
     assert len(provider.calls) == 3
     assert provider.calls[0]["method"] == "markdown"
-    assert provider.calls[1]["method"] == "review"
-    assert provider.calls[2]["method"] == "annotations"
-    assert "seg_0_0" not in str(provider.calls[2]["user"])
+    assert provider.calls[1]["method"] == "audit"
+    assert provider.calls[2]["method"] == "audit"
+    assert "seg_0_0" in str(provider.calls[1]["user"])
     assert "AI 硬件从业者" in str(provider.calls[0]["user"])
     assert "speaker_1" in str(provider.calls[0]["user"])
     assert "只输出最终 Markdown" in str(provider.calls[0]["system"])
@@ -226,16 +246,184 @@ async def test_markdown_mode_supplements_failed_draft_before_publish(tmp_path) -
     await runner.run("version-1", "worker-1")
 
     assert len(provider.calls) == 3
-    assert provider.calls[1]["scene_id"] == "direct-report-review"
+    assert provider.calls[1]["scene_id"] == "direct-report-audit-chunk"
+    assert provider.calls[2]["scene_id"] == "direct-report-audit-merge"
     assert "初稿工作分析" in str(provider.calls[1]["user"])
-    assert "补充了明确待办和具体分析" in publisher.reports[0].report_markdown
-    assert publisher.reports[0].report_markdown.startswith("# 下一份工作要选对，和孩子沟通要慢一点\n")
+    assert "初稿工作分析，保留这一句" in publisher.reports[0].report_markdown
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
     staged = json.loads(version.staged_results_json)
     assert staged["direct_report_initial_markdown"] == initial
     assert staged["direct_report_final_markdown"] == publisher.reports[0].report_markdown
-    assert staged["direct_report_annotations"]
+    assert staged["direct_report_v1_audit"]["scores"]["total"] == 91
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_markdown_mode_normalizes_overview_heading_before_quality_gate(tmp_path) -> None:
+    database = Database(tmp_path / "normalize-overview.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    initial = valid_markdown().replace(
+        "## 今天发生了什么，重点改进什么",
+        "## 今天发生了什么，重点应该改什么",
+    )
+    publisher = FakePublisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=FakeProvider(markdown_responses=[initial]),
+        publisher=publisher,
+        generation_source=FakeGenerationSource(),
+    )
+
+    await runner.run("version-1", "worker-1")
+
+    assert "## 今天发生了什么，重点改进什么" in publisher.reports[0].report_markdown
+    assert "重点应该改什么" not in publisher.reports[0].report_markdown
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_markdown_mode_migrates_overview_heading_in_saved_revision(tmp_path) -> None:
+    database = Database(tmp_path / "normalize-saved-revision.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    initial = valid_markdown().replace(
+        "## 今天发生了什么，重点改进什么",
+        "## 今天发生了什么，重点应该改什么",
+    )
+    review = {
+        "review_passed": False,
+        "issues": [{
+            "issue_id": "issue_901",
+            "severity": "minor",
+            "category": "structure",
+            "section_id": "section_001",
+            "description": "补充总览。",
+            "evidence_segment_ids": [],
+        }],
+        "revised_sections": [{
+            "section_id": "section_001",
+            "title": "今天发生了什么，重点应该改什么",
+            "revised_markdown": initial.split("\n\n## 工作判断", 1)[0].split("\n\n", 1)[1],
+            "change_kind": "style",
+            "issues_resolved": ["issue_901"],
+            "evidence_segment_ids": [],
+            "preserved_facts": [],
+            "preserved_quotes": [],
+            "preserved_todos": [],
+            "removes_repetition": False,
+            "repetition_reason": None,
+        }],
+    }
+    publisher = FakePublisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=FakeProvider(
+            markdown_responses=[initial], review_response=review
+        ),
+        publisher=publisher,
+        generation_source=FakeGenerationSource(),
+    )
+
+    await runner.run("version-1", "worker-1")
+
+    assert "## 今天发生了什么，重点改进什么" in publisher.reports[0].report_markdown
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_markdown_mode_runs_one_quality_repair_review_before_failing(tmp_path) -> None:
+    database = Database(tmp_path / "quality-repair.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    async with database.session() as session:
+        transcript = await session.get(Transcript, "transcript-1")
+        transcript.text = "我讨论了 AI 硬件。" * 5_000
+        await session.commit()
+    initial = valid_markdown("初稿分析。")
+    repair = {
+        "review_passed": False,
+        "issues": [{
+            "issue_id": "issue_900",
+            "severity": "minor",
+            "category": "thin_analysis",
+            "section_id": "section_002",
+            "description": "正文深度不足。",
+            "evidence_segment_ids": [],
+        }],
+        "revised_sections": [{
+            "section_id": "section_002",
+            "title": "工作判断",
+            "revised_markdown": "## 工作判断\n\n" + ("补充具体分析。" * 700) + "\n",
+            "change_kind": "analysis",
+            "issues_resolved": ["issue_900"],
+            "evidence_segment_ids": [],
+            "preserved_facts": ["讨论 AI 硬件"],
+            "preserved_quotes": [],
+            "preserved_todos": [],
+            "removes_repetition": False,
+            "repetition_reason": None,
+        }],
+    }
+    provider = FakeProvider(
+        markdown_responses=[initial],
+        review_responses=[
+            {"review_passed": True, "issues": [], "revised_sections": []},
+            repair,
+        ],
+    )
+    publisher = FakePublisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=publisher,
+        generation_source=FakeGenerationSource(),
+    )
+
+    await runner.run("version-1", "worker-1")
+
+    assert [call["method"] for call in provider.calls] == ["markdown", "audit", "audit"]
+    assert len(publisher.reports) == 1
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    staged = json.loads(version.staged_results_json)
+    assert staged["direct_report_quality"]["quality_score"] == 91
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_quality_repair_failure_persists_diagnostic(tmp_path) -> None:
+    database = Database(tmp_path / "quality-repair-diagnostic.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    async with database.session() as session:
+        transcript = await session.get(Transcript, "transcript-1")
+        transcript.text = "我讨论了 AI 硬件。" * 5_000
+        await session.commit()
+
+    class RepairFailingProvider(FakeProvider):
+        async def generate(self, provider_id: str, **kwargs: object) -> str:
+            if kwargs.get("scene_id") == "direct-report-audit-chunk":
+                raise RuntimeError("repair request rejected")
+            return await super().generate(provider_id, **kwargs)
+
+    runner = SingleReportRunner(
+        database=database,
+        provider=RepairFailingProvider(),
+        publisher=FakePublisher(),
+        generation_source=FakeGenerationSource(),
+    )
+
+    await runner.run("version-1", "worker-1")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    staged = json.loads(version.staged_results_json)
+    assert staged["direct_report_v1_audit_error"] == {
+        "type": "RuntimeError",
+        "message": "repair request rejected",
+    }
     await database.dispose()
 
 
@@ -254,13 +442,14 @@ async def test_invalid_annotations_fall_back_to_complete_markdown(tmp_path) -> N
     await runner.run("version-1", "worker-1")
 
     assert len(provider.calls) == 3
-    assert publisher.reports[0].report_markdown == valid_markdown()
+    assert publisher.reports[0].report_markdown.startswith(valid_markdown())
+    assert "本次报告：" in publisher.reports[0].report_markdown
     assert publisher.reports[0].report_annotations is None
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
     staged = json.loads(version.staged_results_json)
     assert "direct_report_annotations" not in staged
-    assert staged["direct_report_annotation_degraded_reason"]
+    assert "direct_report_annotation_degraded_reason" not in staged
     assert staged["direct_report_quality"]["passed"] is True
     await database.dispose()
 

@@ -1,6 +1,9 @@
 import pytest
 
-from audio_memory.analysis.markdown_report import MarkdownReportResult
+from audio_memory.analysis.markdown_report import (
+    MarkdownReportResult,
+    append_report_metrics,
+)
 
 
 def test_markdown_report_derives_card_metadata_without_json_wrapper() -> None:
@@ -31,3 +34,18 @@ def test_markdown_report_allows_verified_https_images() -> None:
 def test_markdown_report_rejects_unsafe_active_content(markdown: str) -> None:
     with pytest.raises(ValueError, match="unsafe"):
         MarkdownReportResult.from_markdown(markdown)
+
+
+def test_report_metrics_use_the_user_facing_revision_gain_copy() -> None:
+    markdown = append_report_metrics(
+        "# 标题\n\n一二三四五。",
+        initial_score=70,
+        final_score=90,
+        revised=True,
+    )
+
+    assert "本次报告：8 字｜定向修改增益：70 → 90（+20）；" in markdown
+    assert "定向终审" not in markdown
+    assert append_report_metrics(
+        markdown, initial_score=70, final_score=90, revised=True
+    ) == markdown

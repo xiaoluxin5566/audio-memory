@@ -2,30 +2,44 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import replace
 from typing import Protocol
 
 from sqlalchemy import select, update
 
 from audio_memory.analysis.full_transcript import build_full_transcript_markdown
-from audio_memory.analysis.markdown_report import MarkdownReportResult
+from audio_memory.analysis.markdown_report import (
+    MarkdownReportResult,
+    append_report_metrics,
+)
 from audio_memory.analysis.direct_markdown_quality import evaluate_direct_markdown_quality
 from audio_memory.analysis.direct_report_sections import (
-    apply_section_revisions,
-    replace_report_title,
+    normalize_report_headings,
     split_report_sections,
 )
-from audio_memory.analysis.direct_report_annotations import (
-    parse_report_blocks,
-    validate_annotations,
+from audio_memory.analysis.direct_report_pipeline import (
+    ReportQualityMetadata,
+    apply_audited_revision,
+    audit_title_revision_section_ids,
+    audit_transcript_evidence_ids,
+    build_section_diffs,
+    canonicalize_audit_evidence,
+    metadata_from_audit,
+    revision_target_section_ids,
+    sanitize_audit_evidence,
+    validate_audit_evidence,
 )
 from audio_memory.analysis.direct_report_document import StructuredReportResult
+from audio_memory.analysis.segmented_report_audit import (
+    parallel_map_audit_chunks,
+    partition_transcript_for_audit,
+    validate_atomic_audit_issues,
+)
 from audio_memory.db import Database
 from audio_memory.models import AnalysisVersion, JobFile, Transcript
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.direct_report_schema import DirectReportDocument
-from audio_memory.prompts.direct_report_review_schema import DirectReportReview
-from audio_memory.prompts.direct_report_annotation_schema import DirectReportAnnotations
+from audio_memory.prompts.direct_report_audit_schema import ReportAudit
+from audio_memory.prompts.direct_report_revision_schema import TargetedReportRevision
 from audio_memory.analysis.runner import (
     CredentialChangedError,
     FixedRulesChangedError,
@@ -72,7 +86,9 @@ class SingleReportRunner:
 
     async def _run_markdown(self, version, staged, *, worker_owner_id):
         transcript, markdown, profile, goal_content = await self._inputs(version)
-        raw_report = staged.get("direct_report_initial_markdown")
+        raw_report = staged.get("direct_report_v1_markdown")
+        if not isinstance(raw_report, str) or not raw_report.strip():
+            raw_report = staged.get("direct_report_initial_markdown")
         if not isinstance(raw_report, str) or not raw_report.strip():
             legacy_report = staged.get("direct_report_markdown")
             if isinstance(legacy_report, str) and legacy_report.strip():
@@ -95,7 +111,9 @@ class SingleReportRunner:
                 timeout_seconds=request.timeout_seconds,
                 segment_count=request.segment_count,
             )
+            raw_report = normalize_report_headings(raw_report)
             result = MarkdownReportResult.from_markdown(raw_report)
+            staged["direct_report_v1_markdown"] = result.report_markdown
             staged["direct_report_initial_markdown"] = result.report_markdown
             await self._save_checkpoint(
                 version.id,
@@ -104,37 +122,124 @@ class SingleReportRunner:
                 duration_ms=int((time.monotonic() - started) * 1_000),
             )
         else:
-            result = MarkdownReportResult.from_markdown(raw_report)
-        initial_quality = evaluate_direct_markdown_quality(
+            result = MarkdownReportResult.from_markdown(
+                normalize_report_headings(raw_report)
+            )
+        v1_quality = evaluate_direct_markdown_quality(
             result.report_markdown, transcript_chars=len(markdown)
         )
 
-        review_payload = staged.get("direct_report_review")
-        if isinstance(review_payload, dict):
-            review = DirectReportReview.model_validate(review_payload)
+        audit_payload = staged.get("direct_report_v1_audit")
+        if isinstance(audit_payload, dict):
+            audit = ReportAudit.model_validate(audit_payload)
         else:
-            request = self.composer.compose_direct_report_review(
-                transcript_markdown=markdown,
-                profile=profile,
-                user_analysis_prompt=goal_content,
-                initial_report_markdown=result.report_markdown,
-                sections=split_report_sections(result.report_markdown),
-                gate_failures=initial_quality.failures,
-                segment_count=len(transcript),
-            )
             started = time.monotonic()
-            raw_review = await self.provider.generate(
-                version.provider_id,
-                system=request.instructions,
-                user=request.user_data,
-                model_id=version.model_id,
-                scene_id=request.scene_id,
-                max_tokens=request.max_tokens,
-                timeout_seconds=request.timeout_seconds,
-                segment_count=request.segment_count,
-            )
-            review = DirectReportReview.model_validate(json.loads(raw_review))
-            staged["direct_report_review"] = review.model_dump(mode="json")
+            try:
+                transcript_by_id = {
+                    str(item["segment_id"]): str(item["text"])
+                    for item in transcript
+                }
+                chunks = partition_transcript_for_audit(transcript)
+
+                async def audit_chunk(chunk):
+                    chunk_markdown = build_full_transcript_markdown(
+                        list(chunk.segments)
+                    )
+                    request = self.composer.compose_report_audit_chunk(
+                        transcript_markdown=chunk_markdown,
+                        profile=profile,
+                        user_analysis_prompt=goal_content,
+                        v1_markdown=result.report_markdown,
+                        sections=split_report_sections(result.report_markdown),
+                        gate_failures=v1_quality.failures,
+                        chunk_index=chunk.index,
+                        chunk_count=chunk.total,
+                        segment_count=chunk.segment_count,
+                        total_segment_count=len(transcript),
+                    )
+                    raw = await self.provider.generate(
+                        version.provider_id,
+                        system=request.instructions,
+                        user=request.user_data,
+                        model_id=version.model_id,
+                        scene_id=request.scene_id,
+                        max_tokens=request.max_tokens,
+                        timeout_seconds=request.timeout_seconds,
+                        segment_count=request.segment_count,
+                        allow_parallel=True,
+                    )
+                    chunk_audit = ReportAudit.model_validate(json.loads(raw))
+                    if chunk_audit.audit_mode != "chunk_v1_audit":
+                        raise ValueError("chunk audit returned the wrong audit mode")
+                    if chunk_audit.coverage.total_segment_count != chunk.segment_count:
+                        raise ValueError("chunk audit returned wrong coverage")
+                    chunk_by_id = {
+                        str(item["segment_id"]): str(item["text"])
+                        for item in chunk.segments
+                    }
+                    chunk_audit = sanitize_audit_evidence(
+                        chunk_audit, chunk_by_id
+                    )
+                    chunk_audit = canonicalize_audit_evidence(
+                        chunk_audit,
+                        chunk_by_id,
+                        report_markdown=result.report_markdown,
+                    )
+                    validate_audit_evidence(
+                        chunk_audit,
+                        transcript_by_id=chunk_by_id,
+                        report_markdown=result.report_markdown,
+                    )
+                    validate_atomic_audit_issues(chunk_audit)
+                    return chunk_audit
+
+                chunk_audits = await parallel_map_audit_chunks(chunks, audit_chunk)
+                staged["direct_report_v1_audit_chunks"] = [
+                    item.model_dump(mode="json") for item in chunk_audits
+                ]
+                merge_request = self.composer.compose_merged_report_audit(
+                    v1_markdown=result.report_markdown,
+                    sections=split_report_sections(result.report_markdown),
+                    gate_failures=v1_quality.failures,
+                    chunk_audits=list(chunk_audits),
+                    total_segment_count=len(transcript),
+                )
+                raw_audit = await self.provider.generate(
+                    version.provider_id,
+                    system=merge_request.instructions,
+                    user=merge_request.user_data,
+                    model_id=version.model_id,
+                    scene_id=merge_request.scene_id,
+                    max_tokens=merge_request.max_tokens,
+                    timeout_seconds=merge_request.timeout_seconds,
+                    segment_count=merge_request.segment_count,
+                )
+                audit = ReportAudit.model_validate(json.loads(raw_audit))
+                if audit.audit_mode != "full_v1_audit":
+                    raise ValueError("merged V1 audit returned the wrong audit mode")
+                validate_atomic_audit_issues(audit)
+                audit = canonicalize_audit_evidence(
+                    audit,
+                    transcript_by_id,
+                    report_markdown=result.report_markdown,
+                )
+                validate_audit_evidence(
+                    audit,
+                    transcript_by_id=transcript_by_id,
+                    report_markdown=result.report_markdown,
+                )
+            except Exception as exc:
+                staged["direct_report_v1_audit_error"] = self._error_text(exc)
+                metadata = ReportQualityMetadata(
+                    report_version="v1", audit_status="completed_unaudited",
+                    quality_score=None, quality_score_scope=None, quality_passed=None,
+                    degraded_reason=str(exc)[:1_000],
+                )
+                return await self._publish_report(
+                    version, staged, result, metadata, v1_quality,
+                    worker_owner_id, int((time.monotonic() - started) * 1_000),
+                )
+            staged["direct_report_v1_audit"] = audit.model_dump(mode="json")
             await self._save_checkpoint(
                 version.id,
                 staged,
@@ -142,103 +247,199 @@ class SingleReportRunner:
                 duration_ms=int((time.monotonic() - started) * 1_000),
             )
 
-        material_issue_ids = {
-            item.issue_id
-            for item in review.issues
-            if item.severity in {"critical", "major"}
-        }
-        resolved_issue_ids = {
-            issue_id
-            for revision in review.revised_sections
-            for issue_id in revision.issues_resolved
-        }
-        unresolved = material_issue_ids - resolved_issue_ids
-        if unresolved:
-            raise ValueError(
-                "direct report review left material issues unresolved: "
-                + ", ".join(sorted(unresolved))
+        if not audit.issues and not audit.value_opportunities:
+            return await self._publish_report(
+                version, staged, result,
+                metadata_from_audit(
+                    report_version="v1", audit=audit,
+                    score_scope="v1_full_audit",
+                ),
+                v1_quality, worker_owner_id, 0,
             )
-        valid_segment_ids = {
-            str(item["segment_id"])
-            for item in transcript
-            if isinstance(item.get("segment_id"), str)
-        }
-        final_markdown = apply_section_revisions(
-            result.report_markdown,
-            tuple(review.revised_sections),
-            valid_segment_ids,
-        )
-        final_markdown = replace_report_title(final_markdown, review.revised_title)
-        final_result = MarkdownReportResult.from_markdown(final_markdown)
-        final_quality = evaluate_direct_markdown_quality(
-            final_result.report_markdown, transcript_chars=len(markdown)
-        )
-        if not final_quality.passed:
-            raise ValueError(
-                "direct report quality gate failed after review: "
-                + ", ".join(final_quality.failures)
-            )
-        staged["direct_report_section_revisions"] = [
-            item.model_dump(mode="json") for item in review.revised_sections
-        ]
-        staged["direct_report_final_markdown"] = final_result.report_markdown
-        staged["direct_report_markdown"] = final_result.report_markdown
-        staged["direct_report_quality"] = {
-            "passed": True,
-            "failures": [],
-            "report_chars": final_quality.report_chars,
-            "minimum_report_chars": final_quality.minimum_report_chars,
-            "reviewed": True,
-            "revised_section_count": len(review.revised_sections),
-        }
-        await self._save_checkpoint(
-            version.id, staged, worker_owner_id, duration_ms=0
-        )
 
-        blocks = parse_report_blocks(final_result.report_markdown)
-        annotations = None
-        annotation_payload = staged.get("direct_report_annotations")
-        if isinstance(annotation_payload, dict):
-            parsed = DirectReportAnnotations.model_validate(annotation_payload)
-            annotations = validate_annotations(blocks, parsed)
-        elif not staged.get("direct_report_annotation_degraded_reason"):
-            request = self.composer.compose_direct_report_annotations(blocks=blocks)
+        sections = split_report_sections(result.report_markdown)
+        section_map = {item.section_id: item for item in sections}
+        editable_ids = revision_target_section_ids(result.report_markdown, audit)
+        editable = [
+            {"section_id": item.section_id, "title": item.title,
+             "markdown": item.markdown}
+            for item in sections if item.section_id in editable_ids
+        ]
+        adjacent_ids: set[str] = set()
+        for index, item in enumerate(sections):
+            if item.section_id in editable_ids:
+                if index: adjacent_ids.add(sections[index - 1].section_id)
+                if index + 1 < len(sections): adjacent_ids.add(sections[index + 1].section_id)
+        adjacent_ids -= editable_ids
+        adjacent = [
+            {"section_id": item.section_id, "title": item.title,
+             "markdown": item.markdown}
+            for item in sections if item.section_id in adjacent_ids
+        ]
+        valid_segment_ids = {str(item["segment_id"]) for item in transcript}
+        allowed_ids = audit_transcript_evidence_ids(audit, valid_segment_ids)
+        revision_payload = staged.get("direct_report_v2_revisions")
+        if isinstance(revision_payload, dict):
+            revision = TargetedReportRevision.model_validate(revision_payload)
+        else:
+            request = self.composer.compose_targeted_report_revision(
+                v1_title=result.title,
+                section_outline=[{"section_id": item.section_id, "title": item.title} for item in sections],
+                editable_sections=editable,
+                adjacent_sections=adjacent,
+                audit=audit,
+                allowed_segment_ids=allowed_ids,
+            )
             started = time.monotonic()
             try:
-                raw_annotations = await self.provider.generate(
-                    version.provider_id,
-                    system=request.instructions,
-                    user=request.user_data,
-                    model_id=version.model_id,
-                    scene_id=request.scene_id,
-                    max_tokens=request.max_tokens,
+                raw_revision = await self.provider.generate(
+                    version.provider_id, system=request.instructions,
+                    user=request.user_data, model_id=version.model_id,
+                    scene_id=request.scene_id, max_tokens=request.max_tokens,
                     timeout_seconds=request.timeout_seconds,
                     segment_count=request.segment_count,
                 )
-                parsed = DirectReportAnnotations.model_validate(
-                    json.loads(raw_annotations)
-                )
-                annotations = validate_annotations(blocks, parsed)
-                staged["direct_report_annotations"] = parsed.model_dump(mode="json")
+                revision = TargetedReportRevision.model_validate(json.loads(raw_revision))
+                unknown_sections = {item.section_id for item in revision.revisions} - editable_ids
+                if unknown_sections:
+                    raise ValueError(f"revision changed non-editable sections: {sorted(unknown_sections)}")
             except Exception as exc:
-                staged["direct_report_annotation_degraded_reason"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )[:1_000]
+                staged["direct_report_v2_revision_error"] = self._error_text(exc)
+                metadata = metadata_from_audit(
+                    report_version="v1", audit=audit,
+                    score_scope="v1_full_audit",
+                    audit_status="completed_v1_revision_failed",
+                    degraded_reason=str(exc)[:1_000],
+                )
+                return await self._publish_report(
+                    version, staged, result, metadata, v1_quality,
+                    worker_owner_id, int((time.monotonic() - started) * 1_000),
+                )
+            staged["direct_report_v2_revisions"] = revision.model_dump(mode="json")
             await self._save_checkpoint(
-                version.id,
-                staged,
-                worker_owner_id,
+                version.id, staged, worker_owner_id,
                 duration_ms=int((time.monotonic() - started) * 1_000),
             )
-        if annotations is not None:
-            final_result = replace(
-                final_result,
-                report_annotations=tuple(
-                    item.model_dump(mode="json") for item in annotations
+
+        try:
+            v2_markdown = apply_audited_revision(
+                result.report_markdown, audit, revision, valid_segment_ids
+            )
+            diffs = build_section_diffs(
+                result.report_markdown,
+                v2_markdown,
+                allowed_title_change_ids=audit_title_revision_section_ids(
+                    result.report_markdown, audit
                 ),
             )
+            v2_result = MarkdownReportResult.from_markdown(v2_markdown)
+            v2_quality = evaluate_direct_markdown_quality(
+                v2_result.report_markdown, transcript_chars=len(markdown)
+            )
+        except Exception as exc:
+            staged["direct_report_v2_revision_error"] = self._error_text(exc)
+            metadata = metadata_from_audit(
+                report_version="v1", audit=audit,
+                score_scope="v1_full_audit",
+                audit_status="completed_v1_revision_failed",
+                degraded_reason=str(exc)[:1_000],
+            )
+            return await self._publish_report(
+                version, staged, result, metadata, v1_quality,
+                worker_owner_id, 0,
+            )
+        staged["direct_report_v2_markdown"] = v2_result.report_markdown
+        staged["direct_report_v2_diffs"] = diffs
+
+        final_payload = staged.get("direct_report_v2_final_audit")
+        if isinstance(final_payload, dict):
+            final_audit = ReportAudit.model_validate(final_payload)
+        else:
+            request = self.composer.compose_revision_final_audit(
+                v2_markdown=v2_result.report_markdown, section_diffs=diffs,
+                v1_audit=audit, revision=revision,
+            )
+            started = time.monotonic()
+            try:
+                raw_final = await self.provider.generate(
+                    version.provider_id, system=request.instructions,
+                    user=request.user_data, model_id=version.model_id,
+                    scene_id=request.scene_id, max_tokens=request.max_tokens,
+                    timeout_seconds=request.timeout_seconds,
+                    segment_count=request.segment_count,
+                )
+                final_audit = ReportAudit.model_validate(json.loads(raw_final))
+                if final_audit.audit_mode != "revision_final_audit":
+                    raise ValueError("final audit returned the wrong audit mode")
+            except Exception as exc:
+                staged["direct_report_v2_final_audit_error"] = self._error_text(exc)
+                metadata = metadata_from_audit(
+                    report_version="v2", audit=audit,
+                    score_scope="v1_pre_revision",
+                    audit_status="completed_v2_final_audit_degraded",
+                    degraded_reason=str(exc)[:1_000],
+                )
+                return await self._publish_report(
+                    version, staged, v2_result, metadata, v2_quality,
+                    worker_owner_id, int((time.monotonic() - started) * 1_000),
+                )
+            staged["direct_report_v2_final_audit"] = final_audit.model_dump(mode="json")
+            await self._save_checkpoint(
+                version.id, staged, worker_owner_id,
+                duration_ms=int((time.monotonic() - started) * 1_000),
+            )
+
+        return await self._publish_report(
+            version, staged, v2_result,
+            metadata_from_audit(
+                report_version="v2", audit=final_audit,
+                score_scope="v2_final_audit",
+            ),
+            v2_quality, worker_owner_id, 0,
+        )
+
+    @staticmethod
+    def _error_text(exc: Exception) -> dict[str, str]:
+        return {"type": type(exc).__name__, "message": str(exc)[:1_000]}
+
+    async def _publish_report(
+        self, version, staged, result: MarkdownReportResult,
+        metadata: ReportQualityMetadata, deterministic_quality,
+        worker_owner_id: str | None, duration_ms: int,
+    ):
+        initial_audit_payload = staged.get("direct_report_v1_audit")
+        initial_score = None
+        if isinstance(initial_audit_payload, dict):
+            scores = initial_audit_payload.get("scores")
+            if isinstance(scores, dict) and isinstance(scores.get("total"), int):
+                initial_score = scores["total"]
+        final_markdown = append_report_metrics(
+            result.report_markdown,
+            initial_score=initial_score,
+            final_score=metadata.quality_score,
+            revised=metadata.report_version == "v2",
+        )
+        staged["direct_report_final_markdown"] = final_markdown
+        staged["direct_report_markdown"] = final_markdown
+        staged["direct_report_publication_metadata"] = metadata.as_dict()
+        staged["direct_report_quality"] = {
+            "passed": deterministic_quality.passed,
+            "failures": list(deterministic_quality.failures),
+            "report_chars": deterministic_quality.report_chars,
+            "minimum_report_chars": deterministic_quality.minimum_report_chars,
+            **metadata.as_dict(),
+        }
+        await self._save_checkpoint(
+            version.id, staged, worker_owner_id, duration_ms=duration_ms
+        )
+        result = MarkdownReportResult(
+            title=result.title, summary=result.summary,
+            report_markdown=final_markdown,
+            report_annotations=result.report_annotations,
+            quality_metadata=metadata,
+        )
         return await self.publisher.publish(
-            version.id, final_result, [], worker_owner_id=worker_owner_id
+            version.id, result, [], worker_owner_id=worker_owner_id
         )
 
     async def _run_structured(self, version, staged, *, worker_owner_id):

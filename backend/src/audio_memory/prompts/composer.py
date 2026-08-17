@@ -15,8 +15,12 @@ from audio_memory.prompts import evidence as evidence_policy
 from audio_memory.prompts.day_map_schema import ExternalSource
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.prompts.direct_report_schema import DirectReportDocument
+from audio_memory.prompts.direct_report_light_schema import DirectReportLightDocument
+from audio_memory.prompts.direct_report_marked_schema import DirectReportMarkedDocument
 from audio_memory.prompts.direct_report_review_schema import DirectReportReview
 from audio_memory.prompts.direct_report_annotation_schema import DirectReportAnnotations
+from audio_memory.prompts.direct_report_audit_schema import ReportAudit
+from audio_memory.prompts.direct_report_revision_schema import TargetedReportRevision
 from audio_memory.prompts.store import PROMPT_SCENES, PromptDocument
 
 
@@ -39,6 +43,15 @@ MODEL_REQUEST_POLICIES = {
     "autonomous-native-search": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
     "autonomous-final-analysis": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
     "autonomous-profile": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=180),
+    "discovery": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=180),
+    "evidence-workbench": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
+    "deep-analysis": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=300),
+    "writing-prepare": ModelRequestPolicy(max_tokens=8_192, timeout_seconds=180),
+    "writer-session": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
+    "report-audit": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
+    "content-audit": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
+    "revision": ModelRequestPolicy(max_tokens=32_768, timeout_seconds=300),
+    "investigation": ModelRequestPolicy(max_tokens=16_384, timeout_seconds=240),
 }
 
 
@@ -128,6 +141,114 @@ class PromptComposer:
             schema_json=schema_json,
         )
 
+    def compose_direct_report_light(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(DirectReportLightDocument.model_json_schema())
+        analytical_rules = self._fixed_prompt("direct-report.md").split(
+            "\n\n## 内容结构契约", 1
+        )[0]
+        light_contract = """## 轻量内容结构契约
+
+保持与完整结构化报告相同的分析深度、事实边界、不确定性表达和建议质量。不能因为结构化输出而压缩分析深度；Schema 仅减少内容的内部标注，不允许借此省略重要事实、推理、证据或可执行建议。
+
+- `title`：自然、具体的报告标题。
+- `overview`：报告导读和当天关键事件概览。
+- `sections`：按阅读逻辑组织的一级章节。每章只输出 `title`、完整的 `content` 和支撑本章的 `evidence_segment_ids`。
+- `content` 是完整正文，可使用自然段和换行，但不要输出 Markdown 标题、表格、列表标记或界面样式指令。
+- 所有引用原话都使用中文引号，并在章节的 `evidence_segment_ids` 中列出来源片段。
+- `todos`：只输出有事实依据的待办；没有可靠待办时输出空数组。
+
+只输出一个符合 Schema 的 JSON 对象，不要输出 Markdown、HTML、代码围栏、解释或额外文字。"""
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                analytical_rules,
+                light_contract,
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-light",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_direct_report_marked(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(DirectReportMarkedDocument.model_json_schema())
+        analytical_rules = self._fixed_prompt("direct-report.md").split(
+            "\n\n## 内容结构契约", 1
+        )[0]
+        marker_contract = """## 内容标记契约
+
+不能因为结构化输出而压缩分析深度。标记只帮助前端展示，不改变完整专业报告应有的信息密度、推理层次、事实边界、具体建议和可直接使用的话术。
+
+- `title` 是页面大标题，不含编号。
+- `overview` 是唯一的顶部总览，`rows` 构成“今天发生了什么，重点改进什么”基础表格。
+- `sections[].title` 是一级标题，不含编号；前端自动编号和添加章节分隔。
+- `subheading` 是二级标题，不含编号；前端自动编号。
+- `paragraph` 是普通正文段落。重要内容必须完整写入，不要为了减少块数而概括或删除。
+- `quote` 只标记逐字稿真实原话，保留原话文本并附准确证据 ID；前端添加引用样式。
+- `bullet_list`、`numbered_list` 只标记基础列表。
+- `table` 只用于确有稳定重复字段的内容，不用于装饰。
+- 除以上标记外不要增加任何内容类型，也不要输出任何展示指令。
+- `todos` 只记录读者明确承诺或有可靠依据的待办；建议和别人讨论的任务不能成为待办。
+
+详细章节不能只是换句话重复总览。对每个重要主题完整说明事实与不确定性、证据揭示的原因或模式、实际影响，以及必要时的具体行动、适用边界和成功信号。
+
+只输出一个符合 Schema 的 JSON 对象，不要输出 Markdown、HTML、代码围栏、解释或额外文字。"""
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                analytical_rules,
+                marker_contract,
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-marked",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
     def compose_direct_report_markdown(
         self,
         *,
@@ -139,7 +260,7 @@ class PromptComposer:
         instructions = "\n\n".join(
             [
                 self._legacy_direct_report_system_prompt(),
-                self._legacy_direct_report_prompt(),
+                self._fixed_prompt("direct-report-generation.md"),
                 "用户本次分析目标：\n" + user_analysis_prompt.strip(),
             ]
         )
@@ -158,6 +279,49 @@ class PromptComposer:
             max_tokens=32_768,
             timeout_seconds=900,
             segment_count=segment_count,
+            schema_json="",
+            response_format="text",
+        )
+
+    def compose_direct_report_markdown_supplement(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        draft_markdown: str,
+        quality_failures: tuple[str, ...],
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        base = self.compose_direct_report_markdown(
+            transcript_markdown=transcript_markdown,
+            profile=profile,
+            user_analysis_prompt=user_analysis_prompt,
+            segment_count=segment_count,
+        )
+        instructions = base.instructions + """
+
+## 补写规则
+
+下面提供的是未通过质量门禁的初稿。输出一份完整修订稿：保留初稿中所有正确、有价值且不重复的内容，只补充遗漏的事实、证据、分析、待办、判断边界和必要细节；修正不准确内容。不得把初稿重新摘要得更短，不得只输出补丁或修改说明。继续严格使用既定 Markdown 标记。"""
+        user_data = "\n\n".join(
+            [
+                base.user_data,
+                "<quality_failures>\n"
+                + json.dumps(list(quality_failures), ensure_ascii=False)
+                + "\n</quality_failures>",
+                "<untrusted_draft_markdown>\n"
+                + draft_markdown
+                + "\n</untrusted_draft_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-supplement",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=base.max_tokens,
+            timeout_seconds=base.timeout_seconds,
+            segment_count=base.segment_count,
             schema_json="",
             response_format="text",
         )
@@ -210,6 +374,330 @@ class PromptComposer:
             max_tokens=32_768,
             timeout_seconds=900,
             segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_full_report_audit(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        v1_markdown: str,
+        sections,
+        gate_failures: tuple[str, ...],
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(ReportAudit.model_json_schema())
+        section_index = [
+            {
+                "section_id": item.section_id,
+                "title": item.title,
+                "markdown": item.markdown,
+            }
+            for item in sections
+        ]
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-audit.md"),
+                "audit_mode=full_v1_audit",
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                self._untrusted_packet(
+                    "deterministic_gate_failures", list(gate_failures)
+                ),
+                self._untrusted_packet(
+                    "audit_coverage_contract",
+                    {
+                        "expected_total_segment_count": segment_count,
+                        "full_audit_requires_exact_reviewed_segment_count": True,
+                        "instruction": (
+                            "full_v1_audit 模式下，若确实逐段审查完毕，"
+                            "reviewed_segment_count 与 total_segment_count 都必须"
+                            "原样填写 expected_total_segment_count，不得填写 null。"
+                        ),
+                    },
+                ),
+                self._untrusted_packet("report_section_index", section_index),
+                "<untrusted_v1_report_markdown>\n"
+                + v1_markdown
+                + "\n</untrusted_v1_report_markdown>",
+                "<untrusted_transcript_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-audit-v1",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_report_audit_chunk(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        v1_markdown: str,
+        sections,
+        gate_failures: tuple[str, ...],
+        chunk_index: int,
+        chunk_count: int,
+        segment_count: int,
+        total_segment_count: int,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(ReportAudit.model_json_schema())
+        section_index = [
+            {
+                "section_id": item.section_id,
+                "title": item.title,
+                "markdown": item.markdown,
+            }
+            for item in sections
+        ]
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-audit.md"),
+                "audit_mode=chunk_v1_audit",
+                "用户本次分析目标：\n" + user_analysis_prompt.strip(),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("profile_data", profile),
+                self._untrusted_packet(
+                    "deterministic_gate_failures", list(gate_failures)
+                ),
+                self._untrusted_packet(
+                    "audit_chunk_contract",
+                    {
+                        "chunk_index": chunk_index,
+                        "chunk_count": chunk_count,
+                        "chunk_segment_count": segment_count,
+                        "total_segment_count": total_segment_count,
+                    },
+                ),
+                self._untrusted_packet("report_section_index", section_index),
+                "<untrusted_v1_report_markdown>\n"
+                + v1_markdown
+                + "\n</untrusted_v1_report_markdown>",
+                "<untrusted_transcript_chunk_markdown>\n"
+                + transcript_markdown
+                + "\n</untrusted_transcript_chunk_markdown>",
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-audit-chunk",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=24_576,
+            timeout_seconds=900,
+            segment_count=segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_merged_report_audit(
+        self,
+        *,
+        v1_markdown: str,
+        sections,
+        gate_failures: tuple[str, ...],
+        chunk_audits: list[ReportAudit],
+        total_segment_count: int,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(ReportAudit.model_json_schema())
+        section_index = [
+            {
+                "section_id": item.section_id,
+                "title": item.title,
+                "markdown": item.markdown,
+            }
+            for item in sections
+        ]
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-audit.md"),
+                "audit_mode=full_v1_audit",
+                "input_kind=parallel_chunk_audit_merge",
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet(
+                    "deterministic_gate_failures", list(gate_failures)
+                ),
+                self._untrusted_packet(
+                    "merge_coverage_contract",
+                    {
+                        "expected_total_segment_count": total_segment_count,
+                        "chunk_count": len(chunk_audits),
+                    },
+                ),
+                self._untrusted_packet("report_section_index", section_index),
+                "<untrusted_v1_report_markdown>\n"
+                + v1_markdown
+                + "\n</untrusted_v1_report_markdown>",
+                self._untrusted_packet(
+                    "chunk_audits",
+                    [item.model_dump(mode="json") for item in chunk_audits],
+                ),
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-audit-merge",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=total_segment_count,
+            schema_json=schema_json,
+        )
+
+    def compose_targeted_report_revision(
+        self,
+        *,
+        v1_title: str,
+        section_outline: list[dict[str, str]],
+        editable_sections: list[dict[str, str]],
+        adjacent_sections: list[dict[str, str]],
+        audit: ReportAudit,
+        allowed_segment_ids: set[str],
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(TargetedReportRevision.model_json_schema())
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-revision.md"),
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                self._untrusted_packet("v1_title", v1_title),
+                self._untrusted_packet("section_outline", section_outline),
+                self._untrusted_packet("editable_sections", editable_sections),
+                self._untrusted_packet("adjacent_sections", adjacent_sections),
+                self._untrusted_packet(
+                    "full_v1_audit", audit.model_dump(mode="json")
+                ),
+                self._untrusted_packet(
+                    "allowed_evidence_segment_ids", sorted(allowed_segment_ids)
+                ),
+            ]
+        )
+        return DirectReportRequest(
+            scene_id="direct-report-revision",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=900,
+            segment_count=len(allowed_segment_ids),
+            schema_json=schema_json,
+        )
+
+    def compose_revision_final_audit(
+        self,
+        *,
+        v2_markdown: str,
+        section_diffs: list[dict[str, object]],
+        v1_audit: ReportAudit,
+        revision: TargetedReportRevision,
+    ) -> DirectReportRequest:
+        schema_json = self._schema_json(ReportAudit.model_json_schema())
+        issue_packet = [
+            {
+                "issue_id": item.issue_id,
+                "severity": item.severity,
+                "issue_type": item.issue_type,
+                "section_id": item.section_id,
+                "problem": item.problem,
+                "required_change": item.required_change,
+                "affected_claims": item.affected_claims,
+                "evidence_segment_ids": item.evidence_segment_ids,
+            }
+            for item in v1_audit.issues
+        ]
+        opportunity_packet = [
+            {
+                "opportunity_id": item.opportunity_id,
+                "kind": item.kind,
+                "section_id": item.section_id,
+                "current_gap": item.current_gap,
+                "desired_value": item.desired_value,
+                "evidence_segment_ids": item.evidence_segment_ids,
+                "preserve_constraints": item.preserve_constraints,
+                "allow_section_rewrite": item.allow_section_rewrite,
+            }
+            for item in v1_audit.value_opportunities
+        ]
+        resolution_packet = {
+            "revisions": [
+                {
+                    "section_id": item.section_id,
+                    "issues_resolved": item.issues_resolved,
+                    "opportunities_resolved": item.opportunities_resolved,
+                    "removes_repetition": item.removes_repetition,
+                }
+                for item in revision.revisions
+            ],
+            "unresolved_issue_ids": revision.unresolved_issue_ids,
+        }
+        changed_sections = [
+            {"section_id": item.get("section_id")}
+            for item in section_diffs
+        ]
+        instructions = "\n\n".join(
+            [
+                self._fixed_prompt("direct-report-system.md"),
+                self._fixed_prompt("direct-report-audit.md"),
+                "audit_mode=revision_final_audit",
+                "<json_schema>\n" + schema_json + "\n</json_schema>",
+            ]
+        )
+        user_data = "\n\n".join(
+            [
+                "<untrusted_v2_report_markdown>\n"
+                + v2_markdown
+                + "\n</untrusted_v2_report_markdown>",
+                self._untrusted_packet("changed_sections", changed_sections),
+                self._untrusted_packet("v1_issue_packet", issue_packet),
+                self._untrusted_packet(
+                    "v1_value_opportunity_packet", opportunity_packet
+                ),
+                self._untrusted_packet("revision_resolution", resolution_packet),
+            ]
+        )
+        evidence_ids = {
+            segment_id
+            for issue in v1_audit.issues
+            for segment_id in issue.evidence_segment_ids
+        } | {
+            segment_id
+            for opportunity in v1_audit.value_opportunities
+            for segment_id in opportunity.evidence_segment_ids
+        }
+        return DirectReportRequest(
+            scene_id="direct-report-audit-final",
+            instructions=instructions,
+            user_data=user_data,
+            max_tokens=32_768,
+            timeout_seconds=600,
+            segment_count=len(evidence_ids),
             schema_json=schema_json,
         )
 
@@ -325,6 +813,7 @@ class PromptComposer:
                 "native_search": cls._autonomous_search_loop_rules(),
                 "final_analysis": cls._autonomous_final_analysis_rules(),
             },
+            "final_report_prompt_manifest": cls.final_report_prompt_manifest(),
             "schema_version": cls.SCHEMA_VERSION,
             "cluster_policy": {
                 "gap_ms": analysis_windows.ANALYSIS_WINDOW_GAP_MS,
@@ -405,7 +894,7 @@ class PromptComposer:
         semantic_retry: bool = False,
     ) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["autonomous"]
-        rules = self._approved_prompt("Prompt A", "Prompt B")
+        rules = self._fixed_prompt("single-report.md")
         if semantic_retry:
             rules += (
                 "\n\n服务端校验反馈：上一轮 JSON 或证据未通过校验。"
@@ -431,6 +920,294 @@ class PromptComposer:
             max_tokens=policy.max_tokens,
             timeout_seconds=policy.timeout_seconds,
             segment_count=len(transcript),
+        )
+
+    def compose_discovery(
+        self,
+        *,
+        window: dict[str, object],
+        user_analysis_prompt: str,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        window_id = str(window.get("window_id", ""))
+        if not window_id:
+            raise ValueError("discovery window requires window_id")
+        segments = window.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("discovery window requires segments")
+        projected = dict(window)
+        projected["segments"] = self._autonomous_transcript(segments)
+        policy = MODEL_REQUEST_POLICIES["discovery"]
+        return ModelRequest(
+            scene_id=f"discovery:{window_id}",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("discovery.md"),
+            scene_prompt=user_analysis_prompt,
+            user_data=self._untrusted_packet("discovery_window", projected),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(segments),
+        )
+
+    def compose_investigation(
+        self,
+        *,
+        working_memory: object,
+        investigation_memory: object,
+        remaining_rounds: int,
+        user_analysis_prompt: str,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        if not 0 <= remaining_rounds <= 12:
+            raise ValueError("remaining_rounds must be between zero and twelve")
+        policy = MODEL_REQUEST_POLICIES["investigation"]
+        return ModelRequest(
+            scene_id="investigation",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("investigation.md"),
+            scene_prompt=user_analysis_prompt,
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("working_memory", working_memory),
+                    self._untrusted_packet(
+                        "investigation_memory", investigation_memory
+                    ),
+                    self._untrusted_packet("remaining_rounds", remaining_rounds),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=0,
+        )
+
+    def compose_evidence_workbench(
+        self,
+        *,
+        discovery_results: list[object],
+        investigation_memory: object,
+        allowed_segment_ids: list[str],
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        if len(allowed_segment_ids) != len(set(allowed_segment_ids)):
+            raise ValueError("allowed_segment_ids must be unique")
+        policy = MODEL_REQUEST_POLICIES["evidence-workbench"]
+        return ModelRequest(
+            scene_id="evidence-workbench",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("evidence-workbench.md"),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("discovery_results", discovery_results),
+                    self._untrusted_packet(
+                        "investigation_memory", investigation_memory
+                    ),
+                    self._untrusted_packet(
+                        "allowed_segment_ids", allowed_segment_ids
+                    ),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(allowed_segment_ids),
+        )
+
+    def compose_deep_analysis(
+        self,
+        *,
+        task: dict[str, object],
+        scene_transcripts: list[object],
+        user_analysis_prompt: str,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        task_id = str(task.get("task_id", ""))
+        if not task_id:
+            raise ValueError("deep analysis task requires task_id")
+        policy = MODEL_REQUEST_POLICIES["deep-analysis"]
+        return ModelRequest(
+            scene_id=task_id,
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("deep-analysis.md"),
+            scene_prompt=user_analysis_prompt,
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("deep_analysis_task", task),
+                    self._untrusted_packet(
+                        "scene_transcripts", scene_transcripts
+                    ),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(scene_transcripts),
+        )
+
+    def compose_writing_prepare(
+        self,
+        *,
+        investigation_summary: object,
+        prepare_evidence: object,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["writing-prepare"]
+        return ModelRequest(
+            scene_id="writing-prepare",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("writing-prepare.md"),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet(
+                        "investigation_summary", investigation_summary
+                    ),
+                    self._untrusted_packet("prepare_evidence", prepare_evidence),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=0,
+        )
+
+    def compose_writer_session(
+        self,
+        *,
+        state: object,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        writing_brief = getattr(state, "writing_brief")
+        retrieved_evidence = getattr(state, "retrieved_evidence")
+        draft_versions = getattr(state, "draft_versions")
+        policy = MODEL_REQUEST_POLICIES["writer-session"]
+        return ModelRequest(
+            scene_id="writer-session",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules="\n\n".join(
+                [
+                    self._fixed_prompt("writer-session.md"),
+                    self._fixed_prompt("single-report.md"),
+                ]
+            ),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("writing_brief", writing_brief),
+                    self._untrusted_packet(
+                        "retrieved_evidence", list(retrieved_evidence)
+                    ),
+                    self._untrusted_packet(
+                        "prior_draft_versions", list(draft_versions)
+                    ),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(retrieved_evidence),
+        )
+
+    def compose_report_audit(
+        self,
+        *,
+        report: object,
+        evidence_workbench: object,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["report-audit"]
+        return ModelRequest(
+            scene_id="report-audit",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("report-audit.md"),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("report_draft", report),
+                    self._untrusted_packet(
+                        "evidence_workbench", evidence_workbench
+                    ),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=0,
+        )
+
+    def compose_content_audit(
+        self,
+        *,
+        report: object,
+        user_analysis_prompt: str,
+        coverage_summary: object,
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        policy = MODEL_REQUEST_POLICIES["content-audit"]
+        return ModelRequest(
+            scene_id="content-audit",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("content-audit.md"),
+            scene_prompt=user_analysis_prompt,
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("report_draft", report),
+                    self._untrusted_packet("coverage_summary", coverage_summary),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=0,
+        )
+
+    def compose_revision(
+        self,
+        *,
+        report: object,
+        verified_issues: list[object],
+        related_evidence: list[object],
+        schema: dict[str, object],
+    ) -> ModelRequest:
+        if not verified_issues:
+            raise ValueError("revision requires verified issues")
+        policy = MODEL_REQUEST_POLICIES["revision"]
+        return ModelRequest(
+            scene_id="revision",
+            prompt_version=1,
+            schema_version=self.SCHEMA_VERSION,
+            system_rules=self._autonomous_system_rules(),
+            common_rules=self._fixed_prompt("revision.md"),
+            scene_prompt="",
+            user_data="\n".join(
+                [
+                    self._untrusted_packet("current_report", report),
+                    self._untrusted_packet("verified_issues", verified_issues),
+                    self._untrusted_packet("related_evidence", related_evidence),
+                ]
+            ),
+            schema_json=self._schema_json(schema),
+            max_tokens=policy.max_tokens,
+            timeout_seconds=policy.timeout_seconds,
+            segment_count=len(related_evidence),
         )
 
     def compose_autonomous_day_map(
@@ -589,7 +1366,7 @@ class PromptComposer:
 
     @classmethod
     def _autonomous_final_analysis_rules(cls) -> str:
-        return cls._approved_prompt("Prompt A", "Prompt B") + (
+        return cls._fixed_prompt("single-report.md") + (
             "\n\n这是第二次全量阅读与最终深度分析。必须同时使用完整 transcript_data、"
             "自主 Day Map 和真实持久化的 external sources，但不得将“本次概览”"
             "输出为普通分析类别或深度卡。录音中的事实、原句和录音依据只能由"
@@ -687,7 +1464,7 @@ class PromptComposer:
 
     def compose_autonomous_final(self, *, transcript, notebooks, retrieval_plan, profile, schema, semantic_retry=False) -> ModelRequest:
         policy = MODEL_REQUEST_POLICIES["autonomous-final"]
-        rules = self._approved_prompt("Prompt A", "Prompt B") + (
+        rules = self._fixed_prompt("single-report.md") + (
             "\n\n这是超长录音的最终分析。信息笔记用于建立全局脉络；事实、引用和证据 ID"
             "只能来自 retrieved_transcript_data 中回取的完整原文。"
         )
