@@ -54,12 +54,37 @@ def rich_payload() -> dict[str, object]:
     }
 
 
-def test_autonomous_schema_accepts_free_sections_and_optional_arrays() -> None:
+def test_autonomous_schema_accepts_exactly_one_report() -> None:
     result = AutonomousAnalysisResult.model_validate(rich_payload())
     assert result.cards[0].content[0].type == "scene_reconstruction"
 
-    empty = AutonomousAnalysisResult.model_validate({"cards": []})
-    assert empty.cards == []
+    with pytest.raises(ValueError):
+        AutonomousAnalysisResult.model_validate({"cards": []})
+    with pytest.raises(ValueError):
+        AutonomousAnalysisResult.model_validate(
+            {"cards": [rich_payload()["cards"][0], rich_payload()["cards"][0]]}
+        )
+
+
+def test_autonomous_schema_accepts_fixed_no_value_report() -> None:
+    payload = rich_payload()
+    card = payload["cards"][0]
+    card["title"] = "本次内容报告"
+    card["summary"] = "本次内容无有价值信息"
+    card["content"] = [{
+        "type": "empty",
+        "title": "本次内容无有价值信息",
+        "body": "本次内容无有价值信息",
+        "items": [],
+        "evidence_segment_ids": [],
+    }]
+    card["quotes"] = []
+    card["recommendations"] = []
+    card["evidence_segment_ids"] = []
+
+    result = AutonomousAnalysisResult.model_validate(payload)
+
+    assert result.cards[0].content[0].type == "empty"
 
 
 def test_autonomous_schema_requires_scene_reconstruction_then_analysis() -> None:
@@ -76,9 +101,7 @@ def test_autonomous_json_schema_exposes_three_stage_section_constraints() -> Non
     schema = AutonomousAnalysisResult.model_json_schema()
     content = schema["$defs"]["AutonomousCard"]["properties"]["content"]
 
-    assert content["minItems"] == 2
-    assert content["prefixItems"][0]["properties"]["type"]["const"] == "scene_reconstruction"
-    assert content["contains"]["properties"]["type"]["const"] == "analysis"
+    assert content["minItems"] == 1
 
     payload = rich_payload()
     payload["cards"][0]["content"] = [

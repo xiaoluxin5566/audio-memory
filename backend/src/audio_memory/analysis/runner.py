@@ -539,6 +539,10 @@ class AnalysisRunner:
             await self._save_staged(version.id, staged, worker_owner_id)
 
         retry_from_empty_checkpoint = False
+        if staged.get("autonomous", {}).get("cards") == []:
+            staged.pop("autonomous")
+            await self._save_staged(version.id, staged, worker_owner_id)
+            retry_from_empty_checkpoint = True
         if "autonomous" in staged:
             raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
             try:
@@ -816,6 +820,10 @@ class AnalysisRunner:
         self, version, transcript, profile, provider_snapshot, staged, worker_owner_id
     ) -> AutonomousAnalysisResult:
         retry_from_empty_checkpoint = False
+        if staged.get("autonomous", {}).get("cards") == []:
+            staged.pop("autonomous")
+            await self._save_staged(version.id, staged, worker_owner_id)
+            retry_from_empty_checkpoint = True
         if "autonomous" in staged:
             raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
             try:
@@ -950,6 +958,10 @@ class AnalysisRunner:
             item for item in transcript if str(item["segment_id"]) in requested_ids
         ]
         retry_from_empty_checkpoint = False
+        if staged.get("autonomous", {}).get("cards") == []:
+            staged.pop("autonomous")
+            await self._save_staged(version.id, staged, worker_owner_id)
+            retry_from_empty_checkpoint = True
         if "autonomous" in staged:
             raw_result = AutonomousAnalysisResult.model_validate(staged["autonomous"])
             try:
@@ -1014,6 +1026,9 @@ class AnalysisRunner:
                 normalized_source = re.sub(r"[^\w\u4e00-\u9fff]", "", source)
                 if not normalized_quote or normalized_quote not in normalized_source:
                     raise ValueError("autonomous quote is not verbatim evidence")
+        for todo in result.todos:
+            if not set(todo.evidence_segment_ids).issubset(lookup):
+                raise ValueError("unknown autonomous todo evidence segment")
 
     @classmethod
     def _validated_canonical_autonomous_result(
@@ -1045,6 +1060,11 @@ class AnalysisRunner:
     ) -> AutonomousAnalysisResult:
         lookup = {str(item["segment_id"]): str(item["text"]) for item in transcript}
         cleaned = result.model_copy(deep=True)
+        cleaned.todos = [
+            todo
+            for todo in cleaned.todos
+            if set(todo.evidence_segment_ids).issubset(lookup)
+        ]
         retained_cards = []
         for card in cleaned.cards:
             card.evidence_segment_ids = [
@@ -1072,12 +1092,39 @@ class AnalysisRunner:
                 for item in [card, *card.content, *card.quotes, *card.recommendations]
                 for evidence_id in item.evidence_segment_ids
             }
-            if supported:
+            is_empty_report = (
+                card.title == "本次内容报告"
+                and card.summary == "本次内容无有价值信息"
+                and len(card.content) == 1
+                and card.content[0].type == "empty"
+            )
+            if supported or is_empty_report:
                 card.evidence_segment_ids = list(
                     dict.fromkeys([*card.evidence_segment_ids, *supported])
                 )
                 retained_cards.append(card)
         cleaned.cards = retained_cards
+        if not cleaned.cards:
+            cleaned = AutonomousAnalysisResult.model_validate(
+                {
+                    "cards": [{
+                        "title": "本次内容报告",
+                        "summary": "本次内容无有价值信息",
+                        "content": [{
+                            "type": "empty",
+                            "title": "本次内容无有价值信息",
+                            "body": "本次内容无有价值信息",
+                            "items": [],
+                            "evidence_segment_ids": [],
+                        }],
+                        "quotes": [],
+                        "recommendations": [],
+                        "evidence_segment_ids": [],
+                        "external_source_ids": [],
+                    }],
+                    "todos": [],
+                }
+            )
         return cleaned
 
     async def _event_map(
