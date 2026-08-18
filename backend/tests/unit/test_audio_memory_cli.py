@@ -8,6 +8,7 @@ import subprocess
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CLI = PROJECT_ROOT / "scripts" / "audio-memory"
 PLIST_TEMPLATE = PROJECT_ROOT / "scripts" / "com.audio-memory.local.plist.template"
+START_SCRIPT = PROJECT_ROOT / "scripts" / "start.sh"
 
 
 def run_cli(tmp_path: Path, command: str) -> subprocess.CompletedProcess[str]:
@@ -59,3 +60,10 @@ def test_launch_agent_is_user_scoped_and_loopback_only() -> None:
     assert "launchctl bootout" in cli
     assert "app/current" not in template
     assert "__CURRENT_ROOT__" in template
+
+
+def test_start_uses_the_release_virtual_environment_without_shell_path() -> None:
+    script = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'PYTHON="$PROJECT_ROOT/backend/.venv/bin/python"' in script
+    assert '"$PYTHON" -m uvicorn' in script
