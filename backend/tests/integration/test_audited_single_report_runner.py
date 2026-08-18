@@ -289,6 +289,22 @@ async def test_clean_segmented_v1_audit_publishes_v1_after_merge(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_merged_audit_rejects_coverage_that_does_not_match_transcript(
+    tmp_path,
+) -> None:
+    payload = audit_payload(mode="full_v1_audit", issue=False)
+    payload["coverage"]["reviewed_segment_count"] = 2
+    payload["coverage"]["total_segment_count"] = 2
+    provider = PipelineProvider(v1_audit=payload)
+
+    with pytest.raises(ProviderAnalysisError) as captured:
+        await run_with(tmp_path, provider)
+
+    assert captured.value.code == "report_audit_pending"
+    assert captured.value.retriable is True
+
+
+@pytest.mark.asyncio
 async def test_material_issue_runs_bounded_revision_and_final_audit(tmp_path) -> None:
     provider = PipelineProvider(
         v1_audit=audit_payload(mode="full_v1_audit", issue=True),

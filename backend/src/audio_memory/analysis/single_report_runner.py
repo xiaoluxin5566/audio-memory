@@ -135,9 +135,19 @@ class SingleReportRunner:
         )
 
         audit_payload = staged.get("direct_report_v1_audit")
+        audit = None
         if isinstance(audit_payload, dict):
-            audit = ReportAudit.model_validate(audit_payload)
-        else:
+            try:
+                candidate = ReportAudit.model_validate(audit_payload)
+                if (
+                    candidate.coverage.reviewed_segment_count != len(transcript)
+                    or candidate.coverage.total_segment_count != len(transcript)
+                ):
+                    raise ValueError("saved V1 audit returned wrong coverage")
+                audit = candidate
+            except ValueError:
+                staged.pop("direct_report_v1_audit", None)
+        if audit is None:
             started = time.monotonic()
             try:
                 transcript_by_id = {
@@ -193,7 +203,18 @@ class SingleReportRunner:
                     saved_payload = saved_chunk_results.get(chunk_id)
                     if isinstance(saved_payload, dict):
                         try:
-                            return [ReportAudit.model_validate(saved_payload)]
+                            candidate = ReportAudit.model_validate(saved_payload)
+                            if (
+                                candidate.audit_mode != "chunk_v1_audit"
+                                or candidate.coverage.reviewed_segment_count
+                                != chunk.segment_count
+                                or candidate.coverage.total_segment_count
+                                != chunk.segment_count
+                            ):
+                                raise ValueError(
+                                    "saved chunk audit returned wrong coverage"
+                                )
+                            return [candidate]
                         except ValueError:
                             saved_chunk_results.pop(chunk_id, None)
                     chunk_markdown = build_full_transcript_markdown(
@@ -303,6 +324,11 @@ class SingleReportRunner:
                 audit = ReportAudit.model_validate(json.loads(raw_audit))
                 if audit.audit_mode != "full_v1_audit":
                     raise ValueError("merged V1 audit returned the wrong audit mode")
+                if (
+                    audit.coverage.reviewed_segment_count != len(transcript)
+                    or audit.coverage.total_segment_count != len(transcript)
+                ):
+                    raise ValueError("merged V1 audit returned wrong coverage")
                 validate_atomic_audit_issues(audit)
                 audit = canonicalize_audit_evidence(
                     audit,
