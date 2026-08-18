@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, orderCards } from '../src/store.js'
+import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobProgressValue, orderCards } from '../src/store.js'
 
 
 test('initial state waits for the runtime autonomous prompt list', () => {
@@ -46,4 +46,10 @@ test('report audit failure is presented as generated and retryable', () => {
     body: '已保留报告初稿和已完成的审计块，重试不会重新转写。',
     action: '继续审计',
   })
+})
+
+test('job progress prefers bounded live progress and preserves durable fallback', () => {
+  assert.equal(jobProgressValue({ progress_percent: 63 }), 63)
+  assert.equal(jobProgressValue({ progress_percent: 63, live_progress_percent: 66.375 }), 66.375)
+  assert.equal(jobProgressValue({ progress_percent: 63, live_progress_percent: 120 }), 100)
 })

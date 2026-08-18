@@ -4,6 +4,7 @@ import {
   formatJobEta,
   getFeedbackFormState,
   jobFailureCopy,
+  jobProgressValue,
   orderCards,
 } from './store.js';
 import { api } from './api/client.js';
@@ -97,7 +98,7 @@ export function App() {
       if (!job) return;
       setState((current) => ({
         ...current,
-        job: { ...job, progress: job.progress_percent ?? 0 },
+        job: { ...job, progress: jobProgressValue(job) },
         upload: {
           files: (job.files ?? []).map((file) => ({
             id: file.id,
@@ -210,7 +211,7 @@ export function App() {
     const sleepStatus = job.sleep_prevention_status || 'disabled';
     setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
     if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
-    setState((current) => ({ ...current, job: { ...job, progress: job.progress_percent ?? 0 } }));
+    setState((current) => ({ ...current, job: { ...job, progress: jobProgressValue(job) } }));
   }
 
   async function startAnalysis() {
@@ -240,7 +241,7 @@ export function App() {
   }
 
   const onJobUpdate = useCallback((job) => {
-    const progress = job.progress_percent ?? 0;
+    const progress = jobProgressValue(job);
     setState((current) => ({ ...current, job: { ...current.job, ...job, progress } }));
     if (job.sleep_prevention_status) {
       setAnalysisSettings((current) => ({ ...current, status: job.sleep_prevention_status }));
@@ -350,7 +351,7 @@ function JobPanel({ job, onRetry, onCancel }) {
   }
   const transcribing = job.stage === 'transcribing';
   const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : 'DeepSeek 正在阅读全文并生成报告';
-  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div>{transcribing ? <button className="secondary full" onClick={onCancel}>取消本次分析</button> : <p>报告正在安全发布，完成前请保持应用运行。</p>}</div>;
+  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{Math.round(job.progress * 10) / 10}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div>{transcribing ? <button className="secondary full" onClick={onCancel}>取消本次分析</button> : <p>报告正在安全发布，完成前请保持应用运行。</p>}</div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {

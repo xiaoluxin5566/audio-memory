@@ -307,6 +307,51 @@ async def test_job_view_reports_real_transcription_progress(job_client):
 
 
 @pytest.mark.asyncio
+async def test_job_view_reports_smooth_progress_bounded_by_current_batch(
+    job_client,
+):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    first_file_id = str(uuid4())
+    active_file_id = str(uuid4())
+    now = [100.0]
+    tracker = TranscriptionEtaTracker(clock=lambda: now[0])
+    client._transport.app.state.eta_tracker = tracker
+    client._transport.app.state.upload_service.eta_tracker = tracker
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.TRANSCRIBING.value
+        session.add_all([
+            JobFile(
+                id=first_file_id, job_id=job_id, original_name="done.mp3",
+                extension=".mp3", size_bytes=100, sha256="d" * 64,
+                duration_ms=100_000, position=0, temporary_path="/tmp/done.mp3",
+            ),
+            JobFile(
+                id=active_file_id, job_id=job_id, original_name="active.mp3",
+                extension=".mp3", size_bytes=100, sha256="e" * 64,
+                duration_ms=900_000, position=1, temporary_path="/tmp/active.mp3",
+            ),
+            Transcript(
+                id=str(uuid4()), job_file_id=first_file_id, segment_index=0,
+                start_ms=0, end_ms=100_000, text="已完成", words_json="[]",
+            ),
+        ])
+        await session.commit()
+    tracker.record(job_id, 100_000, 10)
+    tracker.set_progress(
+        job_id, "本地转写", current=2, total=4,
+        file_id=active_file_id, unit_ms=100_000,
+    )
+    now[0] += 5
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.json()["progress_percent"] == 10
+    assert response.json()["live_progress_percent"] == 43.75
+
+
+@pytest.mark.asyncio
 async def test_job_view_reports_dynamic_transcription_eta(job_client):
     client, _, database = job_client
     job_id = (await client.post("/api/jobs")).json()["id"]

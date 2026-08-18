@@ -1183,6 +1183,8 @@ class MLXWhisperEngine:
                         "本地转写",
                         current=chunk_index + 1,
                         total=len(batches),
+                        file_id=file.id,
+                        unit_ms=batch.speech_ms,
                     )
                     started = time.monotonic()
                     try:
@@ -1280,7 +1282,11 @@ class MLXWhisperEngine:
             finally:
                 await producer
             self.eta_tracker.set_progress(
-                file.job_id, "校验时间轴", current=len(batches), total=len(batches)
+                file.job_id,
+                "校验时间轴",
+                current=len(batches),
+                total=len(batches),
+                file_id=file.id,
             )
         finally:
             metrics.add_timing("local_total", time.monotonic() - local_started)

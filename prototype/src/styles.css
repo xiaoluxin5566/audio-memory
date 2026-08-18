@@ -66,7 +66,7 @@ button{cursor:pointer}
 .file-main span{font-size:10px;color:var(--muted);display:block;margin-top:3px}
 .icon-button{border:0;background:transparent;color:#969eaa;font-size:16px}
 .progress{height:4px;background:#e6e9ee;border-radius:99px;overflow:hidden;margin-top:5px}
-.progress i{display:block;height:100%;background:#6074d9;border-radius:99px;transition:width .2s}
+.progress i{display:block;height:100%;background:#6074d9;border-radius:99px;transition:width 1.2s linear}
 .progress.large{height:6px;margin:10px 0}
 .privacy{font-size:10px;color:#8d96a1;line-height:1.6;margin:9px 2px 0}
 .job-card{border:1px solid #d8def2;background:#f7f8ff;border-radius:10px;padding:11px;margin-top:9px}

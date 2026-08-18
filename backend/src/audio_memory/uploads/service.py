@@ -56,6 +56,7 @@ class UploadJobView:
     model_id: str | None
     files: list[UploadedFileView]
     progress_percent: int = 0
+    live_progress_percent: float = 0.0
     eta_state: str = "unavailable"
     eta_seconds: int | None = None
     local_phase: str | None = None
@@ -109,6 +110,32 @@ class UploadService:
             eta_seconds = None
             eta_state = "unavailable"
             local_progress = self.eta_tracker.progress(job.id)
+            durable_progress = progress_percent(
+                processed_ms=processed_ms, total_ms=total_ms
+            )
+            live_progress = float(durable_progress)
+            active_file_id = self.eta_tracker.active_file(job.id)
+            if local_progress and active_file_id and total_ms > 0:
+                active_index = next(
+                    (index for index, item in enumerate(file_rows) if item.id == active_file_id),
+                    None,
+                )
+                current, total = local_progress[1], local_progress[2]
+                if active_index is not None and current > 0 and total > 0:
+                    prior_ms = sum(int(item.duration_ms or 0) for item in file_rows[:active_index])
+                    active_ms = int(file_rows[active_index].duration_ms or 0)
+                    batch_fraction = min(
+                        1.0,
+                        max(
+                            0.0,
+                            (current - 1 + self.eta_tracker.phase_fraction(job.id)) / total,
+                        ),
+                    )
+                    live_processed_ms = prior_ms + active_ms * batch_fraction
+                    live_progress = max(
+                        live_progress,
+                        min(100.0, live_processed_ms / total_ms * 100),
+                    )
             if job.stage == JobStage.TRANSCRIBING.value:
                 eta_seconds = self.eta_tracker.estimate_seconds(
                     job.id, max(0, total_ms - processed_ms)
@@ -121,9 +148,8 @@ class UploadService:
                 provider_id=job.provider_id,
                 model_id=job.model_id,
                 files=[self._view(item) for item in file_rows],
-                progress_percent=progress_percent(
-                    processed_ms=processed_ms, total_ms=total_ms
-                ),
+                progress_percent=durable_progress,
+                live_progress_percent=round(live_progress, 3),
                 eta_state=eta_state,
                 eta_seconds=eta_seconds,
                 local_phase=local_progress[0] if local_progress else None,

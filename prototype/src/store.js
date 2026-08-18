@@ -23,6 +23,14 @@ export function orderCards(cards) {
   return [...cards].sort((a, b) => CARD_ORDER.indexOf(a.sceneId) - CARD_ORDER.indexOf(b.sceneId));
 }
 
+export function jobProgressValue(job) {
+  const live = job?.live_progress_percent;
+  const durable = job?.progress_percent;
+  const source = live == null ? durable : live;
+  const value = Number(source);
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
+}
+
 export function getFeedbackFormState(rating, comment = '') {
   const showDetails = rating === 'inaccurate';
   return {
