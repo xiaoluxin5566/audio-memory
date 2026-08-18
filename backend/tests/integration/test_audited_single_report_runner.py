@@ -149,6 +149,33 @@ class SplittingProvider(PipelineProvider):
         raise AssertionError(scene_id)
 
 
+class InterruptedSplittingProvider(SplittingProvider):
+    def __init__(self, total_segments: int, *, fail_one_leaf: bool) -> None:
+        super().__init__(total_segments)
+        self.fail_one_leaf = fail_one_leaf
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        scene_id = str(kwargs["scene_id"])
+        if scene_id == "direct-report-audit-chunk":
+            segment_count = int(kwargs["segment_count"])
+            self.calls.append({"scene_id": scene_id, **kwargs})
+            self.chunk_sizes.append(segment_count)
+            if segment_count > 4:
+                raise ProviderAnalysisError(
+                    "truncated", code="model_output_truncated"
+                )
+            if self.fail_one_leaf:
+                self.fail_one_leaf = False
+                raise ProviderAnalysisError(
+                    "temporary failure", code="provider_unavailable"
+                )
+            payload = audit_payload(mode="chunk_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = segment_count
+            payload["coverage"]["total_segment_count"] = segment_count
+            return json.dumps(payload)
+        return await super().generate(provider_id, **kwargs)
+
+
 class InvalidEvidenceOnceProvider(PipelineProvider):
     def __init__(self) -> None:
         super().__init__(v1_audit=audit_payload(mode="full_v1_audit", issue=False))
@@ -288,6 +315,42 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
     assert any(size <= 4 for size in provider.chunk_sizes)
     assert staged["direct_report_v1_audit_chunk_results"]
     assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_resumed_audit_uses_saved_split_tree_without_recalling_parents(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "split-resume.sqlite3")
+    await database.create_schema()
+    await seed(database, segment_count=12)
+    first = InterruptedSplittingProvider(12, fail_one_leaf=True)
+    runner = SingleReportRunner(
+        database=database,
+        provider=first,
+        publisher=Publisher(),
+        generation_source=GenerationSource(),
+    )
+    with pytest.raises(ProviderAnalysisError):
+        await runner.run("version-1", "worker-1")
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        staged = json.loads(version.staged_results_json)
+    assert staged["direct_report_v1_audit_chunk_splits"]
+
+    second = InterruptedSplittingProvider(12, fail_one_leaf=False)
+    resumed = SingleReportRunner(
+        database=database,
+        provider=second,
+        publisher=Publisher(),
+        generation_source=GenerationSource(),
+    )
+    await resumed.run("version-1", "worker-1")
+
+    assert second.chunk_sizes
+    assert all(size <= 4 for size in second.chunk_sizes)
+    await database.dispose()
 
 
 @pytest.mark.asyncio

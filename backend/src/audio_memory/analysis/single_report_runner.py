@@ -190,6 +190,14 @@ class SingleReportRunner:
                     staged["direct_report_v1_audit_chunk_results"] = (
                         saved_chunk_results
                     )
+                saved_chunk_splits = staged.get(
+                    "direct_report_v1_audit_chunk_splits"
+                )
+                if not isinstance(saved_chunk_splits, dict):
+                    saved_chunk_splits = {}
+                    staged["direct_report_v1_audit_chunk_splits"] = (
+                        saved_chunk_splits
+                    )
                 checkpoint_lock = asyncio.Lock()
                 provider_limit = asyncio.Semaphore(policy.max_parallel_chunks)
 
@@ -219,6 +227,38 @@ class SingleReportRunner:
                             return [candidate]
                         except ValueError:
                             saved_chunk_results.pop(chunk_id, None)
+                    split_children = None
+                    split_child_ids = None
+                    if (
+                        split_depth < policy.max_split_depth
+                        and chunk.segment_count > policy.minimum_segment_count
+                    ):
+                        split_children = split_audit_chunk(chunk)
+                        split_child_ids = [
+                            audit_chunk_id(
+                                child,
+                                report_fingerprint=report_fingerprint,
+                                prompt_fingerprint=prompt_fingerprint,
+                                policy_version=policy.policy_name,
+                            )
+                            for child in split_children
+                        ]
+                    saved_split = saved_chunk_splits.get(chunk_id)
+                    if (
+                        split_children is not None
+                        and saved_split == split_child_ids
+                    ):
+                        children = await asyncio.gather(
+                            *(
+                                audit_chunk(
+                                    child, split_depth=split_depth + 1
+                                )
+                                for child in split_children
+                            )
+                        )
+                        return [item for group in children for item in group]
+                    if saved_split is not None:
+                        saved_chunk_splits.pop(chunk_id, None)
                     chunk_markdown = build_full_transcript_markdown(
                         list(chunk.segments)
                     )
@@ -253,10 +293,25 @@ class SingleReportRunner:
                             and split_depth < policy.max_split_depth
                             and chunk.segment_count > policy.minimum_segment_count
                         ):
-                            left, right = split_audit_chunk(chunk)
+                            assert split_children is not None
+                            assert split_child_ids is not None
+                            saved_chunk_splits[chunk_id] = split_child_ids
+                            async with checkpoint_lock:
+                                await self._save_checkpoint(
+                                    version.id,
+                                    staged,
+                                    worker_owner_id,
+                                    duration_ms=int(
+                                        (time.monotonic() - started) * 1_000
+                                    ),
+                                )
                             children = await asyncio.gather(
-                                audit_chunk(left, split_depth=split_depth + 1),
-                                audit_chunk(right, split_depth=split_depth + 1),
+                                *(
+                                    audit_chunk(
+                                        child, split_depth=split_depth + 1
+                                    )
+                                    for child in split_children
+                                )
                             )
                             return [item for group in children for item in group]
                         raise

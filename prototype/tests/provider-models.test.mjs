@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { normalizeProviders } from '../src/api/state.js'
+import { configurableProviderEntries, normalizeProviders } from '../src/api/state.js'
 
 
 test('provider response exposes GLM and curated model choices to the UI', () => {
@@ -22,4 +22,8 @@ test('provider response exposes GLM and curated model choices to the UI', () => 
     { id: 'glm-4.7-flash', label: '最高性价比' },
   ])
   assert.equal(normalized.providers.glm.modelName, 'glm-5.2')
+  assert.deepEqual(
+    configurableProviderEntries(normalized.providers).map(([id]) => id),
+    ['kimi', 'deepseek', 'openai'],
+  )
 })

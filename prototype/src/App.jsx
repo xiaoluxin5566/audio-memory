@@ -10,7 +10,7 @@ import {
 } from './store.js';
 import { api } from './api/client.js';
 import { uploadFile } from './api/upload.js';
-import { analysisBlocks, normalizeFeed, normalizeHistory } from './api/state.js';
+import { analysisBlocks, configurableProviderEntries, normalizeFeed, normalizeHistory } from './api/state.js';
 import { useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
 import { useReanalysis } from './hooks/useReanalysis.js';
@@ -554,9 +554,13 @@ function History({ state }) {
 }
 
 function ProviderModal({ state, refresh, onClose, onToast }) {
-  const [providerId, setProviderId] = useState(state.activeProvider);
+  const configurableProviders = configurableProviderEntries(state.providers);
+  const initialProviderId = state.activeProvider !== 'glm'
+    ? state.activeProvider
+    : (configurableProviders[0]?.[0] || 'deepseek');
+  const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(
-    state.providers[state.activeProvider]?.modelName || ''
+    state.providers[initialProviderId]?.modelName || ''
   );
   const [key, setKey] = useState('');
   const [status, setStatus] = useState({ type: '', message: '' });
@@ -621,7 +625,7 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
     await Promise.all([...candidateProviders.current].map((id) => api.cancelCandidate(id, sessionId.current).catch(() => {})));
     onClose();
   }
-  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置分析模型</h1><p>选择厂商和具体模型，再填写 API Key；保存时会立即校验是否可用。</p><div className="provider-tabs">{Object.entries(state.providers).map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setModelId(provider.modelName || provider.models[0]?.id || ''); setKey(''); setStatus({ type: '', message: '' }); }}>{provider.name}{provider.configured && <small>已配置</small>}</button>)}</div><div className="model-picker"><b>选择具体模型</b><div>{selected.models.map((model) => <button type="button" key={model.id} className={modelId === model.id ? 'active' : ''} disabled={checking} onClick={() => chooseModel(model.id)}><strong>{model.id}</strong><span>{model.label}</span></button>)}</div></div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim() || !modelId} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置分析模型</h1><p>选择厂商和具体模型，再填写 API Key；保存时会立即校验是否可用。</p><div className="provider-tabs">{configurableProviders.map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setModelId(provider.modelName || provider.models[0]?.id || ''); setKey(''); setStatus({ type: '', message: '' }); }}>{provider.name}{provider.configured && <small>已配置</small>}</button>)}</div><div className="model-picker"><b>选择具体模型</b><div>{selected.models.map((model) => <button type="button" key={model.id} className={modelId === model.id ? 'active' : ''} disabled={checking} onClick={() => chooseModel(model.id)}><strong>{model.id}</strong><span>{model.label}</span></button>)}</div></div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim() || !modelId} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
 }
 
 function ClearModal({ onClose, onConfirm }) {

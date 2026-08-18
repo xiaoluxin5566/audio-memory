@@ -19,6 +19,7 @@ function normalizeReportAnnotations(value) {
 }
 
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI', glm: 'GLM' }
+const HIDDEN_CONFIGURATION_PROVIDERS = new Set(['glm'])
 const REPORT_METRICS_MARKER = '<!-- audio-memory-report-metrics -->'
 
 export function extractReportMetrics(markdown = '') {
@@ -97,6 +98,13 @@ export function normalizeProviders(payload) {
       ? Object.entries(providers).find(([, item]) => item.active)[0]
       : 'kimi',
   }
+}
+
+
+export function configurableProviderEntries(providers) {
+  return Object.entries(providers).filter(
+    ([providerId]) => !HIDDEN_CONFIGURATION_PROVIDERS.has(providerId),
+  )
 }
 
 

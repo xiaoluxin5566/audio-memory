@@ -19,11 +19,11 @@ class AuditModelPolicy:
 
 _POLICIES = {
     "glm": AuditModelPolicy(
-        policy_name="glm-5.2",
+        policy_name="glm-5.2-output-bounded-v2",
         context_window_tokens=128_000,
         reserved_output_tokens=32_768,
         safety_ratio=0.75,
-        max_transcript_tokens=20_000,
+        max_transcript_tokens=8_000,
         max_parallel_chunks=4,
     ),
     "deepseek": AuditModelPolicy(
