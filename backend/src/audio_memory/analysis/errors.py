@@ -15,6 +15,7 @@ ANALYSIS_RETRYABLE_ERROR_CODES = frozenset(
         "provider_input_rejected",
         "model_response_invalid",
         "model_output_truncated",
+        "report_audit_pending",
         "event_map_schema_invalid",
         "event_map_unknown_segment",
         "event_map_coverage_invalid",

@@ -39,3 +39,18 @@ export function formatJobEta(job) {
   if (job.eta_seconds < 60) return '预计不到 1 分钟';
   return `预计还需约 ${Math.ceil(job.eta_seconds / 60)} 分钟`;
 }
+
+export function jobFailureCopy(job) {
+  if (job.error_code === 'report_audit_pending') {
+    return {
+      title: '报告已生成，审计待重试',
+      body: '已保留报告初稿和已完成的审计块，重试不会重新转写。',
+      action: '继续审计',
+    };
+  }
+  return {
+    title: '模型分析失败',
+    body: '已保留完整转写；可修改当前厂商后重新分析，不会再次执行 Whisper。',
+    action: '重新分析',
+  };
+}

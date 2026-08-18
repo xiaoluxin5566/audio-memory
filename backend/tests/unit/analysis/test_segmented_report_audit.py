@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import pytest
 
+from audio_memory.analysis.audit_model_policy import resolve_audit_model_policy
 from audio_memory.analysis.segmented_report_audit import (
+    audit_chunk_id,
     parallel_map_audit_chunks,
     partition_transcript_for_audit,
+    split_audit_chunk,
     validate_atomic_audit_issues,
 )
 from audio_memory.analysis.full_transcript import build_full_transcript_markdown
@@ -59,6 +62,44 @@ def test_partition_fills_each_nonfinal_chunk_as_much_as_possible() -> None:
         assert len(build_full_transcript_markdown(extended)) > 700
 
 
+def test_model_policy_controls_audit_chunk_size() -> None:
+    transcript = [_segment(index, "中" * 2_000) for index in range(30)]
+    conservative = resolve_audit_model_policy("custom", "future-model")
+    kimi = resolve_audit_model_policy("kimi", "kimi-k3")
+
+    conservative_chunks = partition_transcript_for_audit(
+        transcript,
+        model_policy=conservative,
+        fixed_prompt_chars=20_000,
+    )
+    kimi_chunks = partition_transcript_for_audit(
+        transcript,
+        model_policy=kimi,
+        fixed_prompt_chars=20_000,
+    )
+
+    assert len(conservative_chunks) > len(kimi_chunks)
+
+
+def test_larger_fixed_prompt_reduces_chunk_capacity_without_empty_chunks() -> None:
+    transcript = [_segment(index, "中" * 1_000) for index in range(20)]
+    policy = resolve_audit_model_policy("glm", "glm-5.2")
+
+    small_prompt = partition_transcript_for_audit(
+        transcript,
+        model_policy=policy,
+        fixed_prompt_chars=20_000,
+    )
+    large_prompt = partition_transcript_for_audit(
+        transcript,
+        model_policy=policy,
+        fixed_prompt_chars=180_000,
+    )
+
+    assert len(large_prompt) > len(small_prompt)
+    assert all(chunk.segment_count >= 1 for chunk in large_prompt)
+
+
 def test_parallel_map_starts_all_chunk_calls_before_releasing_them() -> None:
     chunks = partition_transcript_for_audit(
         [_segment(index, "x" * 25) for index in range(4)],
@@ -78,6 +119,52 @@ def test_parallel_map_starts_all_chunk_calls_before_releasing_them() -> None:
 
     assert started == [1, 2, 3, 4]
     assert results == (1, 2, 3, 4)
+
+
+def test_audit_chunk_id_is_stable_and_fingerprint_bound() -> None:
+    chunk = partition_transcript_for_audit(
+        [_segment(0, "one"), _segment(1, "two")], max_markdown_chars=1_000
+    )[0]
+
+    first = audit_chunk_id(
+        chunk,
+        report_fingerprint="report-a",
+        prompt_fingerprint="prompt-a",
+        policy_version="v1",
+    )
+    repeated = audit_chunk_id(
+        chunk,
+        report_fingerprint="report-a",
+        prompt_fingerprint="prompt-a",
+        policy_version="v1",
+    )
+    changed = audit_chunk_id(
+        chunk,
+        report_fingerprint="report-a",
+        prompt_fingerprint="prompt-b",
+        policy_version="v1",
+    )
+
+    assert first == repeated
+    assert first != changed
+
+
+def test_split_audit_chunk_preserves_order_and_refuses_single_segment() -> None:
+    chunk = partition_transcript_for_audit(
+        [_segment(index, str(index)) for index in range(5)],
+        max_markdown_chars=10_000,
+    )[0]
+
+    left, right = split_audit_chunk(chunk)
+
+    assert [item["segment_id"] for item in left.segments] == [
+        "seg_0_0", "seg_0_1"
+    ]
+    assert [item["segment_id"] for item in right.segments] == [
+        "seg_0_2", "seg_0_3", "seg_0_4"
+    ]
+    with pytest.raises(ValueError, match="single-segment"):
+        split_audit_chunk(left.__class__(1, 1, (left.segments[0],)))
 
 
 def test_merged_audit_rejects_one_issue_covering_multiple_locations() -> None:

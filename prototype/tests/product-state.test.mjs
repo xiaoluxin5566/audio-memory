@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, formatJobEta, getFeedbackFormState, orderCards } from '../src/store.js'
+import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, orderCards } from '../src/store.js'
 
 
 test('initial state waits for the runtime autonomous prompt list', () => {
@@ -37,4 +37,13 @@ test('job ETA copy follows transcription and analysis states', () => {
   assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 59 }), '预计不到 1 分钟')
   assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 901 }), '预计还需约 16 分钟')
   assert.equal(formatJobEta({ stage: 'analyzing' }), '正在生成分析结果…')
+})
+
+
+test('report audit failure is presented as generated and retryable', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'report_audit_pending' }), {
+    title: '报告已生成，审计待重试',
+    body: '已保留报告初稿和已完成的审计块，重试不会重新转写。',
+    action: '继续审计',
+  })
 })

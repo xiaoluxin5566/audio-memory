@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from hashlib import sha256
 import json
 import time
 from typing import Protocol
@@ -7,6 +9,8 @@ from typing import Protocol
 from sqlalchemy import select, update
 
 from audio_memory.analysis.full_transcript import build_full_transcript_markdown
+from audio_memory.analysis.audit_model_policy import resolve_audit_model_policy
+from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.markdown_report import (
     MarkdownReportResult,
     append_report_metrics,
@@ -30,8 +34,9 @@ from audio_memory.analysis.direct_report_pipeline import (
 )
 from audio_memory.analysis.direct_report_document import StructuredReportResult
 from audio_memory.analysis.segmented_report_audit import (
-    parallel_map_audit_chunks,
+    audit_chunk_id,
     partition_transcript_for_audit,
+    split_audit_chunk,
     validate_atomic_audit_issues,
 )
 from audio_memory.db import Database
@@ -139,9 +144,58 @@ class SingleReportRunner:
                     str(item["segment_id"]): str(item["text"])
                     for item in transcript
                 }
-                chunks = partition_transcript_for_audit(transcript)
+                policy = resolve_audit_model_policy(
+                    version.provider_id, version.model_id
+                )
+                fixed_prompt_chars = (
+                    len(result.report_markdown)
+                    + len(goal_content)
+                    + len(json.dumps(profile, ensure_ascii=False))
+                    + 20_000
+                )
+                chunks = partition_transcript_for_audit(
+                    transcript,
+                    model_policy=policy,
+                    fixed_prompt_chars=fixed_prompt_chars,
+                )
+                report_fingerprint = sha256(
+                    result.report_markdown.encode("utf-8")
+                ).hexdigest()
+                prompt_fingerprint = sha256(
+                    json.dumps(
+                        {
+                            "goal": goal_content,
+                            "profile": profile,
+                            "fixed_rules": version.fixed_rules_hash,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                saved_chunk_results = staged.get(
+                    "direct_report_v1_audit_chunk_results"
+                )
+                if not isinstance(saved_chunk_results, dict):
+                    saved_chunk_results = {}
+                    staged["direct_report_v1_audit_chunk_results"] = (
+                        saved_chunk_results
+                    )
+                checkpoint_lock = asyncio.Lock()
+                provider_limit = asyncio.Semaphore(policy.max_parallel_chunks)
 
-                async def audit_chunk(chunk):
+                async def audit_chunk(chunk, *, split_depth: int = 0):
+                    chunk_id = audit_chunk_id(
+                        chunk,
+                        report_fingerprint=report_fingerprint,
+                        prompt_fingerprint=prompt_fingerprint,
+                        policy_version=policy.policy_name,
+                    )
+                    saved_payload = saved_chunk_results.get(chunk_id)
+                    if isinstance(saved_payload, dict):
+                        try:
+                            return [ReportAudit.model_validate(saved_payload)]
+                        except ValueError:
+                            saved_chunk_results.pop(chunk_id, None)
                     chunk_markdown = build_full_transcript_markdown(
                         list(chunk.segments)
                     )
@@ -157,17 +211,32 @@ class SingleReportRunner:
                         segment_count=chunk.segment_count,
                         total_segment_count=len(transcript),
                     )
-                    raw = await self.provider.generate(
-                        version.provider_id,
-                        system=request.instructions,
-                        user=request.user_data,
-                        model_id=version.model_id,
-                        scene_id=request.scene_id,
-                        max_tokens=request.max_tokens,
-                        timeout_seconds=request.timeout_seconds,
-                        segment_count=request.segment_count,
-                        allow_parallel=True,
-                    )
+                    try:
+                        async with provider_limit:
+                            raw = await self.provider.generate(
+                                version.provider_id,
+                                system=request.instructions,
+                                user=request.user_data,
+                                model_id=version.model_id,
+                                scene_id=request.scene_id,
+                                max_tokens=request.max_tokens,
+                                timeout_seconds=request.timeout_seconds,
+                                segment_count=request.segment_count,
+                                allow_parallel=True,
+                            )
+                    except ProviderAnalysisError as exc:
+                        if (
+                            exc.code == "model_output_truncated"
+                            and split_depth < policy.max_split_depth
+                            and chunk.segment_count > policy.minimum_segment_count
+                        ):
+                            left, right = split_audit_chunk(chunk)
+                            children = await asyncio.gather(
+                                audit_chunk(left, split_depth=split_depth + 1),
+                                audit_chunk(right, split_depth=split_depth + 1),
+                            )
+                            return [item for group in children for item in group]
+                        raise
                     chunk_audit = ReportAudit.model_validate(json.loads(raw))
                     if chunk_audit.audit_mode != "chunk_v1_audit":
                         raise ValueError("chunk audit returned the wrong audit mode")
@@ -191,9 +260,26 @@ class SingleReportRunner:
                         report_markdown=result.report_markdown,
                     )
                     validate_atomic_audit_issues(chunk_audit)
-                    return chunk_audit
+                    saved_chunk_results[chunk_id] = chunk_audit.model_dump(
+                        mode="json"
+                    )
+                    async with checkpoint_lock:
+                        await self._save_checkpoint(
+                            version.id,
+                            staged,
+                            worker_owner_id,
+                            duration_ms=int(
+                                (time.monotonic() - started) * 1_000
+                            ),
+                        )
+                    return [chunk_audit]
 
-                chunk_audits = await parallel_map_audit_chunks(chunks, audit_chunk)
+                grouped_audits = await asyncio.gather(
+                    *(audit_chunk(chunk) for chunk in chunks)
+                )
+                chunk_audits = tuple(
+                    item for group in grouped_audits for item in group
+                )
                 staged["direct_report_v1_audit_chunks"] = [
                     item.model_dump(mode="json") for item in chunk_audits
                 ]
@@ -230,15 +316,17 @@ class SingleReportRunner:
                 )
             except Exception as exc:
                 staged["direct_report_v1_audit_error"] = self._error_text(exc)
-                metadata = ReportQualityMetadata(
-                    report_version="v1", audit_status="completed_unaudited",
-                    quality_score=None, quality_score_scope=None, quality_passed=None,
-                    degraded_reason=str(exc)[:1_000],
+                await self._save_checkpoint(
+                    version.id,
+                    staged,
+                    worker_owner_id,
+                    duration_ms=int((time.monotonic() - started) * 1_000),
                 )
-                return await self._publish_report(
-                    version, staged, result, metadata, v1_quality,
-                    worker_owner_id, int((time.monotonic() - started) * 1_000),
-                )
+                raise ProviderAnalysisError(
+                    f"Report generated; audit pending retry: {exc}",
+                    code="report_audit_pending",
+                    retriable=True,
+                ) from exc
             staged["direct_report_v1_audit"] = audit.model_dump(mode="json")
             await self._save_checkpoint(
                 version.id,

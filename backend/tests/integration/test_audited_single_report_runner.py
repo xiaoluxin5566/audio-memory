@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.single_report_runner import SingleReportRunner
 from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, AnalysisVersion, JobFile, Transcript
@@ -118,6 +119,36 @@ class PipelineProvider:
         return json.dumps(value, ensure_ascii=False)
 
 
+class SplittingProvider(PipelineProvider):
+    def __init__(self, total_segments: int) -> None:
+        super().__init__(
+            v1_audit=audit_payload(mode="full_v1_audit", issue=False)
+        )
+        self.total_segments = total_segments
+        self.chunk_sizes: list[int] = []
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        scene_id = str(kwargs["scene_id"])
+        self.calls.append({"scene_id": scene_id, **kwargs})
+        if scene_id == "direct-report-audit-chunk":
+            segment_count = int(kwargs["segment_count"])
+            self.chunk_sizes.append(segment_count)
+            if segment_count > 4:
+                raise ProviderAnalysisError(
+                    "truncated", code="model_output_truncated"
+                )
+            payload = audit_payload(mode="chunk_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = segment_count
+            payload["coverage"]["total_segment_count"] = segment_count
+            return json.dumps(payload)
+        if scene_id == "direct-report-audit-merge":
+            payload = audit_payload(mode="full_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = self.total_segments
+            payload["coverage"]["total_segment_count"] = self.total_segments
+            return json.dumps(payload)
+        raise AssertionError(scene_id)
+
+
 class GenerationSource:
     async def credential_generation(self, provider_id: str) -> int:
         return 1
@@ -132,7 +163,7 @@ class Publisher:
         return {"version_id": version_id}
 
 
-async def seed(database: Database) -> None:
+async def seed(database: Database, *, segment_count: int = 1) -> None:
     async with database.session() as session:
         session.add(AnalysisJob(id="job-1", stage="analyzing"))
         session.add(JobFile(
@@ -142,12 +173,14 @@ async def seed(database: Database) -> None:
             recording_time_source="unknown", timezone="Asia/Shanghai",
             position=0, temporary_path="/tmp/day.mp3",
         ))
-        session.add(Transcript(
-            id="transcript-1", job_file_id="file-1", segment_index=0,
-            speaker_id="speaker_1", start_ms=0, end_ms=1_000,
-            text="I am considering joining a startup.", words_json="[]",
-            risk_classified=True, is_reliable=True,
-        ))
+        for index in range(segment_count):
+            session.add(Transcript(
+                id=f"transcript-{index}", job_file_id="file-1",
+                segment_index=index, speaker_id="speaker_1",
+                start_ms=index * 1_000, end_ms=(index + 1) * 1_000,
+                text=("I am considering joining a startup. " * 80),
+                words_json="[]", risk_classified=True, is_reliable=True,
+            ))
         session.add(AnalysisVersion(
             id="version-1", source_job_id="job-1", provider_id="deepseek",
             model_id="deepseek-v4-pro", credential_generation=1,
@@ -201,10 +234,12 @@ def revision_for_all_issues() -> dict[str, object]:
     return payload
 
 
-async def run_with(tmp_path, provider: PipelineProvider):
+async def run_with(
+    tmp_path, provider: PipelineProvider, *, segment_count: int = 1
+):
     database = Database(tmp_path / "report.sqlite3")
     await database.create_schema()
-    await seed(database)
+    await seed(database, segment_count=segment_count)
     publisher = Publisher()
     runner = SingleReportRunner(
         database=database,
@@ -218,6 +253,20 @@ async def run_with(tmp_path, provider: PipelineProvider):
         staged = json.loads(version.staged_results_json)
     await database.dispose()
     return publisher.reports[0], staged
+
+
+@pytest.mark.asyncio
+async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
+    tmp_path,
+) -> None:
+    provider = SplittingProvider(total_segments=12)
+
+    report, staged = await run_with(tmp_path, provider, segment_count=12)
+
+    assert provider.chunk_sizes[0] > 4
+    assert any(size <= 4 for size in provider.chunk_sizes)
+    assert staged["direct_report_v1_audit_chunk_results"]
+    assert report.quality_metadata.audit_status == "completed"
 
 
 @pytest.mark.asyncio
@@ -304,16 +353,17 @@ async def test_minor_only_audit_issues_still_run_revision(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v1_audit_transport_failure_publishes_unaudited_v1(tmp_path) -> None:
+async def test_v1_audit_transport_failure_remains_retryable(tmp_path) -> None:
     provider = PipelineProvider(v1_audit=RuntimeError("audit timeout"))
 
-    report, staged = await run_with(tmp_path, provider)
+    with pytest.raises(ProviderAnalysisError) as failure:
+        await run_with(tmp_path, provider)
 
-    assert report.report_markdown.startswith(V1.strip())
-    assert "质量评分：未完成" in report.report_markdown
-    assert report.quality_metadata.audit_status == "completed_unaudited"
-    assert report.quality_metadata.quality_score is None
-    assert staged["direct_report_v1_audit_error"]["type"] == "RuntimeError"
+    assert failure.value.code == "report_audit_pending"
+    assert "audit timeout" in str(failure.value)
+    assert [call["scene_id"] for call in provider.calls] == [
+        "direct-report", "direct-report-audit-chunk"
+    ]
 
 
 @pytest.mark.asyncio

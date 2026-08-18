@@ -37,14 +37,17 @@ class RetryTaskCoordinator:
     def __init__(self):
         self.called = asyncio.Event()
         self.analysis_request = None
+        self.method = None
 
     async def submit_new_upload(self, analysis_request):
+        self.method = "new"
         self.analysis_request = analysis_request
         self.called.set()
 
     async def retry_failed_upload_in_place(
         self, *, source_job_id, provider_id, model_id, credential_generation
     ):
+        self.method = "resume"
         self.analysis_request = SimpleNamespace(
             source_job_id=source_job_id,
             provider_id=provider_id,
@@ -212,6 +215,7 @@ async def test_abandoned_upload_is_cleaned_on_next_start(job_client, tmp_path):
         "content_rejected",
         "model_response_invalid",
         "model_output_truncated",
+        "report_audit_pending",
         "event_map_schema_invalid",
         "event_map_unknown_segment",
         "event_map_coverage_invalid",
@@ -247,6 +251,7 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
     assert task_coordinator.analysis_request.model_id == "deepseek-v4-flash"
     assert task_coordinator.analysis_request.credential_generation == 8
     assert task_coordinator.analysis_request.priority == 0
+    assert task_coordinator.method == "resume"
 
 
 @pytest.mark.asyncio

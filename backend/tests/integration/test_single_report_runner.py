@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.markdown_report import MarkdownReportResult
 from audio_memory.analysis.direct_report_document import StructuredReportResult
 from audio_memory.analysis.single_report_runner import SingleReportRunner
@@ -415,7 +416,10 @@ async def test_quality_repair_failure_persists_diagnostic(tmp_path) -> None:
         generation_source=FakeGenerationSource(),
     )
 
-    await runner.run("version-1", "worker-1")
+    with pytest.raises(ProviderAnalysisError) as failure:
+        await runner.run("version-1", "worker-1")
+
+    assert failure.value.code == "report_audit_pending"
 
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
