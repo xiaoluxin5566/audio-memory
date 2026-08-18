@@ -149,6 +149,27 @@ class SplittingProvider(PipelineProvider):
         raise AssertionError(scene_id)
 
 
+class InvalidEvidenceOnceProvider(PipelineProvider):
+    def __init__(self) -> None:
+        super().__init__(v1_audit=audit_payload(mode="full_v1_audit", issue=False))
+        self.chunk_attempts = 0
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-chunk":
+            self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+            self.chunk_attempts += 1
+            payload = audit_payload(
+                mode="chunk_v1_audit", issue=self.chunk_attempts == 1
+            )
+            if self.chunk_attempts == 1:
+                payload["issues"][0]["context_excerpts"] = [{
+                    "segment_id": "seg_0_0",
+                    "text": "This is not present in the transcript.",
+                }]
+            return json.dumps(payload, ensure_ascii=False)
+        return await super().generate(provider_id, **kwargs)
+
+
 class GenerationSource:
     async def credential_generation(self, provider_id: str) -> int:
         return 1
@@ -266,6 +287,17 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
     assert provider.chunk_sizes[0] > 4
     assert any(size <= 4 for size in provider.chunk_sizes)
     assert staged["direct_report_v1_audit_chunk_results"]
+    assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_invalid_chunk_evidence_retries_only_that_chunk_once(tmp_path) -> None:
+    provider = InvalidEvidenceOnceProvider()
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert provider.chunk_attempts == 2
+    assert len(staged["direct_report_v1_audit_chunk_results"]) == 1
     assert report.quality_metadata.audit_status == "completed"
 
 

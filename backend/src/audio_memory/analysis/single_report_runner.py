@@ -193,7 +193,9 @@ class SingleReportRunner:
                 checkpoint_lock = asyncio.Lock()
                 provider_limit = asyncio.Semaphore(policy.max_parallel_chunks)
 
-                async def audit_chunk(chunk, *, split_depth: int = 0):
+                async def audit_chunk(
+                    chunk, *, split_depth: int = 0, validation_attempt: int = 0
+                ):
                     chunk_id = audit_chunk_id(
                         chunk,
                         report_fingerprint=report_fingerprint,
@@ -258,29 +260,43 @@ class SingleReportRunner:
                             )
                             return [item for group in children for item in group]
                         raise
-                    chunk_audit = ReportAudit.model_validate(json.loads(raw))
-                    if chunk_audit.audit_mode != "chunk_v1_audit":
-                        raise ValueError("chunk audit returned the wrong audit mode")
-                    if chunk_audit.coverage.total_segment_count != chunk.segment_count:
-                        raise ValueError("chunk audit returned wrong coverage")
-                    chunk_by_id = {
-                        str(item["segment_id"]): str(item["text"])
-                        for item in chunk.segments
-                    }
-                    chunk_audit = sanitize_audit_evidence(
-                        chunk_audit, chunk_by_id
-                    )
-                    chunk_audit = canonicalize_audit_evidence(
-                        chunk_audit,
-                        chunk_by_id,
-                        report_markdown=result.report_markdown,
-                    )
-                    validate_audit_evidence(
-                        chunk_audit,
-                        transcript_by_id=chunk_by_id,
-                        report_markdown=result.report_markdown,
-                    )
-                    validate_atomic_audit_issues(chunk_audit)
+                    try:
+                        chunk_audit = ReportAudit.model_validate(json.loads(raw))
+                        if chunk_audit.audit_mode != "chunk_v1_audit":
+                            raise ValueError(
+                                "chunk audit returned the wrong audit mode"
+                            )
+                        if (
+                            chunk_audit.coverage.total_segment_count
+                            != chunk.segment_count
+                        ):
+                            raise ValueError("chunk audit returned wrong coverage")
+                        chunk_by_id = {
+                            str(item["segment_id"]): str(item["text"])
+                            for item in chunk.segments
+                        }
+                        chunk_audit = sanitize_audit_evidence(
+                            chunk_audit, chunk_by_id
+                        )
+                        chunk_audit = canonicalize_audit_evidence(
+                            chunk_audit,
+                            chunk_by_id,
+                            report_markdown=result.report_markdown,
+                        )
+                        validate_audit_evidence(
+                            chunk_audit,
+                            transcript_by_id=chunk_by_id,
+                            report_markdown=result.report_markdown,
+                        )
+                        validate_atomic_audit_issues(chunk_audit)
+                    except ValueError:
+                        if validation_attempt < 1:
+                            return await audit_chunk(
+                                chunk,
+                                split_depth=split_depth,
+                                validation_attempt=validation_attempt + 1,
+                            )
+                        raise
                     saved_chunk_results[chunk_id] = chunk_audit.model_dump(
                         mode="json"
                     )
