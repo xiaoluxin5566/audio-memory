@@ -296,6 +296,41 @@ async def test_legacy_completed_unaudited_report_can_continue_audit(job_client):
 
 
 @pytest.mark.asyncio
+async def test_interrupted_job_with_failed_analysis_can_continue_audit(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        session.add(
+            AnalysisVersion(
+                id="interrupted-failed-version",
+                source_job_id=job_id,
+                batch_id=None,
+                provider_id="deepseek",
+                model_id="deepseek-v4-flash",
+                credential_generation=8,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+                staged_results_json='{"direct_report_v1_markdown":"# Existing V1"}',
+                status="failed",
+                error_code="model_analysis_failed",
+            )
+        )
+        await session.commit()
+    task_coordinator = RetryTaskCoordinator()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_task_coordinator = task_coordinator
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+
+    assert response.status_code == 202
+    assert task_coordinator.method == "resume"
+
+
+@pytest.mark.asyncio
 async def test_active_job_endpoint_returns_latest_recoverable_job(job_client):
     client, _, database = job_client
     older_id = (await client.post("/api/jobs")).json()["id"]

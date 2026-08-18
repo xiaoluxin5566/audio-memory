@@ -66,7 +66,7 @@ async def has_legacy_completed_unaudited_report(
             .where(
                 AnalysisVersion.source_job_id == job_id,
                 AnalysisVersion.reanalysis_batch_id.is_(None),
-                AnalysisVersion.status == "completed",
+                AnalysisVersion.status.in_(("completed", "failed")),
             )
             .order_by(AnalysisVersion.created_at.desc())
             .limit(1)
@@ -77,11 +77,13 @@ async def has_legacy_completed_unaudited_report(
         staged = json.loads(version.staged_results_json or "{}")
     except (TypeError, json.JSONDecodeError):
         return False
+    if not isinstance(staged.get("direct_report_v1_markdown"), str):
+        return False
+    if version.status == "failed":
+        return version.error_code in ANALYSIS_RETRYABLE_ERROR_CODES
     metadata = staged.get("direct_report_publication_metadata")
-    return (
-        isinstance(metadata, dict)
-        and metadata.get("audit_status") == "completed_unaudited"
-        and isinstance(staged.get("direct_report_v1_markdown"), str)
+    return isinstance(metadata, dict) and (
+        metadata.get("audit_status") == "completed_unaudited"
     )
 
 
@@ -354,7 +356,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     legacy_completed_unaudited = (
-        job.stage == JobStage.COMPLETED.value
+        job.stage in {JobStage.COMPLETED.value, JobStage.INTERRUPTED.value}
         and await has_legacy_completed_unaudited_report(request, job_id)
     )
     if (
