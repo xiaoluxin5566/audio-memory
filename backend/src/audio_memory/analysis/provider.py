@@ -34,7 +34,12 @@ from audio_memory.prompts.day_map_schema import (
 from audio_memory.analysis import windows as analysis_windows
 from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, ModelRequest, PromptComposer
 from audio_memory.prompts.evidence import SCENE_SEMANTIC_REPAIR_ATTEMPTS
-from audio_memory.providers.adapters import DeepSeekAdapter, KimiAdapter, OpenAIAdapter
+from audio_memory.providers.adapters import (
+    DeepSeekAdapter,
+    GLMAdapter,
+    KimiAdapter,
+    OpenAIAdapter,
+)
 from audio_memory.providers.adapters.base import NativeSearchCallResult
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
@@ -169,6 +174,7 @@ class ProviderAnalysisClient:
             "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
             "openai": OpenAIAdapter(PROVIDER_CONFIGS["openai"]),
+            "glm": GLMAdapter(PROVIDER_CONFIGS["glm"]),
         }
 
     async def native_search(

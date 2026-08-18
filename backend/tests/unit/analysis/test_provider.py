@@ -83,6 +83,14 @@ def test_deepseek_parameter_fingerprint_includes_analysis_window_policy(
 
 
 @pytest.mark.asyncio
+async def test_provider_analysis_client_registers_glm_adapter() -> None:
+    async with httpx.AsyncClient() as http_client:
+        client = ProviderAnalysisClient(ConfiguredKeychain(), http_client)
+
+    assert "glm" in client.adapters
+
+
+@pytest.mark.asyncio
 async def test_provider_can_run_explicit_parallel_audit_calls(monkeypatch) -> None:
     async with httpx.AsyncClient() as http_client:
         client = ProviderAnalysisClient(ConfiguredKeychain(), http_client)
