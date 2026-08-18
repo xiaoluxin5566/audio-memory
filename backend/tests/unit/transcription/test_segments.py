@@ -7,7 +7,11 @@ from audio_memory.transcription.segments import (
     ordered_text,
     progress_percent,
 )
-from audio_memory.transcription.engine import chunk_segment, valid_chunk_segments
+from audio_memory.transcription.engine import (
+    chunk_segment,
+    shift_whisper_segments,
+    valid_chunk_segments,
+)
 
 
 def test_segment_rejects_invalid_timestamps() -> None:
@@ -95,3 +99,20 @@ def test_invalid_whisper_segment_does_not_interrupt_remaining_chunk() -> None:
     ))
 
     assert [segment.text for segment in segments] == ["有效内容"]
+
+
+def test_physical_subchunk_timestamps_shift_without_mutating_provider_data() -> None:
+    source = [{
+        "start": 1.5,
+        "end": 3.0,
+        "text": "继续讨论",
+        "words": [{"word": "继续", "start": 1.5, "end": 2.0}],
+    }]
+
+    shifted = shift_whisper_segments(source, offset_seconds=300)
+
+    assert shifted[0]["start"] == 301.5
+    assert shifted[0]["end"] == 303.0
+    assert shifted[0]["words"][0]["start"] == 301.5
+    assert source[0]["start"] == 1.5
+    assert source[0]["words"][0]["start"] == 1.5

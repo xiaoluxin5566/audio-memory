@@ -2068,3 +2068,95 @@ async def test_refinement_recheck_uses_budget_rejection_after_old_candidates_exp
         "old repeated candidate",
     )
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_whisper_physical_chunks_resume_after_third_part_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = 0
+
+    def transcribe(_path, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("third physical part interrupted")
+        return {
+            "segments": [{"start": 0.1, "end": 0.2, "text": f"part-{calls}"}],
+            "language": "zh",
+            "language_probability": 0.99,
+        }
+
+    class Vad:
+        last_energy_intervals = []
+
+        def detect(self, _path):
+            return [SpeechInterval(0, 1_000)]
+
+    class Diarizer:
+        def diarize(self, _path):
+            return []
+
+    monkeypatch.setitem(
+        sys.modules, "mlx_whisper", SimpleNamespace(transcribe=transcribe)
+    )
+    paths = AppPaths.from_home(tmp_path)
+    paths.ensure_directories()
+    database = Database(paths.database)
+    await database.create_schema()
+    source_dir = paths.staging / "job-resume"
+    source_dir.mkdir()
+    source = source_dir / "source.mp3"
+    source.write_bytes(b"audio")
+    file = JobFile(
+        id="file-resume", job_id="job-resume", original_name="source.mp3",
+        extension=".mp3", size_bytes=5, sha256="d" * 64,
+        duration_ms=1_000, position=0, temporary_path=str(source),
+    )
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-resume", stage="transcribing"))
+        session.add(file)
+        await session.commit()
+
+    def prepare(_source, _batch, target):
+        with target.open("wb") as handle:
+            handle.truncate(16_000 * 2 * 300 + 45)
+        return target
+
+    async def normalize_to_three(_source, target_dir):
+        target_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
+        chunks = []
+        for index in range(3):
+            chunk = target_dir / f"chunk-{index:05d}.wav"
+            chunk.write_bytes(b"pcm")
+            chunks.append(chunk)
+        return chunks
+
+    monkeypatch.setattr(
+        "audio_memory.transcription.engine.prepare_compact_wav", prepare
+    )
+    monkeypatch.setattr(
+        MLXWhisperEngine, "_normalize_to_chunks", staticmethod(normalize_to_three)
+    )
+
+    first = MLXWhisperEngine(
+        database, paths, voice_activity_detector=Vad(),
+        diarization_engine=Diarizer(), speech_padding_ms=0,
+    )
+    first._executor = ThreadPoolExecutor(max_workers=1)
+    with pytest.raises(RuntimeError, match="third physical part"):
+        _ = [item async for item in first.transcribe_file(file, 0)]
+    await first.close()
+    assert calls == 3
+
+    second = MLXWhisperEngine(
+        database, paths, voice_activity_detector=Vad(),
+        diarization_engine=Diarizer(), speech_padding_ms=0,
+    )
+    second._executor = ThreadPoolExecutor(max_workers=1)
+    segments = [item async for item in second.transcribe_file(file, 0)]
+
+    assert calls == 4
+    assert [item.text for item in segments] == ["part-1"]
+    await second.close()
+    await database.dispose()

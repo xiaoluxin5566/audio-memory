@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobProgressValue, orderCards } from '../src/store.js'
+import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards } from '../src/store.js'
 
 
 test('initial state waits for the runtime autonomous prompt list', () => {
@@ -52,4 +52,9 @@ test('job progress prefers bounded live progress and preserves durable fallback'
   assert.equal(jobProgressValue({ progress_percent: 63 }), 63)
   assert.equal(jobProgressValue({ progress_percent: 63, live_progress_percent: 66.375 }), 66.375)
   assert.equal(jobProgressValue({ progress_percent: 63, live_progress_percent: 120 }), 100)
+})
+
+test('analysis heading uses the model snapshot from the job', () => {
+  assert.equal(jobModelDisplayName({ provider_id: 'glm', model_id: 'glm-5.2' }), 'GLM 5.2')
+  assert.equal(jobModelDisplayName({ provider_id: 'deepseek', model_id: 'deepseek-v4-pro' }), 'DeepSeek V4 Pro')
 })

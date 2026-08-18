@@ -43,6 +43,11 @@ from audio_memory.transcription.mapping import (
     reconcile_mapped_segments,
 )
 from audio_memory.transcription.metrics import LocalFastMetrics
+from audio_memory.transcription.physical_checkpoints import (
+    load_physical_chunk_checkpoint,
+    physical_checkpoint_fingerprint,
+    save_physical_chunk_checkpoint,
+)
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_gate import EnergyInterval
 from audio_memory.uploads.cleanup import assert_staging_path
@@ -655,6 +660,35 @@ def _transcribe_worker(
     )
 
 
+def shift_whisper_segments(
+    raw_segments: list[dict[str, object]], *, offset_seconds: float
+) -> list[dict[str, object]]:
+    """Move timestamps from a physical Whisper subchunk into its compact batch."""
+    shifted: list[dict[str, object]] = []
+    for raw in raw_segments:
+        converted = dict(raw)
+        for key in ("start", "end"):
+            value = converted.get(key)
+            if isinstance(value, (int, float)):
+                converted[key] = float(value) + offset_seconds
+        words = converted.get("words")
+        if isinstance(words, list):
+            shifted_words: list[object] = []
+            for word in words:
+                if not isinstance(word, dict):
+                    shifted_words.append(word)
+                    continue
+                shifted_word = dict(word)
+                for key in ("start", "end"):
+                    value = shifted_word.get(key)
+                    if isinstance(value, (int, float)):
+                        shifted_word[key] = float(value) + offset_seconds
+                shifted_words.append(shifted_word)
+            converted["words"] = shifted_words
+        shifted.append(converted)
+    return shifted
+
+
 def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path:
     """Materialize one compact batch without copying silence between sources."""
     filters: list[str] = []
@@ -1058,8 +1092,8 @@ class MLXWhisperEngine:
         local_started = time.monotonic()
         metrics = LocalFastMetrics()
         chunk_dir = source.with_name(f"{file.id}.whisper-chunks")
-        manifest_id = str(uuid4())
-        await self._register(file.job_id, manifest_id, chunk_dir)
+        manifest_id = await self._register(file.job_id, str(uuid4()), chunk_dir)
+        completed = False
         try:
             self.eta_tracker.set_progress(file.job_id, "检测语音")
             vad_started = time.monotonic()
@@ -1123,7 +1157,7 @@ class MLXWhisperEngine:
                     and entry.source_end_ms is not None
                 ],
             )
-            chunk_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
+            chunk_dir.mkdir(mode=0o700, parents=False, exist_ok=True)
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
@@ -1187,21 +1221,131 @@ class MLXWhisperEngine:
                         unit_ms=batch.speech_ms,
                     )
                     started = time.monotonic()
+                    subchunk_dir = chunk.with_name(f"{chunk.stem}-parts")
                     try:
-                        raw_segments = await loop.run_in_executor(
-                            self._executor,
-                            _transcribe_worker,
-                            str(chunk),
-                            self.model_id,
-                            parameters.word_timestamps,
-                            language_lock,
+                        max_pcm_chunk_bytes = (
+                            parameters.sample_rate_hz
+                            * parameters.audio_channels
+                            * 2
+                            * WHISPER_CHUNK_SECONDS
+                            + 44
+                        )
+                        physical_chunks = (
+                            await self._normalize_to_chunks(chunk, subchunk_dir)
+                            if chunk.stat().st_size > max_pcm_chunk_bytes
+                            else [chunk]
+                        )
+                        combined_segments: list[dict[str, object]] = []
+                        detected_language: str | None = None
+                        detected_confidence: float | None = None
+                        physical_fingerprint = physical_checkpoint_fingerprint(
+                            audio_fingerprint=file.sha256,
+                            model_id=self.model_id,
+                            parameters_fingerprint=parameters.fingerprint(),
+                            batch_index=batch.index,
+                        )
+                        for part_index, physical_chunk in enumerate(physical_chunks):
+                            checkpoint_path = chunk_dir / (
+                                f"compact-{batch.index:05d}-part-{part_index:05d}.json"
+                            )
+                            restored = load_physical_chunk_checkpoint(
+                                checkpoint_path,
+                                staging_root=self.paths.staging,
+                                expected_fingerprint=physical_fingerprint,
+                                expected_part_index=part_index,
+                            )
+                            part_audio_seconds = min(
+                                WHISPER_CHUNK_SECONDS,
+                                max(
+                                    0.0,
+                                    batch.compact_ms / 1000
+                                    - part_index * WHISPER_CHUNK_SECONDS,
+                                ),
+                            )
+                            if restored is None:
+                                part_started = time.monotonic()
+                                logger.info(
+                                    "Whisper subchunk started job_id=%s file_id=%s "
+                                    "batch=%s part=%s/%s audio_seconds=%.1f",
+                                    file.job_id, file.id, batch.index + 1,
+                                    part_index + 1, len(physical_chunks),
+                                    part_audio_seconds,
+                                )
+                                part_result = await loop.run_in_executor(
+                                    self._executor,
+                                    _transcribe_worker,
+                                    str(physical_chunk),
+                                    self.model_id,
+                                    parameters.word_timestamps,
+                                    language_lock,
+                                )
+                                part_elapsed = time.monotonic() - part_started
+                                logger.info(
+                                    "Whisper subchunk completed job_id=%s file_id=%s "
+                                    "batch=%s part=%s/%s audio_seconds=%.1f "
+                                    "elapsed_seconds=%.1f realtime_factor=%.3f",
+                                    file.job_id, file.id, batch.index + 1,
+                                    part_index + 1, len(physical_chunks),
+                                    part_audio_seconds, part_elapsed,
+                                    part_elapsed / part_audio_seconds
+                                    if part_audio_seconds > 0 else 0.0,
+                                )
+                                save_physical_chunk_checkpoint(
+                                    checkpoint_path,
+                                    staging_root=self.paths.staging,
+                                    fingerprint=physical_fingerprint,
+                                    part_index=part_index,
+                                    segments=list(part_result),
+                                    language=part_result.language,
+                                    language_confidence=(
+                                        part_result.language_confidence
+                                    ),
+                                )
+                                metrics.increment("whisper_calls")
+                                metrics.add_timing("whisper", part_elapsed)
+                                raw_part_segments = list(part_result)
+                                part_language = part_result.language
+                                part_confidence = part_result.language_confidence
+                            else:
+                                raw_part_segments = list(restored["segments"])
+                                part_language = restored["language"]
+                                part_confidence = restored["language_confidence"]
+                                logger.info(
+                                    "Whisper subchunk restored job_id=%s file_id=%s "
+                                    "batch=%s part=%s/%s",
+                                    file.job_id, file.id, batch.index + 1,
+                                    part_index + 1, len(physical_chunks),
+                                )
+                            combined_segments.extend(
+                                shift_whisper_segments(
+                                    raw_part_segments,
+                                    offset_seconds=(
+                                        part_index * WHISPER_CHUNK_SECONDS
+                                    ),
+                                )
+                            )
+                            if detected_language is None:
+                                detected_language = (
+                                    str(part_language)
+                                    if isinstance(part_language, str) else None
+                                )
+                                detected_confidence = (
+                                    float(part_confidence)
+                                    if isinstance(part_confidence, (int, float))
+                                    else None
+                                )
+                            physical_chunk.unlink(missing_ok=True)
+                        raw_segments = WhisperBatchResult(
+                            combined_segments,
+                            language=detected_language,
+                            language_confidence=detected_confidence,
                         )
                     finally:
                         chunk.unlink(missing_ok=True)
+                        if subchunk_dir.exists():
+                            shutil.rmtree(subchunk_dir)
                         prepared_count = max(0, prepared_count - 1)
                         prepared_limit.release()
-                    metrics.increment("whisper_calls")
-                    metrics.add_timing("whisper", time.monotonic() - started)
                     if chunk_index == 0 and (
                         raw_segments.language == parameters.language_lock_code
                         and raw_segments.language_confidence is not None
@@ -1274,6 +1418,10 @@ class MLXWhisperEngine:
                         language_lock=language_lock,
                     )
                     await self._persist_compact_checkpoint(file, checkpoint)
+                    for checkpoint_path in chunk_dir.glob(
+                        f"compact-{batch.index:05d}-part-*.json"
+                    ):
+                        checkpoint_path.unlink(missing_ok=True)
                     self.eta_tracker.record(
                         file.job_id,
                         batch.speech_ms,
@@ -1288,6 +1436,7 @@ class MLXWhisperEngine:
                 total=len(batches),
                 file_id=file.id,
             )
+            completed = True
         finally:
             metrics.add_timing("local_total", time.monotonic() - local_started)
             self.metrics_by_job[file.job_id] = metrics.to_dict()
@@ -1297,9 +1446,10 @@ class MLXWhisperEngine:
                 json.dumps(metrics.to_dict(), sort_keys=True, separators=(",", ":")),
             )
             safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
-            if safe_dir.exists():
+            if completed and safe_dir.exists():
                 shutil.rmtree(safe_dir)
-            await self._remove_manifest(manifest_id)
+            if completed:
+                await self._remove_manifest(manifest_id)
 
     async def close(self) -> None:
         if self._executor is not None:
@@ -1491,8 +1641,17 @@ class MLXWhisperEngine:
             for known_start_ms, known_end_ms, known_text in known_segments
         )
 
-    async def _register(self, job_id: str, manifest_id: str, path: Path) -> None:
+    async def _register(self, job_id: str, manifest_id: str, path: Path) -> str:
         async with self.database.session() as session:
+            existing = await session.scalar(
+                select(TempFileManifest).where(
+                    TempFileManifest.file_path == str(path)
+                )
+            )
+            if existing is not None:
+                if existing.task_uuid != job_id:
+                    raise RuntimeError("Temporary path belongs to another job")
+                return existing.id
             session.add(
                 TempFileManifest(
                     id=manifest_id,
@@ -1501,6 +1660,7 @@ class MLXWhisperEngine:
                 )
             )
             await session.commit()
+            return manifest_id
 
     async def _remove_manifest(self, manifest_id: str) -> None:
         async with self.database.session() as session:

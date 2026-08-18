@@ -31,6 +31,19 @@ export function jobProgressValue(job) {
   return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
 }
 
+export function jobModelDisplayName(job) {
+  const providerId = String(job?.provider_id ?? '').toLowerCase();
+  const modelId = String(job?.model_id ?? '').trim();
+  if (providerId === 'glm') return modelId.replace(/^glm-/i, 'GLM ');
+  if (providerId === 'deepseek') {
+    return modelId.replace(/^deepseek-/i, 'DeepSeek ').replace(/-/g, ' ')
+      .replace(/\bv(\d+)\b/i, 'V$1').replace(/\bpro\b/i, 'Pro');
+  }
+  if (providerId === 'kimi') return modelId.replace(/^kimi-/i, 'Kimi ').toUpperCase().replace(/^KIMI /, 'Kimi ');
+  if (providerId === 'openai') return modelId.replace(/^gpt-/i, 'GPT-');
+  return modelId || job?.provider_id || '模型';
+}
+
 export function getFeedbackFormState(rating, comment = '') {
   const showDetails = rating === 'inaccurate';
   return {
