@@ -160,7 +160,7 @@ class AnalysisTaskCoordinator:
         model_id: str,
         credential_generation: int,
     ) -> str | None:
-        """Requeue a compatible failed upload without discarding staged work."""
+        """Requeue compatible failed or legacy unaudited work in place."""
         await self.initialize()
         async with self._condition:
             async with self.maintenance_guard():
@@ -170,8 +170,8 @@ class AnalysisTaskCoordinator:
                         select(AnalysisVersion)
                         .where(
                             AnalysisVersion.source_job_id == source_job_id,
-                            AnalysisVersion.batch_id.is_(None),
-                            AnalysisVersion.status == "failed",
+                            AnalysisVersion.reanalysis_batch_id.is_(None),
+                            AnalysisVersion.status.in_(("failed", "completed")),
                         )
                         .order_by(AnalysisVersion.created_at.desc())
                         .limit(1)
@@ -179,6 +179,22 @@ class AnalysisTaskCoordinator:
                     if version is None:
                         await session.rollback()
                         return None
+                    if version.status == "completed":
+                        try:
+                            staged = json.loads(version.staged_results_json or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            staged = {}
+                        metadata = staged.get("direct_report_publication_metadata")
+                        if not (
+                            isinstance(metadata, dict)
+                            and metadata.get("audit_status")
+                            == "completed_unaudited"
+                            and isinstance(
+                                staged.get("direct_report_v1_markdown"), str
+                            )
+                        ):
+                            await session.rollback()
+                            return None
                     if (
                         version.provider_id != provider_id
                         or version.model_id != model_id
@@ -191,6 +207,7 @@ class AnalysisTaskCoordinator:
                     version.error_code = None
                     version.worker_owner_id = None
                     version.lease_expires_at = None
+                    version.completed_at = None
                     job = await session.get(AnalysisJob, source_job_id)
                     if job is None:
                         await session.rollback()

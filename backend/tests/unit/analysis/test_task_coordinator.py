@@ -455,6 +455,56 @@ async def test_new_upload_submission_marks_failed_job_analyzing(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_retry_requeues_legacy_completed_unaudited_version(tmp_path) -> None:
+    database = Database(tmp_path / "legacy-unaudited-retry.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-legacy", stage="completed"))
+        session.add(Batch(id="batch-legacy", job_id="job-legacy", natural_date="2026-08-18"))
+        await session.flush()
+        session.add(
+            AnalysisVersion(
+                id="version-legacy",
+                source_job_id="job-legacy",
+                batch_id="batch-legacy",
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+                staged_results_json=json.dumps(
+                    {
+                        "direct_report_v1_markdown": "# Existing V1",
+                        "direct_report_publication_metadata": {
+                            "audit_status": "completed_unaudited",
+                            "report_version": "v1",
+                        },
+                    }
+                ),
+                status="completed",
+            )
+        )
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+
+    resumed = await coordinator.retry_failed_upload_in_place(
+        source_job_id="job-legacy",
+        provider_id="kimi",
+        model_id="kimi-k2.5",
+        credential_generation=3,
+    )
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-legacy")
+        job = await session.get(AnalysisJob, "job-legacy")
+    assert resumed == "version-legacy"
+    assert version is not None and version.status == "pending"
+    assert job is not None and job.stage == "analyzing"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_fixed_rules_hash_is_independent_of_user_prompt_snapshot(tmp_path) -> None:
     database = Database(tmp_path / "fixed-rules.sqlite3")
     await database.create_schema()

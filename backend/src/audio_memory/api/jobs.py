@@ -7,10 +7,12 @@ import logging
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy import select
 
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
+from audio_memory.models import AnalysisVersion
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
@@ -53,6 +55,34 @@ class JobView(BaseModel):
 
 def service_from(request: Request) -> UploadService:
     return request.app.state.upload_service
+
+
+async def has_legacy_completed_unaudited_report(
+    request: Request, job_id: str
+) -> bool:
+    async with service_from(request).database.session() as session:
+        version = await session.scalar(
+            select(AnalysisVersion)
+            .where(
+                AnalysisVersion.source_job_id == job_id,
+                AnalysisVersion.reanalysis_batch_id.is_(None),
+                AnalysisVersion.status == "completed",
+            )
+            .order_by(AnalysisVersion.created_at.desc())
+            .limit(1)
+        )
+    if version is None:
+        return False
+    try:
+        staged = json.loads(version.staged_results_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return False
+    metadata = staged.get("direct_report_publication_metadata")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("audit_status") == "completed_unaudited"
+        and isinstance(staged.get("direct_report_v1_markdown"), str)
+    )
 
 
 async def protect_job_if_enabled(request: Request, job_id: str) -> str:
@@ -323,10 +353,14 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    legacy_completed_unaudited = (
+        job.stage == JobStage.COMPLETED.value
+        and await has_legacy_completed_unaudited_report(request, job_id)
+    )
     if (
         job.stage != JobStage.FAILED.value
         or job.error_code not in ANALYSIS_RETRYABLE_ERROR_CODES
-    ):
+    ) and not legacy_completed_unaudited:
         raise HTTPException(
             status_code=409,
             detail="Only a failed model analysis can be retried",
