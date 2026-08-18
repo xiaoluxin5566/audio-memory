@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.audio-memory.local</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__CURRENT_ROOT__/scripts/start.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AUDIO_MEMORY_NO_OPEN</key>
+    <string>1</string>
+    <key>AUDIO_MEMORY_PORT</key>
+    <string>__PORT__</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__CURRENT_ROOT__</string>
+  <key>StandardOutPath</key>
+  <string>__DATA_ROOT__/runtime/audio-memory.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DATA_ROOT__/runtime/audio-memory.log</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

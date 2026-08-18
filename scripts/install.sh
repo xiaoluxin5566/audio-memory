@@ -6,6 +6,7 @@ PLATFORM="${AUDIO_MEMORY_PLATFORM_OVERRIDE:-$(uname -s)}"
 ARCHITECTURE="${AUDIO_MEMORY_ARCH_OVERRIDE:-$(uname -m)}"
 DRY_RUN="${AUDIO_MEMORY_DRY_RUN:-0}"
 MODEL_SMOKE_TEST="${AUDIO_MEMORY_MODEL_SMOKE_TEST:-0}"
+PREBUILT="${AUDIO_MEMORY_PREBUILT:-0}"
 
 fail() { printf '安装失败：%s\n' "$1" >&2; exit 1; }
 need() {
@@ -23,19 +24,23 @@ if [ "$MODEL_SMOKE_TEST" = "1" ]; then
   need python3
 else
   need uv
-  need npm
   need ffmpeg
+  if [ "$PREBUILT" != "1" ]; then need npm; fi
 
   printf '正在准备 Audio Memory…\n'
   (
     cd "$PROJECT_ROOT/backend"
     run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
   )
-  (
-    cd "$PROJECT_ROOT/prototype"
-    run npm ci
-    run npm run build
-  )
+  if [ "$PREBUILT" != "1" ]; then
+    (
+      cd "$PROJECT_ROOT/prototype"
+      run npm ci
+      run npm run build
+    )
+  elif [ ! -f "$PROJECT_ROOT/prototype/dist/client/index.html" ]; then
+    fail "预构建前端文件不存在。"
+  fi
 fi
 
 if [ "${AUDIO_MEMORY_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
@@ -220,4 +225,8 @@ PY
   fi
 fi
 
-printf '\n安装完成。运行下面的命令启动：\n  ./scripts/start.sh\n'
+if [ "$PREBUILT" = "1" ]; then
+  printf '\n运行环境准备完成。请运行：audio-memory start\n'
+else
+  printf '\n安装完成。运行下面的命令启动：\n  ./scripts/start.sh\n'
+fi

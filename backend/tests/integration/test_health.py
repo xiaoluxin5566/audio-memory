@@ -22,7 +22,7 @@ async def test_health_is_ready_after_application_startup(tmp_path: Path) -> None
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.1.0-beta.1",
         "platform": "macOS",
         "architecture": "arm64",
     }

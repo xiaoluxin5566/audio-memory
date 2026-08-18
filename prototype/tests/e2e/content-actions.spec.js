@@ -21,11 +21,10 @@ function feedPayload(todoText = '整理会议结论', completed = false, cleared
   }
 }
 
-test('todo, card question, feedback and clear-history actions remain connected', async ({ page }) => {
+test('todo, card question and clear-history actions remain connected while feedback is hidden', async ({ page }) => {
   let todoText = '整理会议结论'
   let completed = false
   let cleared = false
-  let feedbackBody = null
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
@@ -54,10 +53,6 @@ test('todo, card question, feedback and clear-history actions remain connected',
         { role: 'assistant', content: '下一步先明确负责人和验收日期。' },
       ] } })
     }
-    if (pathname === '/api/cards/card-1/feedback' && request.method() === 'POST') {
-      feedbackBody = request.postDataJSON()
-      return route.fulfill({ status: 201, json: { id: 'feedback-1' } })
-    }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
   await page.goto('/')
@@ -76,12 +71,7 @@ test('todo, card question, feedback and clear-history actions remain connected',
   await expect(page.locator('.chat-message.user')).toContainText('下一步怎么做？')
   await expect(page.locator('.chat-message.assistant')).toContainText('下一步先明确负责人和验收日期。')
 
-  await page.getByRole('button', { name: '意见反馈' }).click()
-  await page.getByRole('button', { name: '内容不准' }).click()
-  await page.getByPlaceholder('请填写具体哪里不准，以及你希望如何改进（必填）').fill('核心结论遗漏了预算限制')
-  await page.getByRole('button', { name: '提交反馈' }).click()
-  await expect(page.getByText('意见反馈已保存到本地')).toBeVisible()
-  expect(feedbackBody).toEqual({ rating: 'inaccurate', explanation: '核心结论遗漏了预算限制' })
+  await expect(page.getByRole('button', { name: '意见反馈' })).toHaveCount(0)
 
   await page.getByRole('button', { name: '关闭详情' }).click()
   await page.getByRole('button', { name: '清除所有历史' }).click()

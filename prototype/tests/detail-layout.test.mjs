@@ -21,6 +21,16 @@ test('detail page removes continuation questions and conversation history', () =
   assert.equal(detail.indexOf('className="ask-section"'), -1);
 });
 
+test('detail page hides the deferred report feedback entry', () => {
+  const detail = appSource.slice(
+    appSource.indexOf('function CardDetail'),
+    appSource.indexOf('function History'),
+  );
+
+  assert.doesNotMatch(detail, /className="feedback-trigger"/);
+  assert.doesNotMatch(detail, />意见反馈</);
+});
+
 test('report detail distinguishes all audit completion states', () => {
   assert.match(appSource, /已完成（未审计）/);
   assert.match(appSource, /已完成（V1）/);
