@@ -19,16 +19,16 @@
 - Release SHA-256：校验通过。
 - 从真实 tar.gz 在临时 HOME 安装：版本命令成功，历史测试记录保留，备份文件生成。
 - 安装包内应用生命周期：迁移至 `0014` 并成功进入 lifespan。
+- 最终归档的全局命令：在隔离 HOME 与独立端口执行 `audio-memory start/status/stop` 均成功。
+- 最终归档的 HTTP 健康检查：返回 `status=ok`、版本 `0.1.0-beta.1`、平台 `macOS arm64`。
+- macOS LaunchAgent 显式固定安装用户的 HOME，并直接使用发布版本自己的 Python 环境，不依赖终端 PATH。
 
-## 当前环境无法完成
+## 当前环境限制
 
-- 沙箱禁止进程监听本地测试端口，因此无法在隔离 HOME 对安装包完成真实 HTTP 健康连接；应用生命周期本身已验证。
 - `dev-proxy-security.test.mjs` 同样因监听端口返回 `EPERM`，不是断言失败。
 - 未读取 Keychain、未调用真实模型、未上传真实音频。
 
 ## 发布前仍需完成
 
-- 在普通 macOS 用户环境从最终归档安装并执行 `audio-memory start/status/stop`。
 - 完成一次用户明确授权的真实音频上传、转写、报告审核与发布，重启后确认历史仍在。
 - 创建 GitHub 仓库和 Release；确定公开/私有策略与许可证。
-
