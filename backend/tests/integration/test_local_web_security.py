@@ -859,6 +859,7 @@ async def test_product_app_protects_every_paid_or_mutating_route_before_dispatch
         ("PUT", "/api/providers/kimi/key"),
         ("DELETE", "/api/providers/kimi/candidate/window-1"),
         ("POST", "/api/providers/kimi/activate"),
+        ("PUT", "/api/settings/analysis"),
         ("PUT", "/api/prompts/meeting"),
         ("PATCH", "/api/todos/todo-1"),
         ("DELETE", "/api/todos/todo-1"),

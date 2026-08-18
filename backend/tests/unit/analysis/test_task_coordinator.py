@@ -211,6 +211,107 @@ async def test_restart_returns_linked_history_item_to_pending(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_upload_completion_releases_its_runtime_resources(
+    tmp_path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "runtime-release.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-runtime")
+    released: list[str] = []
+    started: list[str] = []
+    released_event = asyncio.Event()
+    monkeypatch.setattr(PromptComposer, "fixed_rules_hash", lambda: "f" * 64)
+    monkeypatch.setattr(
+        PromptComposer,
+        "final_report_prompt_manifest",
+        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+    )
+
+    async def release(job_id: str) -> None:
+        released.append(job_id)
+        released_event.set()
+
+    async def start(job_id: str) -> None:
+        started.append(job_id)
+
+    class CompletingRunner:
+        async def run(self, version_id: str, _owner_id: str) -> None:
+            async with database.session() as session:
+                version = await session.get(AnalysisVersion, version_id)
+                assert version is not None
+                version.status = "completed"
+                await session.commit()
+
+    coordinator = AnalysisTaskCoordinator(
+        database, on_upload_started=start, on_upload_finished=release
+    )
+    await coordinator.start(CompletingRunner())
+    await coordinator.submit_new_upload(
+        request("job-runtime", batch_id=None, priority=0)
+    )
+    await asyncio.wait_for(released_event.wait(), timeout=1)
+
+    assert started == ["job-runtime"]
+    assert released == ["job-runtime"]
+    await coordinator.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_running_upload_cannot_be_discarded_across_publication_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "cancel-runtime.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-cancel", "job-next")
+    monkeypatch.setattr(PromptComposer, "fixed_rules_hash", lambda: "f" * 64)
+    monkeypatch.setattr(
+        PromptComposer,
+        "final_report_prompt_manifest",
+        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+    )
+    running = asyncio.Event()
+    finish = asyncio.Event()
+    next_completed = asyncio.Event()
+
+    class Runner:
+        async def run(self, version_id: str, _owner_id: str) -> None:
+            async with database.session() as session:
+                version = await session.get(AnalysisVersion, version_id)
+                assert version is not None
+                job_id = version.source_job_id
+            if job_id == "job-cancel":
+                running.set()
+                await finish.wait()
+            async with database.session() as session:
+                version = await session.get(AnalysisVersion, version_id)
+                assert version is not None
+                version.status = "completed"
+                await session.commit()
+            next_completed.set()
+
+    coordinator = AnalysisTaskCoordinator(database)
+    await coordinator.start(Runner())
+    await coordinator.submit_new_upload(
+        request("job-cancel", batch_id=None, priority=0)
+    )
+    await asyncio.wait_for(running.wait(), timeout=1)
+
+    with pytest.raises(AlreadyRunningError):
+        await coordinator.cancel_new_upload("job-cancel")
+    finish.set()
+    await asyncio.wait_for(next_completed.wait(), timeout=1)
+
+    next_completed.clear()
+    await coordinator.submit_new_upload(
+        request("job-next", batch_id=None, priority=0)
+    )
+    await asyncio.wait_for(next_completed.wait(), timeout=1)
+    await coordinator.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_instance_locked_fast_restart_reclaims_unexpired_foreign_run(
     tmp_path,
 ) -> None:

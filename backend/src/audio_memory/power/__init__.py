@@ -1,0 +1,1 @@
+"""macOS power-management integration."""

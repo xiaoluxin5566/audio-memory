@@ -11,12 +11,37 @@ from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.analysis.versions import AnalysisSnapshot
 from audio_memory.models import (
+    AppSetting,
     AnalysisJob,
     AnalysisVersion,
     Batch,
     Card,
     ProviderMetadata,
 )
+
+
+class AppSettingsRepository:
+    PREVENT_SLEEP_KEY = "analysis.prevent_sleep"
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def prevent_sleep_enabled(self) -> bool:
+        async with self.database.session() as session:
+            row = await session.get(AppSetting, self.PREVENT_SLEEP_KEY)
+            return row is not None and json.loads(row.value_json) is True
+
+    async def set_prevent_sleep(self, enabled: bool) -> None:
+        async with self.database.session() as session:
+            async with session.begin():
+                row = await session.get(AppSetting, self.PREVENT_SLEEP_KEY)
+                value_json = json.dumps(enabled)
+                if row is None:
+                    session.add(
+                        AppSetting(key=self.PREVENT_SLEEP_KEY, value_json=value_json)
+                    )
+                else:
+                    row.value_json = value_json
 
 
 @dataclass(frozen=True, slots=True)

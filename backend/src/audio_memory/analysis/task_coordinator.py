@@ -7,10 +7,11 @@ from hashlib import sha256
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
@@ -80,6 +81,8 @@ class AnalysisTaskCoordinator:
         database: Database,
         *,
         reclaim_foreign_on_initialize: bool = False,
+        on_upload_started: Callable[[str], Awaitable[None]] | None = None,
+        on_upload_finished: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.database = database
         self.owner_id = str(uuid4())
@@ -89,8 +92,11 @@ class AnalysisTaskCoordinator:
         self._profile_retries_active = 0
         self._initialized = False
         self._worker: asyncio.Task[None] | None = None
+        self._current_upload_job_id: str | None = None
         self._closed = False
         self._reclaim_foreign_on_initialize = reclaim_foreign_on_initialize
+        self._on_upload_started = on_upload_started
+        self._on_upload_finished = on_upload_finished
 
     async def initialize(self) -> None:
         async with self._condition:
@@ -479,6 +485,24 @@ class AnalysisTaskCoordinator:
             self._closed = False
             self._worker = asyncio.create_task(self._work(runner))
 
+    async def cancel_new_upload(self, source_job_id: str) -> bool:
+        """Discard unpublished versions when no report worker owns the job."""
+        await self.initialize()
+        async with self._condition:
+            if self._current_upload_job_id == source_job_id:
+                raise AlreadyRunningError("Analysis publication is still running")
+            async with self.maintenance_guard():
+                async with self.database.session() as session:
+                    removed = await session.execute(
+                        delete(AnalysisVersion).where(
+                            AnalysisVersion.source_job_id == source_job_id,
+                            AnalysisVersion.batch_id.is_(None),
+                        )
+                    )
+                    await session.commit()
+            self._condition.notify_all()
+        return int(removed.rowcount) > 0
+
     async def close(self) -> None:
         self._closed = True
         async with self._condition:
@@ -516,7 +540,18 @@ class AnalysisTaskCoordinator:
 
     async def _work(self, runner: VersionRunner) -> None:
         while not self._closed:
-            version_id, _request = await self._claim_next()
+            version_id, request = await self._claim_next()
+            self._current_upload_job_id = (
+                request.source_job_id if request.source_batch_id is None else None
+            )
+            if request.source_batch_id is None and self._on_upload_started is not None:
+                try:
+                    await self._on_upload_started(request.source_job_id)
+                except Exception:
+                    logger.exception(
+                        "Upload runtime setup failed job_id=%s",
+                        request.source_job_id,
+                    )
             heartbeat = asyncio.create_task(self._heartbeat(version_id))
             try:
                 await runner.run(version_id, self.owner_id)
@@ -558,6 +593,18 @@ class AnalysisTaskCoordinator:
                         .values(worker_owner_id=None, lease_expires_at=None)
                     )
                     await session.commit()
+                if (
+                    request.source_batch_id is None
+                    and self._on_upload_finished is not None
+                ):
+                    try:
+                        await self._on_upload_finished(request.source_job_id)
+                    except Exception:
+                        logger.exception(
+                            "Upload runtime cleanup failed job_id=%s",
+                            request.source_job_id,
+                        )
+                self._current_upload_job_id = None
 
     async def _heartbeat(self, version_id: str) -> None:
         while True:

@@ -42,6 +42,8 @@ export function App() {
   const [providerOpen, setProviderOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [reanalysisOpen, setReanalysisOpen] = useState(false);
+  const [sleepPromptOpen, setSleepPromptOpen] = useState(false);
+  const [analysisSettings, setAnalysisSettings] = useState({ preventSleep: false, status: 'inactive', loaded: false });
   const [selectedCard, setSelectedCard] = useState(null);
   const [toast, setToast] = useState('');
   const [editingTodo, setEditingTodo] = useState(null);
@@ -83,6 +85,13 @@ export function App() {
       setSelectedCard({ card, batch });
     }
   }, [state.feed]);
+  useEffect(() => {
+    api.analysisSettings().then((settings) => setAnalysisSettings({
+      preventSleep: Boolean(settings.prevent_sleep),
+      status: settings.sleep_prevention_status || 'inactive',
+      loaded: true,
+    })).catch(() => setAnalysisSettings((current) => ({ ...current, loaded: true })));
+  }, []);
   useEffect(() => {
     api.activeJob().then((job) => {
       if (!job) return;
@@ -193,22 +202,58 @@ export function App() {
     }
   }
 
-  async function startAnalysis() {
+  async function executeStartAnalysis() {
     const provider = state.providers[state.activeProvider];
     if (provider?.state !== 'available') { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
     const job = await api.startJob(state.job.id);
+    const sleepStatus = job.sleep_prevention_status || 'disabled';
+    setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
+    if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
     setState((current) => ({ ...current, job: { ...job, progress: job.progress_percent ?? 0 } }));
+  }
+
+  async function startAnalysis() {
+    const provider = state.providers[state.activeProvider];
+    if (provider?.state !== 'available') { setProviderOpen(true); return; }
+    if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
+    if (!analysisSettings.loaded) return;
+    if (!analysisSettings.preventSleep) { setSleepPromptOpen(true); return; }
+    await executeStartAnalysis();
+  }
+
+  async function updatePreventSleep(enabled) {
+    try {
+      const settings = await api.updateAnalysisSettings(enabled);
+      setAnalysisSettings({ preventSleep: Boolean(settings.prevent_sleep), status: settings.sleep_prevention_status || 'inactive', loaded: true });
+      return true;
+    } catch (error) {
+      setToast(error.message);
+      return false;
+    }
+  }
+
+  async function enableSleepPreventionAndStart() {
+    if (!await updatePreventSleep(true)) return;
+    setSleepPromptOpen(false);
+    await executeStartAnalysis();
   }
 
   const onJobUpdate = useCallback((job) => {
     const progress = job.progress_percent ?? 0;
     setState((current) => ({ ...current, job: { ...current.job, ...job, progress } }));
+    if (job.sleep_prevention_status) {
+      setAnalysisSettings((current) => ({ ...current, status: job.sleep_prevention_status }));
+    }
+    if (['failed', 'interrupted', 'completed'].includes(job.stage)) {
+      setAnalysisSettings((current) => ({ ...current, status: 'inactive' }));
+    }
   }, []);
   const onJobComplete = useCallback(async () => {
     await refreshContent();
     setState((current) => ({ ...current, upload: { files: [], error: '', paused: false }, job: null }));
     setToast('分析完成，新结果已添加到信息流');
+    setAnalysisSettings((current) => ({ ...current, status: 'inactive' }));
   }, [refreshContent]);
   const watchedJobId = ['transcribing', 'analyzing'].includes(state.job?.stage)
     ? state.job.id
@@ -217,16 +262,21 @@ export function App() {
 
   async function resumeJob() {
     if (state.job.stage === 'failed') {
-      await api.retryAnalysis(state.job.id);
+      const result = await api.retryAnalysis(state.job.id);
+      setAnalysisSettings((current) => ({ ...current, status: result.sleep_prevention_status || current.status }));
+      if (result.sleep_prevention_status === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
       setState((current) => ({ ...current, job: { ...current.job, stage: 'analyzing', progress: 70, error_code: null } }));
       return;
     }
-    await api.resumeJob(state.job.id);
+    const result = await api.resumeJob(state.job.id);
+    setAnalysisSettings((current) => ({ ...current, status: result.sleep_prevention_status || current.status }));
+    if (result.sleep_prevention_status === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
     setState((current) => ({ ...current, job: { ...current.job, stage: 'transcribing', progress: 0 } }));
   }
   async function cancelJob() {
     if (state.job?.id) await api.cancelJob(state.job.id);
     setState((current) => ({ ...current, job: null, upload: { files: [], error: '', paused: false } }));
+    setAnalysisSettings((current) => ({ ...current, status: 'inactive' }));
   }
 
   const currentProvider = state.providers[state.activeProvider];
@@ -243,6 +293,14 @@ export function App() {
               {currentProvider.state === 'available' && <div className="status-success"><i />连接可用 · {currentProvider.lastChecked || '刚刚'} 校验</div>}
               {currentProvider.error && <div className="inline-error"><b>{currentProvider.error}</b></div>}
             </section>
+            <section className="panel sleep-setting-panel">
+              <label className="sleep-setting-row">
+                <span><strong>分析期间保持电脑唤醒</strong><small>锁屏或长时间不操作时，转写和报告生成仍可继续</small></span>
+                <input type="checkbox" role="switch" aria-label="分析期间保持电脑唤醒" checked={analysisSettings.preventSleep} disabled={!analysisSettings.loaded || analysisSettings.status === 'active'} onChange={(event) => updatePreventSleep(event.target.checked)} />
+              </label>
+              {analysisSettings.status === 'active' && <div className="sleep-protection-active"><i />保护中 · 屏幕仍可正常关闭</div>}
+              {analysisSettings.status === 'unavailable' && <div className="sleep-protection-error">防休眠未生效，请保持电脑唤醒</div>}
+            </section>
             <section className="panel upload-panel">
               <div className="panel-title"><strong>上传音频</strong><span>{state.upload.files.length ? `${state.upload.files.length} 个文件` : ''}</span></div>
               <div className={`drop-zone ${currentProvider.state !== 'available' ? 'disabled' : ''}`} onClick={() => currentProvider.state === 'available' ? fileInput.current?.click() : setProviderOpen(true)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(event.dataTransfer.files); }}>
@@ -252,7 +310,7 @@ export function App() {
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
               <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
               {state.job && state.job.stage !== 'uploading' ? <JobPanel job={state.job} onRetry={resumeJob} onCancel={cancelJob} /> : (
-                <button className="primary full" disabled={!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>开始分析{state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}</button>
+                <button className="primary full" disabled={!analysisSettings.loaded || !state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>开始分析{state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}</button>
               )}
               <p className="privacy">音频、转写和结果保存在本机；只有转写文本会发送给当前模型厂商。</p>
             </section>
@@ -265,10 +323,15 @@ export function App() {
       {route === 'history' && <History state={state} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
+      {sleepPromptOpen && <SleepPreventionPrompt onEnable={enableSleepPreventionAndStart} onContinue={async () => { setSleepPromptOpen(false); await executeStartAnalysis(); }} onClose={() => setSleepPromptOpen(false)} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
+}
+
+function SleepPreventionPrompt({ onEnable, onContinue, onClose }) {
+  return <div className="modal-backdrop"><section className="modal sleep-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="sleep-prompt-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><div className="sleep-mark">☾</div><h1 id="sleep-prompt-title">分析期间保持电脑唤醒？</h1><p>电脑进入休眠后，转写和报告生成会暂停。开启后，即使锁屏或长时间不操作，分析仍会继续；屏幕仍可正常关闭。</p><div className="modal-actions"><button className="secondary" onClick={onContinue}>暂不开启</button><button className="primary" onClick={onEnable}>开启并继续</button></div></section></div>;
 }
 
 function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear }) {
@@ -287,7 +350,7 @@ function JobPanel({ job, onRetry, onCancel }) {
   }
   const transcribing = job.stage === 'transcribing';
   const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : 'DeepSeek 正在阅读全文并生成报告';
-  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div><button className="secondary full" onClick={onCancel}>取消本次分析</button></div>;
+  return <div className="job-card"><div className="job-title"><b>{phase}</b><span>{job.progress}%</span></div><div className="progress large"><i style={{ width: `${job.progress}%` }} /></div><p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div>{transcribing ? <button className="secondary full" onClick={onCancel}>取消本次分析</button> : <p>报告正在安全发布，完成前请保持应用运行。</p>}</div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {
@@ -560,5 +623,5 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
 }
 
 function ClearModal({ onClose, onConfirm }) {
-  return <div className="modal-backdrop"><section className="modal clear-modal"><div className="warning-mark">!</div><h1>清除所有历史数据？</h1><p>此操作会永久删除本地历史，无法恢复。删除完成后，首页将回到“先上传音频”。</p><div className="delete-list"><b>将被删除</b><ul><li>所有已上传的音频文件与转写全文</li><li>所有模型生成的卡片、详情和完整问答</li><li>全局待办与由音频建立的个人画像</li></ul></div><div className="keep-note">不会删除：模型厂商与 API Key 配置、Prompt 配置、已提交的意见反馈。</div><div className="modal-actions"><button className="secondary" onClick={onClose}>取消</button><button className="danger-solid" onClick={onConfirm}>永久清除</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="modal clear-modal"><div className="warning-mark">!</div><h1>清除所有历史数据？</h1><p>此操作会永久删除本地历史，无法恢复。删除完成后，首页将回到“先上传音频”。</p><div className="delete-list"><b>将被删除</b><ul><li>所有已上传的音频文件与转写全文</li><li>所有模型生成的卡片、详情和完整问答</li><li>全局待办与由音频建立的个人画像</li></ul></div><div className="keep-note">不会删除：模型厂商与 API Key 配置、Prompt 配置、防休眠设置、已提交的意见反馈。</div><div className="modal-actions"><button className="secondary" onClick={onClose}>取消</button><button className="danger-solid" onClick={onConfirm}>永久清除</button></div></section></div>;
 }

@@ -139,6 +139,10 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify({ model_id: modelId }),
   }),
+  analysisSettings: () => apiRequest('/settings/analysis'),
+  updateAnalysisSettings: (preventSleep) => apiRequest('/settings/analysis', {
+    method: 'PUT', body: JSON.stringify({ prevent_sleep: preventSleep }),
+  }),
   createJob: () => apiRequest('/jobs', { method: 'POST' }),
   activeJob: () => apiRequest('/jobs/active'),
   job: (id) => apiRequest(`/jobs/${id}`),

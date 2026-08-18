@@ -22,12 +22,14 @@ from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
 from audio_memory.api.content import router as content_router
 from audio_memory.api.reanalysis import router as reanalysis_router
+from audio_memory.api.settings import router as settings_router
 from audio_memory.providers.adapters import DeepSeekAdapter, GLMAdapter, KimiAdapter, OpenAIAdapter
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
 from audio_memory.providers.types import PROVIDER_CONFIGS
 from audio_memory.providers.validation import ProviderValidationService
-from audio_memory.repositories import ProviderMetadataRepository
+from audio_memory.repositories import AppSettingsRepository, ProviderMetadataRepository
+from audio_memory.power.sleep_prevention import SleepPreventionManager
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
@@ -85,6 +87,13 @@ def create_app(
             await asyncio.to_thread(run_migrations, resolved_paths.database)
             database = Database(resolved_paths.database)
             app.state.database = database
+            app.state.settings_repository = AppSettingsRepository(database)
+            sleep_prevention = SleepPreventionManager()
+            app.state.sleep_prevention = sleep_prevention
+
+            async def protect_upload(job_id: str) -> None:
+                if await app.state.settings_repository.prevent_sleep_enabled():
+                    await sleep_prevention.acquire(job_id)
             await cleanup_abandoned_uploads(database, resolved_paths.staging)
             job_events = JobEventBroker()
             app.state.job_events = job_events
@@ -144,6 +153,8 @@ def create_app(
             analysis_tasks = AnalysisTaskCoordinator(
                 database,
                 reclaim_foreign_on_initialize=True,
+                on_upload_started=protect_upload,
+                on_upload_finished=sleep_prevention.release,
             )
             reanalysis_worker = ReanalysisWorker(
                 database=database,
@@ -200,6 +211,9 @@ def create_app(
                 )
             if whisper_engine is not None:
                 await whisper_engine.close()
+            sleep_prevention = getattr(app.state, "sleep_prevention", None)
+            if sleep_prevention is not None:
+                await sleep_prevention.close()
             if database is not None:
                 await database.dispose()
             instance_lock.release()
@@ -220,6 +234,7 @@ def create_app(
     app.include_router(prompts_router)
     app.include_router(content_router)
     app.include_router(reanalysis_router)
+    app.include_router(settings_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

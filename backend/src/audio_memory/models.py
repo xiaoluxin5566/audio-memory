@@ -29,6 +29,14 @@ class Base(DeclarativeBase):
     pass
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now, onupdate=utc_now)
+
+
 class ProviderMetadata(Base):
     __tablename__ = "provider_metadata"
 

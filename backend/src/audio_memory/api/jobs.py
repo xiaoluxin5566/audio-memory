@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field as PydanticField
 
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
-from audio_memory.analysis.task_coordinator import AnalysisRequest
+from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
@@ -47,10 +47,28 @@ class JobView(BaseModel):
     local_phase: str | None = None
     batch_current: int = 0
     batch_total: int = 0
+    sleep_prevention_status: str | None = None
 
 
 def service_from(request: Request) -> UploadService:
     return request.app.state.upload_service
+
+
+async def protect_job_if_enabled(request: Request, job_id: str) -> str:
+    enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
+    if not enabled:
+        return "disabled"
+    return await request.app.state.sleep_prevention.acquire(job_id)
+
+
+async def job_view_with_sleep_status(request: Request, job) -> JobView:
+    view = JobView.model_validate(job, from_attributes=True)
+    if job.stage in {JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value}:
+        enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
+        view.sleep_prevention_status = (
+            request.app.state.sleep_prevention.status if enabled else "disabled"
+        )
+    return view
 
 
 def track_transcription(request: Request, job_id: str, coroutine) -> None:
@@ -79,16 +97,23 @@ async def run_pipeline(
     analysis_request: AnalysisRequest,
     *,
     resume: bool = False,
+    sleep_protected: bool = False,
 ) -> None:
     transcription = request.app.state.transcription_service
     engine = request.app.state.whisper_engine
-    if resume:
-        await transcription.resume_job(job_id, engine)
-    else:
-        await transcription.run_job(job_id, engine)
-    await request.app.state.analysis_task_coordinator.submit_new_upload(
-        analysis_request
-    )
+    submitted = False
+    try:
+        if resume:
+            await transcription.resume_job(job_id, engine)
+        else:
+            await transcription.run_job(job_id, engine)
+        await request.app.state.analysis_task_coordinator.submit_new_upload(
+            analysis_request
+        )
+        submitted = True
+    finally:
+        if sleep_protected and not submitted:
+            await request.app.state.sleep_prevention.release(job_id)
 
 
 async def snapshot_analysis_request(
@@ -147,7 +172,7 @@ async def create_job(request: Request) -> JobView:
 @router.get("/active", response_model=JobView | None)
 async def get_active_job(request: Request) -> JobView | None:
     job = await service_from(request).get_active_job()
-    return JobView.model_validate(job, from_attributes=True) if job else None
+    return await job_view_with_sleep_status(request, job) if job else None
 
 
 @router.get("/{job_id}")
@@ -156,7 +181,7 @@ async def get_job(job_id: str, request: Request) -> JobView:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return JobView.model_validate(job, from_attributes=True)
+    return await job_view_with_sleep_status(request, job)
 
 
 @router.post("/{job_id}/files", status_code=201, response_model=FileView)
@@ -210,6 +235,13 @@ async def start_job(job_id: str, request: Request) -> JobView:
         validation = await coordinator.validate_saved(provider.provider_id)
         if not validation.ok:
             raise UploadError("当前模型不可用，请修改配置或重新校验", code="provider_unavailable")
+        analysis_request = await snapshot_analysis_request(
+            request,
+            job_id=job_id,
+            provider_id=provider.provider_id,
+            model_id=provider.model_id,
+            credential_generation=credential_generation,
+        )
         job = await service_from(request).start(
             job_id,
             provider_id=provider.provider_id,
@@ -222,22 +254,20 @@ async def start_job(job_id: str, request: Request) -> JobView:
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+    sleep_status = await protect_job_if_enabled(request, job_id)
     track_transcription(
         request,
         job_id,
         run_pipeline(
             request,
             job_id,
-            await snapshot_analysis_request(
-                request,
-                job_id=job_id,
-                provider_id=provider.provider_id,
-                model_id=provider.model_id,
-                credential_generation=credential_generation,
-            ),
+            analysis_request,
+            sleep_protected=sleep_status == "active",
         ),
     )
-    return JobView.model_validate(job, from_attributes=True)
+    view = JobView.model_validate(job, from_attributes=True)
+    view.sleep_prevention_status = sleep_status
+    return view
 
 
 @router.post("/{job_id}/resume", status_code=202)
@@ -255,25 +285,32 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         )
     if job.provider_id is None or job.model_id is None:
         raise HTTPException(status_code=409, detail="Job has no provider snapshot")
+    analysis_request = await snapshot_analysis_request(
+        request,
+        job_id=job_id,
+        provider_id=job.provider_id,
+        model_id=job.model_id,
+        credential_generation=await request.app.state.provider_coordinator.credential_generation(
+            job.provider_id
+        ),
+    )
+    sleep_status = await protect_job_if_enabled(request, job_id)
     track_transcription(
         request,
         job_id,
         run_pipeline(
             request,
             job_id,
-            await snapshot_analysis_request(
-                request,
-                job_id=job_id,
-                provider_id=job.provider_id,
-                model_id=job.model_id,
-                credential_generation=await request.app.state.provider_coordinator.credential_generation(
-                    job.provider_id
-                ),
-            ),
+            analysis_request,
             resume=True,
+            sleep_protected=sleep_status == "active",
         ),
     )
-    return {"id": job_id, "stage": JobStage.TRANSCRIBING.value}
+    return {
+        "id": job_id,
+        "stage": JobStage.TRANSCRIBING.value,
+        "sleep_prevention_status": sleep_status,
+    }
 
 
 @router.post("/{job_id}/retry-analysis", status_code=202)
@@ -332,21 +369,65 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         model_id=provider.model_id,
         credential_generation=credential_generation,
     )
-    await request.app.state.analysis_task_coordinator.submit_new_upload(
-        analysis_request
-    )
-    return {"id": job_id, "stage": JobStage.ANALYZING.value}
+    sleep_status = await protect_job_if_enabled(request, job_id)
+    submitted = False
+    try:
+        if job.error_code.startswith("autonomous_"):
+            resumed_version = (
+                await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
+                    source_job_id=job_id,
+                    provider_id=provider.provider_id,
+                    model_id=provider.model_id,
+                    credential_generation=credential_generation,
+                )
+            )
+            if resumed_version is not None:
+                submitted = True
+                return {
+                    "id": job_id,
+                    "stage": JobStage.ANALYZING.value,
+                    "sleep_prevention_status": sleep_status,
+                }
+
+        await request.app.state.analysis_task_coordinator.submit_new_upload(
+            analysis_request
+        )
+        submitted = True
+        return {
+            "id": job_id,
+            "stage": JobStage.ANALYZING.value,
+            "sleep_prevention_status": sleep_status,
+        }
+    finally:
+        if sleep_status == "active" and not submitted:
+            await request.app.state.sleep_prevention.release(job_id)
 
 
 @router.delete("/{job_id}", status_code=204)
 async def cancel_job(job_id: str, request: Request) -> Response:
+    try:
+        job = await service_from(request).get_job(job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.stage == JobStage.ANALYZING.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "analysis_publication_in_progress",
+                "message": "报告生成已进入发布阶段，完成前不能取消",
+            },
+        )
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
     task = tasks.get(job_id)
     if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     try:
+        await request.app.state.analysis_task_coordinator.cancel_new_upload(job_id)
         await service_from(request).cancel_job(job_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (LookupError, AlreadyRunningError) as exc:
+        status = 409 if isinstance(exc, AlreadyRunningError) else 404
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    finally:
+        await request.app.state.sleep_prevention.release(job_id)
     return Response(status_code=204)

@@ -20,6 +20,8 @@ from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
+from audio_memory.power.sleep_prevention import SleepPreventionManager
+from audio_memory.repositories import AppSettingsRepository
 
 
 class RetryCoordinator:
@@ -90,6 +92,8 @@ async def job_client(tmp_path: Path):
     app.state.upload_service = UploadService(
         database, paths, eta_tracker=app.state.eta_tracker
     )
+    app.state.settings_repository = AppSettingsRepository(database)
+    app.state.sleep_prevention = SleepPreventionManager(platform_name="Test")
     app.include_router(router)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

@@ -36,6 +36,19 @@ button{cursor:pointer}
 .full{width:100%;margin-top:10px}
 .status-success{display:flex;align-items:center;gap:6px;background:#eff8f2;border:1px solid #d0e9d8;color:#4b7f5c;border-radius:8px;padding:8px;margin-top:10px;font-size:11px}
 .status-success i{width:6px;height:6px;border-radius:50%;background:#47a168}
+.sleep-setting-panel{padding:13px 14px}
+.sleep-setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}
+.sleep-setting-row span{min-width:0}
+.sleep-setting-row strong{display:block;font-size:12px}
+.sleep-setting-row small{display:block;color:var(--muted);font-size:9px;line-height:1.5;margin-top:4px}
+.sleep-setting-row input{appearance:none;width:34px;height:20px;border:0;border-radius:99px;background:#cbd1d8;position:relative;flex:0 0 auto;transition:.18s}
+.sleep-setting-row input:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(28,35,47,.25);transition:.18s}
+.sleep-setting-row input:checked{background:var(--brand)}
+.sleep-setting-row input:checked:before{transform:translateX(14px)}
+.sleep-setting-row input:disabled{opacity:.65;cursor:not-allowed}
+.sleep-protection-active{display:flex;align-items:center;gap:6px;color:var(--success);font-size:9px;margin-top:9px}
+.sleep-protection-active i{width:6px;height:6px;border-radius:50%;background:#47a168}
+.sleep-protection-error{color:var(--danger);font-size:9px;line-height:1.5;margin-top:9px}
 .drop-zone{border:1.5px dashed #aab4c0;background:#fafbfc;border-radius:10px;padding:17px 10px;text-align:center;cursor:pointer}
 .drop-zone:hover{border-color:#7182d7;background:#f7f8ff}
 .drop-zone.disabled{opacity:.58;background:#f4f5f7}
@@ -234,6 +247,7 @@ button{cursor:pointer}
 .validation.success{background:#eff8f2;color:#43805a}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .warning-mark{width:36px;height:36px;border-radius:10px;background:#fff0ed;color:#b74f46;display:grid;place-items:center;font-weight:800;margin-bottom:12px}
+.sleep-mark{width:36px;height:36px;border-radius:10px;background:#eef1ff;color:#5368ce;display:grid;place-items:center;font-weight:800;margin-bottom:12px}
 .delete-list{background:#f7f8fa;border:1px solid var(--line);border-radius:10px;padding:11px 13px;margin-top:14px}
 .delete-list b{font-size:10px}
 .delete-list ul{margin:6px 0 0;padding-left:17px;font-size:9px;line-height:1.8;color:#626d7a}
