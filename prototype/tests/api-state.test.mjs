@@ -3,11 +3,25 @@ import test from 'node:test'
 
 import {
   analysisBlocks,
+  extractReportMetrics,
   normalizeFeed,
   normalizeHistory,
   normalizePrompts,
   normalizeProviders,
 } from '../src/api/state.js'
+
+test('report metrics footer is removed from markdown and parsed for runtime display', () => {
+  const parsed = extractReportMetrics('# 报告\n\n正文。\n\n---\n\n<!-- audio-memory-report-metrics -->\n> 本次报告：4449 字｜定向修改增益：63 → 100（+37）；')
+
+  assert.equal(parsed.markdown, '# 报告\n\n正文。')
+  assert.deepEqual(parsed.metrics, {
+    characterCount: 4449,
+    initialScore: 63,
+    finalScore: 100,
+    gain: 37,
+    revised: true,
+  })
+})
 
 test('markdown report parser preserves verified image blocks', () => {
   const blocks = analysisBlocks('![产品示意图](https://images.example.com/product.png)')
@@ -130,7 +144,7 @@ test('single markdown report stays one card with runtime metrics', () => {
     payload: {
       scene_id: 'analysis',
       cards: [{ title: '你今天的综合报告', summary: '工作与家庭是主线。', evidence_segment_ids: ['s1'], external_source_ids: [] }],
-      reportMarkdown: '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。',
+      reportMarkdown: '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。\n\n---\n\n<!-- audio-memory-report-metrics -->\n> 本次报告：4449 字｜定向修改增益：63 → 100（+37）；',
       reportQuality: { report_version: 'v2', audit_status: 'completed', quality_score: 88 },
       runtimeMetrics: { model_call_count: 8, input_tokens: 1000, output_tokens: 500, web_search_performed: false },
     }, qa: [],
@@ -139,6 +153,14 @@ test('single markdown report stays one card with runtime metrics', () => {
   const [card] = normalized.feed[0].cards
   assert.equal(normalized.feed[0].cards.length, 1)
   assert.match(card.reportMarkdown, /^# 你今天的综合报告/)
+  assert.doesNotMatch(card.reportMarkdown, /audio-memory-report-metrics|本次报告/)
+  assert.deepEqual(card.reportMetrics, {
+    characterCount: 4449,
+    initialScore: 63,
+    finalScore: 100,
+    gain: 37,
+    revised: true,
+  })
   assert.equal(card.runtimeMetrics.model_call_count, 8)
   assert.equal(card.reportQuality.quality_score, 88)
   assert.deepEqual(card.detailSections, [])

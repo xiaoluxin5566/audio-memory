@@ -93,7 +93,9 @@ test('single report renders structured markdown and runtime metrics without old 
   assert.doesNotMatch(appSource, /自主分析、隐藏画像与发布/);
   assert.match(appSource, /block\.kind === 'image'/);
   assert.match(appSource, /className="report-image"/);
-  assert.match(detail, /<RuntimeMetrics metrics=\{card\.runtimeMetrics\}/);
+  assert.match(detail, /<RuntimeMetrics metrics=\{card\.runtimeMetrics\} reportMetrics=\{card\.reportMetrics\}/);
+  assert.match(appSource, /<th>本次报告<\/th>/);
+  assert.match(appSource, /<th>定向修改增益<\/th>/);
   const markdownRenderer = appSource.slice(
     appSource.indexOf('function MarkdownReport'),
     appSource.indexOf('function RuntimeMetrics'),

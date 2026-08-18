@@ -19,6 +19,28 @@ function normalizeReportAnnotations(value) {
 }
 
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI', glm: 'GLM' }
+const REPORT_METRICS_MARKER = '<!-- audio-memory-report-metrics -->'
+
+export function extractReportMetrics(markdown = '') {
+  const source = typeof markdown === 'string' ? markdown : ''
+  const markerIndex = source.indexOf(REPORT_METRICS_MARKER)
+  if (markerIndex < 0) return { markdown: source, metrics: null }
+
+  const footer = source.slice(markerIndex + REPORT_METRICS_MARKER.length)
+  const characterCount = Number(/本次报告：(\d+)\s*字/.exec(footer)?.[1])
+  const revision = /定向修改增益：(\d+)\s*→\s*(\d+)（([+-]?\d+)）/.exec(footer)
+  const initialAudit = /首次全量审核：(\d+)\s*分/.exec(footer)
+  const metrics = {
+    characterCount: Number.isFinite(characterCount) ? characterCount : null,
+    initialScore: revision ? Number(revision[1]) : null,
+    finalScore: revision ? Number(revision[2]) : (initialAudit ? Number(initialAudit[1]) : null),
+    gain: revision ? Number(revision[3]) : null,
+    revised: Boolean(revision),
+  }
+  const body = source.slice(0, markerIndex).replace(/\n\s*(?:-{3,}|\*{3,}|_{3,})\s*$/, '').trimEnd()
+  return { markdown: body, metrics }
+}
+
 const SCENE_LABELS = {
   analysis: 'AI 深度分析',
   meeting: '会议纪要',
@@ -371,6 +393,7 @@ function normalizeStrictCards(item, batch) {
     const shell = source.card ?? {}
     const detail = source.detail ?? {}
     const [autonomousMeta, autonomousSections] = item.scene_id === 'analysis' ? autonomousPresentation(source) : [{}, []]
+    const report = extractReportMetrics(payload.reportMarkdown)
     return {
       id: `${item.id}:${index}`,
       apiId: item.id,
@@ -384,7 +407,8 @@ function normalizeStrictCards(item, batch) {
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',
       detailSections: payload.reportMarkdown ? [] : (item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail)),
-      reportMarkdown: typeof payload.reportMarkdown === 'string' ? payload.reportMarkdown : '',
+      reportMarkdown: report.markdown,
+      reportMetrics: report.metrics,
       reportDocument: normalizeReportDocument(payload.reportDocument),
       reportAnnotations: normalizeReportAnnotations(payload.reportAnnotations),
       reportQuality: payload.reportQuality && typeof payload.reportQuality === 'object' ? payload.reportQuality : null,
