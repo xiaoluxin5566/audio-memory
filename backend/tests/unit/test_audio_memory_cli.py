@@ -51,6 +51,9 @@ def test_launch_agent_is_user_scoped_and_loopback_only() -> None:
     assert "com.audio-memory.local" in template
     assert "AUDIO_MEMORY_NO_OPEN" in template
     assert "AUDIO_MEMORY_PORT" in template
+    assert "<key>HOME</key>" in template
+    assert "__HOME__" in template
+    assert 'replace("__HOME__", home)' in cli
     assert "127.0.0.1" in cli
     assert "launchctl bootstrap" in cli
     assert "launchctl bootout" in cli

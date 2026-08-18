@@ -11,6 +11,8 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
     <key>AUDIO_MEMORY_NO_OPEN</key>
     <string>1</string>
     <key>AUDIO_MEMORY_PORT</key>

@@ -27,15 +27,16 @@ healthy() {
 render_launch_agent() {
   mkdir -p "$HOME/Library/LaunchAgents" "$DATA_ROOT/runtime"
   chmod 700 "$DATA_ROOT" "$DATA_ROOT/runtime" 2>/dev/null || true
-  /usr/bin/python3 - "$CURRENT_ROOT/scripts/com.audio-memory.local.plist.template" "$PLIST" "$CURRENT_ROOT" "$DATA_ROOT" "$PORT" <<'PY'
+  /usr/bin/python3 - "$CURRENT_ROOT/scripts/com.audio-memory.local.plist.template" "$PLIST" "$CURRENT_ROOT" "$DATA_ROOT" "$PORT" "$HOME" <<'PY'
 from pathlib import Path
 import sys
 
-template, destination, current_root, data_root, port = sys.argv[1:]
+template, destination, current_root, data_root, port, home = sys.argv[1:]
 content = Path(template).read_text(encoding="utf-8")
 content = content.replace("__CURRENT_ROOT__", current_root)
 content = content.replace("__DATA_ROOT__", data_root)
 content = content.replace("__PORT__", port)
+content = content.replace("__HOME__", home)
 target = Path(destination)
 temporary = target.with_suffix(".tmp")
 temporary.write_text(content, encoding="utf-8")
