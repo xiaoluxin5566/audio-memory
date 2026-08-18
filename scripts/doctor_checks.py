@@ -31,7 +31,7 @@ DIARIZATION_HASHES = {
 DIARIZATION_SIZES = {
     "10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e": 1540514,
 }
-EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 13)]
+EXPECTED_REVISIONS = [f"{number:04d}" for number in range(1, 15)]
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -176,11 +176,12 @@ def check_database(database: Path) -> bool:
             "external_sources_json",
         },
         "reanalysis_items": {"analysis_version_id", "status", "completed_at"},
+        "app_settings": {"key", "value_json", "updated_at"},
     }
     try:
         with _connect(database) as connection:
             revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
-            return revisions == [("0012",)] and all(
+            return revisions == [("0014",)] and all(
                 columns.issubset(_columns(connection, table))
                 for table, columns in required.items()
             )

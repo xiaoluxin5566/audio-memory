@@ -657,7 +657,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     database = app_data / "audio-memory.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE alembic_version (version_num TEXT NOT NULL)")
-        connection.execute("INSERT INTO alembic_version VALUES ('0012')")
+        connection.execute("INSERT INTO alembic_version VALUES ('0014')")
         connection.execute(
             "CREATE TABLE reanalysis_batches (id TEXT, status TEXT NOT NULL)"
         )
@@ -667,6 +667,9 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
         )
         connection.execute(
             "CREATE TABLE reanalysis_items (analysis_version_id TEXT, status TEXT, completed_at TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE app_settings (key TEXT, value_json TEXT, updated_at TEXT)"
         )
 
     result = subprocess.run(
@@ -688,7 +691,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     assert "✓ 分析迁移链" in result.stdout
     assert "✓ 历史重分析恢复" in result.stdout
     assert "✓ 本地会话安全" in result.stdout
-    assert "✓ 本地数据库已迁移至 0012" in result.stdout
+    assert "✓ 本地数据库已迁移至 0014" in result.stdout
     assert "✓ 历史重分析状态已恢复" in result.stdout
     vad_path = app_data / "models/diarization/silero_vad.onnx"
     trusted_vad = vad_path.read_bytes()
@@ -754,7 +757,7 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert "✗ 本地数据库已迁移至 0012" in stale.stdout
+    assert "✗ 本地数据库已迁移至 0014" in stale.stdout
     assert "✗ 历史重分析状态已恢复" in stale.stdout
     assert stale.returncode == 1
 
