@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass, fields, replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -503,6 +504,235 @@ class FeatureService:
         return (self.repository.repository_root / record.worktree).resolve()
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseFeature:
+    feature_id: str
+    tested_commit: str
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ReleaseFeature:
+        if not isinstance(payload, dict) or set(payload) != {
+            "feature_id", "tested_commit"
+        }:
+            raise GovernanceError("候选清单功能项无效。")
+        FeatureRecord._validate_feature_id(payload["feature_id"])
+        commit = payload["tested_commit"]
+        if not isinstance(commit, str) or not FeatureRecord._SHA.fullmatch(commit):
+            raise GovernanceError("候选清单提交无效。")
+        return cls(payload["feature_id"], commit)
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseManifest:
+    schema_version: int
+    target_version: str
+    main_commit: str
+    features: tuple[ReleaseFeature, ...]
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ReleaseManifest:
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version", "target_version", "main_commit", "features"
+        }:
+            raise GovernanceError("候选清单字段无效。")
+        version = payload["target_version"]
+        main_commit = payload["main_commit"]
+        raw_features = payload["features"]
+        if (
+            payload["schema_version"] != 1
+            or not isinstance(version, str)
+            or not FeatureRecord._VERSION.fullmatch(version)
+            or not isinstance(main_commit, str)
+            or not FeatureRecord._SHA.fullmatch(main_commit)
+            or not isinstance(raw_features, list)
+            or not raw_features
+        ):
+            raise GovernanceError("候选清单内容无效。")
+        features = tuple(ReleaseFeature.from_dict(item) for item in raw_features)
+        if len({item.feature_id for item in features}) != len(features):
+            raise GovernanceError("候选清单不能包含重复功能。")
+        return cls(1, version, main_commit, features)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "target_version": self.target_version,
+            "main_commit": self.main_commit,
+            "features": [item.to_dict() for item in self.features],
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    def digest(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationResult:
+    merged: tuple[str, ...]
+    failed: str | None
+    main_commit: str
+
+
+class ReleaseStore:
+    def __init__(self, common_dir: Path) -> None:
+        self.root = common_dir.resolve() / "audio-memory-governance"
+        self.releases = self.root / "releases"
+
+    def manifest_path(self, version: str) -> Path:
+        if not FeatureRecord._VERSION.fullmatch(version):
+            raise GovernanceError("发布版本号无效。")
+        return self.releases / f"{version}-candidate.json"
+
+    def save_manifest(self, manifest: ReleaseManifest) -> Path:
+        path = self.manifest_path(manifest.target_version)
+        self._atomic_json(path, manifest.to_dict())
+        return path
+
+    def load_manifest(self, path: Path) -> ReleaseManifest:
+        resolved = path.resolve()
+        expected_parent = self.releases.resolve()
+        if resolved.parent != expected_parent or path.is_symlink():
+            raise GovernanceError("候选清单路径无效。")
+        FeatureStore._validate_regular_file(resolved)
+        try:
+            manifest = ReleaseManifest.from_dict(
+                json.loads(resolved.read_text(encoding="utf-8"))
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise GovernanceError("候选清单无法读取。") from exc
+        if resolved != self.manifest_path(manifest.target_version).resolve():
+            raise GovernanceError("候选清单文件名与版本不一致。")
+        return manifest
+
+    def save_receipt(self, manifest: ReleaseManifest, main_commit: str) -> Path:
+        path = self.releases / f"{manifest.target_version}-integrated.json"
+        self._atomic_json(path, {
+            "schema_version": 1,
+            "target_version": manifest.target_version,
+            "candidate_digest": manifest.digest(),
+            "main_commit": main_commit,
+            "features": [item.feature_id for item in manifest.features],
+        })
+        return path
+
+    def _atomic_json(self, path: Path, payload: object) -> None:
+        FeatureStore._validate_directory(self.root, create=True)
+        FeatureStore._validate_directory(self.releases, create=True)
+        if path.exists() or path.is_symlink():
+            FeatureStore._validate_regular_file(path)
+        body = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=self.releases)
+        temporary = Path(name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                descriptor = -1
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
+
+class ReleaseService:
+    def __init__(self, repository: GitRepository) -> None:
+        self.repository = repository
+        self.features = FeatureService(repository)
+        self.store = ReleaseStore(repository.common_dir)
+
+    def prepare(
+        self, version: str, feature_ids: list[str]
+    ) -> tuple[ReleaseManifest, Path]:
+        if self.repository.current_branch != "main" or not self.repository.is_clean:
+            raise GovernanceError("候选清单必须从干净的 main 生成。")
+        if not feature_ids or len(set(feature_ids)) != len(feature_ids):
+            raise GovernanceError("候选功能不能为空或重复。")
+        selected: list[ReleaseFeature] = []
+        for feature_id in feature_ids:
+            status = self.features.status(feature_id)[0]
+            record = status.record
+            if (
+                not status.valid
+                or record.status != "ready_to_merge"
+                or record.target_version != version
+                or record.head_commit != GitRepository(status.path).head_commit
+            ):
+                raise GovernanceError(f"功能 {feature_id} 尚未通过当前提交验收。")
+            selected.append(ReleaseFeature(feature_id, record.head_commit))
+        manifest = ReleaseManifest(1, version, self.repository.head_commit, tuple(selected))
+        return manifest, self.store.save_manifest(manifest)
+
+    def integrate(
+        self,
+        manifest_path: Path,
+        approval_token: str | None,
+        gate_runner: Callable[[str, Path], bool],
+    ) -> IntegrationResult:
+        manifest = self.store.load_manifest(manifest_path)
+        if approval_token is None or approval_token != manifest.digest():
+            raise GovernanceError("候选清单未获得精确合并确认。")
+        if (
+            self.repository.current_branch != "main"
+            or not self.repository.is_clean
+            or self.repository.head_commit != manifest.main_commit
+        ):
+            raise GovernanceError("main 已变更或不干净，请重新生成候选清单。")
+        for item in manifest.features:
+            status = self.features.status(item.feature_id)[0]
+            if (
+                not status.valid
+                or status.record.status != "ready_to_merge"
+                or status.record.head_commit != item.tested_commit
+                or GitRepository(status.path).head_commit != item.tested_commit
+            ):
+                raise GovernanceError(f"功能 {item.feature_id} 的验收证据已过期。")
+
+        merged: list[str] = []
+        for item in manifest.features:
+            before = self.repository.head_commit
+            merge = self.repository._run(
+                "merge", "--no-ff", "--no-edit", item.tested_commit
+            )
+            if merge.returncode != 0:
+                self.repository._run("merge", "--abort")
+                self._invalidate(item.feature_id, "合并冲突，需要修复")
+                return IntegrationResult(tuple(merged), item.feature_id, self.repository.head_commit)
+            if not gate_runner(item.feature_id, self.repository.top_level):
+                self.repository._git("reset", "--hard", before)
+                self._invalidate(item.feature_id, "集成验收失败，需要修复")
+                return IntegrationResult(tuple(merged), item.feature_id, self.repository.head_commit)
+            record = self.features.store.load(item.feature_id)
+            self.features.store.save(replace(
+                record,
+                status="merged",
+                current_step="已合并至 main，等待发布",
+                merge_approved=True,
+            ))
+            merged.append(item.feature_id)
+        self.store.save_receipt(manifest, self.repository.head_commit)
+        return IntegrationResult(tuple(merged), None, self.repository.head_commit)
+
+    def _invalidate(self, feature_id: str, step: str) -> None:
+        record = self.features.store.load(feature_id)
+        self.features.store.save(replace(
+            record,
+            status="in_progress",
+            current_step=step,
+            passed_checks=(),
+            merge_approved=False,
+        ))
+
+
 def _repository_from_current_directory() -> GitRepository:
     return GitRepository(Path.cwd())
 
@@ -519,6 +749,12 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("feature_id", nargs="?")
     finish_parser = subparsers.add_parser("finish")
     finish_parser.add_argument("feature_id")
+    prepare_parser = subparsers.add_parser("release-prepare")
+    prepare_parser.add_argument("version")
+    prepare_parser.add_argument("feature_ids", nargs="+")
+    integrate_parser = subparsers.add_parser("release-integrate")
+    integrate_parser.add_argument("manifest", type=Path)
+    integrate_parser.add_argument("--approve", required=True)
     arguments = parser.parse_args(argv)
     try:
         service = FeatureService(_repository_from_current_directory())
@@ -565,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 for item in statuses
             ], ensure_ascii=False))
-        else:
+        elif arguments.command == "finish":
             controller_root = Path(__file__).resolve().parent.parent
             gate = controller_root / "scripts/quality-gate.sh"
 
@@ -594,6 +830,36 @@ def main(argv: list[str] | None = None) -> int:
                 "tested_commit": finished.record.head_commit,
                 "passed_checks": list(finished.record.passed_checks),
             }, ensure_ascii=False))
+        elif arguments.command == "release-prepare":
+            release = ReleaseService(service.repository)
+            manifest, path = release.prepare(
+                arguments.version, arguments.feature_ids
+            )
+            print(json.dumps({
+                "manifest": str(path),
+                "candidate_digest": manifest.digest(),
+                "main_commit": manifest.main_commit,
+                "features": [item.to_dict() for item in manifest.features],
+            }, ensure_ascii=False))
+        else:
+            controller_root = Path(__file__).resolve().parent.parent
+            gate = controller_root / "scripts/quality-gate.sh"
+
+            def integration_gate(_: str, checkout: Path) -> bool:
+                environment = dict(os.environ)
+                environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
+                return subprocess.run(
+                    [str(gate)], cwd=checkout, env=environment, check=False
+                ).returncode == 0
+
+            result = ReleaseService(service.repository).integrate(
+                arguments.manifest, arguments.approve, integration_gate
+            )
+            print(json.dumps({
+                "merged": list(result.merged),
+                "failed": result.failed,
+                "main_commit": result.main_commit,
+            }, ensure_ascii=False))
         return 0
     except GovernanceError as exc:
         print(f"功能轨道操作失败：{exc}", file=sys.stderr)
@@ -607,6 +873,11 @@ __all__ = [
     "FeatureStore",
     "GitRepository",
     "GovernanceError",
+    "IntegrationResult",
+    "ReleaseFeature",
+    "ReleaseManifest",
+    "ReleaseService",
+    "ReleaseStore",
 ]
 
 

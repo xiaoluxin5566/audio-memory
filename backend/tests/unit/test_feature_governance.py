@@ -22,6 +22,7 @@ from feature_governance import (  # noqa: E402
     FeatureStore,
     GitRepository,
     GovernanceError,
+    ReleaseService,
 )
 
 
@@ -361,3 +362,108 @@ def test_new_commit_invalidates_ready_evidence(git_repository: Path) -> None:
     assert status.record.status == "in_progress"
     assert status.record.passed_checks == ()
     assert service.store.load("search").status == "ready_to_merge"
+
+
+def ready_feature(root: Path, feature_id: str) -> str:
+    service = FeatureService(GitRepository(root))
+    started = service.start(feature_id, "v0.1.0-beta.3")
+    (started.path / f"{feature_id}.txt").write_text(feature_id, encoding="utf-8")
+    git(started.path, "add", f"{feature_id}.txt")
+    git(started.path, "commit", "-m", f"add {feature_id}")
+    return service.finish(
+        feature_id, lambda _: FeatureRecord.REQUIRED_CHECKS
+    ).record.head_commit
+
+
+def test_prepare_lists_only_selected_ready_commits(git_repository: Path) -> None:
+    one_sha = ready_feature(git_repository, "one")
+    FeatureService(GitRepository(git_repository)).start(
+        "two", "v0.1.0-beta.3"
+    )
+    release = ReleaseService(GitRepository(git_repository))
+
+    manifest, path = release.prepare("v0.1.0-beta.3", ["one"])
+
+    assert [(item.feature_id, item.tested_commit) for item in manifest.features] == [
+        ("one", one_sha)
+    ]
+    assert path.is_file()
+    with pytest.raises(GovernanceError, match="尚未通过"):
+        release.prepare("v0.1.0-beta.3", ["two"])
+
+
+def test_integrate_without_exact_approval_does_not_change_main(
+    git_repository: Path,
+) -> None:
+    ready_feature(git_repository, "one")
+    release = ReleaseService(GitRepository(git_repository))
+    _, path = release.prepare("v0.1.0-beta.3", ["one"])
+    before = git(git_repository, "rev-parse", "main")
+
+    with pytest.raises(GovernanceError, match="确认"):
+        release.integrate(path, approval_token=None, gate_runner=lambda *_: True)
+
+    assert git(git_repository, "rev-parse", "main") == before
+
+
+def test_integration_stops_at_first_failed_feature(git_repository: Path) -> None:
+    for feature_id in ("one", "two", "three"):
+        ready_feature(git_repository, feature_id)
+    release = ReleaseService(GitRepository(git_repository))
+    manifest, path = release.prepare(
+        "v0.1.0-beta.3", ["one", "two", "three"]
+    )
+
+    result = release.integrate(
+        path,
+        approval_token=manifest.digest(),
+        gate_runner=lambda feature_id, _: feature_id != "two",
+    )
+
+    assert result.merged == ("one",)
+    assert result.failed == "two"
+    assert (git_repository / "one.txt").is_file()
+    assert not (git_repository / "two.txt").exists()
+    assert not (git_repository / "three.txt").exists()
+    store = FeatureService(GitRepository(git_repository)).store
+    assert store.load("one").status == "merged"
+    assert store.load("two").status == "in_progress"
+    assert store.load("three").status == "ready_to_merge"
+
+
+def test_integrate_refuses_stale_main_before_merging(git_repository: Path) -> None:
+    ready_feature(git_repository, "one")
+    release = ReleaseService(GitRepository(git_repository))
+    manifest, path = release.prepare("v0.1.0-beta.3", ["one"])
+    (git_repository / "main-change.txt").write_text("later", encoding="utf-8")
+    git(git_repository, "add", "main-change.txt")
+    git(git_repository, "commit", "-m", "advance main")
+    before = git(git_repository, "rev-parse", "HEAD")
+
+    with pytest.raises(GovernanceError, match="main 已变更"):
+        release.integrate(path, manifest.digest(), lambda *_: True)
+
+    assert git(git_repository, "rev-parse", "HEAD") == before
+    assert not (git_repository / "one.txt").exists()
+
+
+def test_integration_aborts_conflict_and_keeps_prior_success(
+    git_repository: Path,
+) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    for feature_id, content in (("one", "from one\n"), ("two", "from two\n")):
+        started = service.start(feature_id, "v0.1.0-beta.3")
+        (started.path / "README.md").write_text(content, encoding="utf-8")
+        git(started.path, "add", "README.md")
+        git(started.path, "commit", "-m", f"change readme in {feature_id}")
+        service.finish(feature_id, lambda _: FeatureRecord.REQUIRED_CHECKS)
+    release = ReleaseService(GitRepository(git_repository))
+    manifest, path = release.prepare("v0.1.0-beta.3", ["one", "two"])
+
+    result = release.integrate(path, manifest.digest(), lambda *_: True)
+
+    assert result.merged == ("one",)
+    assert result.failed == "two"
+    assert (git_repository / "README.md").read_text(encoding="utf-8") == "from one\n"
+    assert git(git_repository, "status", "--porcelain") == ""
+    assert service.store.load("two").status == "in_progress"
