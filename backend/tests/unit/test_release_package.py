@@ -1,32 +1,77 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
-import hashlib
 import shutil
 import subprocess
 import tarfile
-from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-BUILDER = PROJECT_ROOT / "scripts" / "build-release.sh"
+RELEASE_SCRIPTS = (
+    "audio-memory",
+    "backup_data.py",
+    "build-release.sh",
+    "com.audio-memory.local.plist.template",
+    "doctor.sh",
+    "doctor_checks.py",
+    "install-release.sh",
+    "install.sh",
+    "runtime_config.py",
+    "start.sh",
+)
 
 
-def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
-    contamination = (
-        PROJECT_ROOT
-        / "prototype"
-        / "dist"
-        / "client"
-        / f".release-exclusion-fixture-{uuid4()}"
+def make_isolated_release_checkout(tmp_path: Path) -> Path:
+    """Create every release input in tmp_path, including a synthetic frontend build."""
+    checkout = tmp_path / "clean-checkout"
+    checkout.mkdir()
+    for name in ("VERSION", "README.md", "CHANGELOG.md", "PRIVACY.md"):
+        shutil.copy2(PROJECT_ROOT / name, checkout / name)
+    for relative in (
+        Path("backend/pyproject.toml"),
+        Path("backend/uv.lock"),
+        Path("backend/alembic.ini"),
+    ):
+        destination = checkout / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROJECT_ROOT / relative, destination)
+    shutil.copytree(
+        PROJECT_ROOT / "backend/src",
+        checkout / "backend/src",
+        symlinks=True,
     )
+    shutil.copytree(
+        PROJECT_ROOT / "backend/migrations",
+        checkout / "backend/migrations",
+        symlinks=True,
+    )
+    scripts = checkout / "scripts"
+    scripts.mkdir()
+    for name in RELEASE_SCRIPTS:
+        shutil.copy2(PROJECT_ROOT / "scripts" / name, scripts / name)
+    client = checkout / "prototype/dist/client"
+    client.mkdir(parents=True)
+    (client / "index.html").write_text(
+        "<!doctype html><title>isolated release fixture</title>\n",
+        encoding="utf-8",
+    )
+    (client / "app.js").write_text("console.log('fixture');\n", encoding="utf-8")
+    return checkout
+
+
+def test_release_archive_uses_case_insensitive_runtime_whitelist(
+    tmp_path: Path,
+) -> None:
+    checkout = make_isolated_release_checkout(tmp_path)
+    contamination = checkout / "prototype/dist/client/release-exclusion-fixture"
     dependency_target = tmp_path / "local-dependency"
     dependency_target.mkdir()
-    contamination.mkdir()
     fixture_files = (
-        ".runtime/state.json",
+        ".RUNTIME/state.json",
         ".env.production",
+        ".EnV.Secrets/secret.txt",
         "state.sqlite3",
         "state.sqlite3-wal",
         "state.sqlite3-shm",
@@ -38,52 +83,58 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
         "server.log",
         "UPPER-SERVER.LOG",
         "server.log.1",
-        "models/weights.onnx",
-        "node_modules/package/index.js",
-        ".uv-cache/package/artifact",
-        ".pytest_cache/state.json",
-        ".mypy_cache/state.json",
-        ".ruff_cache/state.json",
-        "fixture.egg-info/PKG-INFO",
-        "tests/fixture.json",
-        "outputs/report.json",
-        "build/temporary.bin",
-        "__pycache__/cache.pyc",
+        "MoDeLs/weights.onnx",
+        "Node_Modules/package/index.js",
+        ".UV-CACHE/package/artifact",
+        ".PyTeSt_CaChE/state.json",
+        ".MYPY_CACHE/state.json",
+        ".RuFf_CaChE/state.json",
+        "Fixture.EGG-INFO/PKG-INFO",
+        "TeStS/fixture.json",
+        "OuTpUtS/report.json",
+        "ScReEnShOtS/screenshot.png",
+        "DeSiGnS/mockup.png",
+        "BuIlD/temporary.bin",
+        "AuDiO/recording.raw",
+        "__PyCaChE__/cache.pyc",
+        ".VeNv/dependency.py",
+        ".GiT/config",
     )
     for relative_path in fixture_files:
         path = contamination / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("must not ship\n", encoding="utf-8")
     (contamination / "linked-dependency").symlink_to(
-        dependency_target, target_is_directory=True
+        dependency_target,
+        target_is_directory=True,
     )
 
-    try:
-        result = subprocess.run(
-            ["bash", str(BUILDER)],
-            cwd=PROJECT_ROOT,
-            env={
-                **os.environ,
-                "AUDIO_MEMORY_RELEASE_DIST": str(tmp_path),
-                "AUDIO_MEMORY_ALLOW_DIRTY_RELEASE": "1",
-                "AUDIO_MEMORY_SKIP_RELEASE_BUILD": "1",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        shutil.rmtree(contamination)
+    result = subprocess.run(
+        ["bash", str(checkout / "scripts/build-release.sh")],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "AUDIO_MEMORY_RELEASE_DIST": str(tmp_path / "release-output"),
+            "AUDIO_MEMORY_ALLOW_DIRTY_RELEASE": "1",
+            "AUDIO_MEMORY_SKIP_RELEASE_BUILD": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    archive = tmp_path / "audio-memory-v0.1.0-beta.1-macos-arm64.tar.gz"
+    version = (checkout / "VERSION").read_text(encoding="utf-8").strip()
+    archive = (
+        tmp_path / "release-output" / f"audio-memory-v{version}-macos-arm64.tar.gz"
+    )
     checksum = archive.with_suffix(archive.suffix + ".sha256")
     assert archive.is_file()
     assert checksum.is_file()
     with tarfile.open(archive) as handle:
         members = handle.getmembers()
         names = {member.name for member in members}
-    prefix = "audio-memory-v0.1.0-beta.1"
+    prefix = f"audio-memory-v{version}"
     required = {
         f"{prefix}/VERSION",
         f"{prefix}/backend/pyproject.toml",
@@ -121,14 +172,17 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
         ".env",
         "__pycache__",
     }
-    assert not any(forbidden_parts & set(Path(name).parts) for name in names)
     assert not any(
-        part.endswith(".egg-info")
+        forbidden_parts & {part.casefold() for part in Path(name).parts}
+        for name in names
+    )
+    assert not any(
+        part.casefold().endswith(".egg-info")
         for name in names
         for part in Path(name).parts
     )
     assert not any(
-        Path(name).name.startswith(".env")
+        Path(name).name.casefold().startswith(".env")
         or name.casefold().endswith(
             (
                 ".pyc",

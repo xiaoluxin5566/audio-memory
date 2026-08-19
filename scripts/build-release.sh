@@ -55,23 +55,24 @@ for script in \
   cp "$PROJECT_ROOT/scripts/$script" "$STAGING/scripts/$script"
 done
 find "$STAGING" -type d \( \
-  -name .git -o \
-  -name .venv -o \
-  -name .runtime -o \
-  -name .uv-cache -o \
-  -name .pytest_cache -o \
-  -name .mypy_cache -o \
-  -name .ruff_cache -o \
-  -name '*.egg-info' -o \
-  -name node_modules -o \
-  -name tests -o \
-  -name outputs -o \
-  -name screenshots -o \
-  -name designs -o \
-  -name models -o \
-  -name audio -o \
-  -name build -o \
-  -name __pycache__ \
+  -iname .git -o \
+  -iname .venv -o \
+  -iname .runtime -o \
+  -iname .uv-cache -o \
+  -iname .pytest_cache -o \
+  -iname .mypy_cache -o \
+  -iname .ruff_cache -o \
+  -iname '.env*' -o \
+  -iname '*.egg-info' -o \
+  -iname node_modules -o \
+  -iname tests -o \
+  -iname outputs -o \
+  -iname screenshots -o \
+  -iname designs -o \
+  -iname models -o \
+  -iname audio -o \
+  -iname build -o \
+  -iname __pycache__ \
 \) -prune -exec rm -rf {} +
 find "$STAGING" -type f \( \
   -iname '.env*' -o \

@@ -5,74 +5,76 @@
 候选分支：`codex/dev-prod-isolation`
 
 Task 7 起点：`6f996b6 fix: revalidate development runtime before writes`
+
 发布基线：`0f7df7e` / `v0.1.0-beta.1`
 
 ## 结论
 
-候选实现满足设计中的运行配置、可写数据、Keychain service、健康身份、开发写入、共享模型只读、安装历史保留和发布归档隔离要求。所有运行验收都使用临时 HOME、临时数据根、假 Security client 和随机回环监听端口；未读取或改写用户真实正式数据库、Keychain、LaunchAgent、运行服务、音频、provider、远端 Git、标签或 Release。
+候选实现满足运行配置、可写数据、Keychain service、健康身份、开发写入、共享模型只读、安装历史保留和发布归档隔离要求。所有运行验收都使用临时 HOME、临时数据根、假 Security client、可观测且 fail-closed 的假 provider client，以及随机回环监听端口。
 
-`v0.1.0-beta.1` 仍然只是既有发布基线。本次没有合并、推送、打标签或发布 `v0.1.0-beta.2`，等待用户明确决定。
+本次没有读取或改写用户真实正式数据库、Keychain、LaunchAgent、运行服务、音频、provider、远端 Git、标签或 Release，也没有执行 merge、push、tag 或发布。
 
-## TDD 与自动化证据
+## TDD 证据
 
-### 运行隔离集成
+### Task 7 原始红绿轮次
 
-新增 `backend/tests/integration/test_runtime_isolation.py` 后首次运行：
+发布归档和安装器验收先得到 `2 failed, 6 passed in 2.80s`，分别证明原归档会带入伪造的运行数据/依赖/构建产物，且原安装器会接受缺少 `doctor_checks.py` 的包。最小修复后是 `8 passed in 2.12s`。
 
-```text
-PYTHONPATH="$PWD/src" .venv/bin/pytest tests/integration/test_runtime_isolation.py -q
-1 passed in 0.79s
-```
+### 审查修正轮次
 
-这项验收在 Tasks 1–6 的实现上直接通过，因此没有制造虚假的运行时 RED，也没有扩大后端改动。测试创建 production/development 两个 `RuntimeConfig` 和应用实例，枚举所有可写路径，分别核对健康 profile，执行开发数据库、设置、staging、本地会话、反馈和音频目录写入，并比较正式夹具整棵文件树、数据库 SHA-256/行数及共享模型哨兵。
-
-### 发布与安装 RED
-
-先扩展发布归档和安装器测试，再运行：
+先将归档污染夹具改为大写/混合大小写目录，并将归档成员的每个路径组件 `casefold()` 后审查。旧 `find -name` 规则准确失败：
 
 ```text
-PYTHONPATH="$PWD/src" .venv/bin/pytest \
-  tests/unit/test_release_package.py \
-  tests/unit/test_release_installer.py \
-  tests/unit/test_backup_data.py -q
-2 failed, 6 passed in 2.80s
+1 failed in 0.50s
 ```
 
-两个预期失败分别证明：
-
-1. 原归档会带入前端构建目录中伪造的 `.runtime`、`.env.production`、SQLite、音频、日志、models、tests、outputs、build、`__pycache__` 和本地依赖符号链接。
-2. 原安装器会接受缺少 `scripts/doctor_checks.py` 的不完整发布包，使已安装 Doctor 的运行依赖不完整。
-
-最小修复后：
+再给子进程夹具传入 provider 审计路径，要求每次应用启动必须生成可观测事件。旧夹具因 4 个审计文件全部为空而准确失败：
 
 ```text
-8 passed in 2.12s
+1 failed, 1 deselected in 3.74s
 ```
 
-修复仅清理发布暂存区中的禁带目录、禁带文件类型和符号链接，并把 `doctor_checks.py` 加入安装前强制清单。安装行为测试还证明默认数据库路径逐字符保持不变，并通过一个顺序感知的临时备份脚本证明备份发生在 `current` 切换之前；升级后历史行仍可读取。
-
-提交前自审继续扩展污染夹具，覆盖 SQLite `-wal/-shm/-journal`、常见音频扩展、滚动日志、`.uv-cache`/pytest/mypy/ruff 缓存、egg-info 和大写扩展；旧规则再次出现预期 RED：
+修复后，大小写归档、完整边界快照和子进程夹具组合为：
 
 ```text
-1 failed in 0.46s
+3 passed in 4.42s
 ```
 
-补齐大小写不敏感的禁带规则后，单项归档测试 `1 passed in 0.44s`，发布/安装/备份组合最终为 `8 passed in 3.58s`。
+提交前自审又加入混合大小写的 `.EnV.Secrets/secret.txt` 目录。当时只清理 `.env*` 普通文件的规则出现精确 RED（`1 failed in 0.42s`）；目录规则加入 `-iname '.env*'` 后单测为 `1 passed in 0.41s`。
 
-### 完整回归
-
-最终提交前完整回归结果记录在本文件的“最终复验”小节。前一轮完整基线结果为：
+发布/安装/备份/隔离的聚焦套件最终为：
 
 ```text
-backend: 1013 passed, 28 skipped in 38.33s
-prototype: 91 passed, 0 failed, 0 skipped
-Vite production build: 39 modules transformed, success
-bash -n scripts/*.sh: success
+10 passed in 7.30s
 ```
 
-28 项跳过均为已标注的 legacy Event Map compatibility-only 测试，不是本次新增跳过。受限沙箱首次拒绝 4 个 Node 回环监听测试（`listen EPERM`）；授予仅随机 loopback 监听后，同一完整前端命令 91/91 通过。没有功能失败或意外警告。
+## 完整临时边界证据
 
-## 双进程生命周期验收
+`complete_tree_snapshot()` 从测试临时根开始遍历，不跟随符号链接，对三类条目记录：
+
+- 目录：类型、mode 与 `mtime_ns`；
+- 普通文件：类型、mode、`mtime_ns`、size 与 SHA-256；
+- 符号链接：类型、mode、`mtime_ns` 与原始 link target。
+
+测试边界内额外放置一个文件和一个符号链接哨兵，证明快照确实包含不是普通文件的条目。开发 app 内实际执行设置修改、upload job 创建、本地 session 发放、反馈写入和开发音频哨兵写入。比较前后全部条目后，开发根之外的新增或改变集合精确为空。
+
+子进程顺序验收中，惟一位于开发根之外的差异是事先创建并明确白名单化的测试观测文件：
+
+```text
+test-controls/sequential-development-provider-events.jsonl
+```
+
+该文件只记录假 provider client 的创建/拦截事件，不是应用产品数据。除去这一个明示的测试控制件后，开发根外无新增或改变条目，正式数据根的完整快照也逐条相同。
+
+路径验收先解析 production/development 根及所有派生可写路径，显式断言两个根不相等、任一根都不是另一根的祖先，且两个解析后的可写集合不相交。开发根的 runtime lock、本地 session 数据库、主数据库、staging、prompts、feedback 和音频哨兵都被显式核对。
+
+## 可观测 provider 边界
+
+所有真实 app 夹具都在 lifespan 前替换 provider HTTP client。进程内夹具将 client 创建/调用事件收集到内存列表，production 和 development 各创建 5 个 fail-closed client，实测 provider 调用为 0。每个子进程则在 `create_app()` 前替换 `httpx.AsyncClient`，将工厂创建事件写入专用 JSONL；任何当前 provider 实际使用的 `post` 尝试（以及 `request/get/put/delete`）都会先写入 `provider_call` 事件，然后抛出 `ProviderNetworkBlocked`。因此边界既可观测，又 fail closed。
+
+本轮 4 次应用启动各记录 5 个 `client_created/fail_closed=true` 事件。`provider_calls` 由 4 个 JSONL 中 `event == "provider_call"` 的实际条数求和，测量结果为 `0`；该数值不是手写常量。
+
+## 双进程生命周期证据
 
 命令：
 
@@ -82,152 +84,96 @@ PYTHONPATH="$PWD/src" .venv/bin/pytest \
   -k sequential_and_simultaneous
 ```
 
-最终结果：`1 passed, 1 deselected in 3.94s`。
-
-为遵守“回环测试只能使用随机临时端口”，配置的逻辑 production/development 端口仍分别是 `8765`/`8766`，实际监听映射到本次临时端口 `53933`/`53934`。应用自身收到的 profile 和数据根仍来自真实 `RuntimeConfig`；只有监听端口通过 `create_app(local_port=...)` 的既有测试注入边界替换。
+结果：`1 passed, 1 deselected in 3.27s`。
 
 | 阶段 | production | development |
-|---|---|---|
-| 顺序启动 PID | `56494` | `56495` |
-| 顺序健康 profile | `production` | `development` |
-| 并行启动 PID | `56496` | `56497` |
-| 并行健康 profile | `production` | `development` |
-| 逻辑端口 | `8765` | `8766` |
-| 临时监听端口 | `53933` | `53934` |
+|---|---:|---:|
+| 顺序启动 PID | 30917 | 30918 |
+| 并行启动 PID | 30919 | 30920 |
+| 健康 profile | `production` | `development` |
+| 逻辑端口 | 8765 | 8766 |
+| 本轮随机回环端口 | 63778 | 63779 |
 
-本次 pytest 临时根：
-
-```text
-/private/var/folders/ys/89hz_yrn43xdbg0mh241_8tr0000gp/T/pytest-of-liujinxin/pytest-79/test_sequential_and_simultaneo0
-```
-
-子进程使用内嵌假 Security client；`read` 固定返回未配置，任何 `add`/`update` 都立即失败。记录为 `fake_keychain=true`、`provider_calls=0`。验收夹具没有真实 API Key，因此不会进入 provider 验证或分析调用。
-
-正式数据库在只启动/写入/停止 development 前后保持：
+正式夹具数据库在只启动、写入并停止 development 前后：
 
 ```text
-before SHA-256: 189c8091306ef07168b576e51ec1a2ea793a4b8f531f6d9e7e557a96fa3cd340
-after  SHA-256: 189c8091306ef07168b576e51ec1a2ea793a4b8f531f6d9e7e557a96fa3cd340
-before rows: 1
-after  rows: 1
+SHA-256 before: 2279e95541355776677ab998860c0a77d33c788ce45806933a7b9d6d9006e7cc
+SHA-256 after:  2279e95541355776677ab998860c0a77d33c788ce45806933a7b9d6d9006e7cc
+sentinel rows: 1 -> 1
 ```
 
-共享模型哨兵同样没有写入：
+共享模型哨兵在前后的 SHA-256 均为：
 
 ```text
-before SHA-256: 5065f4cd3a31c202b7bc97c6826b6cf43592ee8c3e1a25ad12328ebcc5cecca5
-after  SHA-256: 5065f4cd3a31c202b7bc97c6826b6cf43592ee8c3e1a25ad12328ebcc5cecca5
+5065f4cd3a31c202b7bc97c6826b6cf43592ee8c3e1a25ad12328ebcc5cecca5
 ```
 
-夹具进程先逐个启动/停止，再同时保持在线并重新查询两个健康端点。所有子进程都收到 TERM 并正常退出，没有使用进程名宽泛查杀，也没有检查或连接真实 8765/8766 服务。
+本轮 pytest 临时根为：
 
-## 可写路径矩阵
+```text
+/private/var/folders/ys/89hz_yrn43xdbg0mh241_8tr0000gp/T/pytest-of-liujinxin/pytest-120/test_sequential_and_simultaneo0
+```
 
-矩阵中的 `<temp-home>` 和 `<temp-project>` 都位于上述 pytest 临时根。集合测试使用绝对解析路径做 `isdisjoint`，并检查 development 产生的每个文件都位于 development 根内。
+子进程使用内嵌假 Security client；`read` 固定返回未配置，任何 `add`/`update` 立即失败。每个子进程只监听上表的随机 `127.0.0.1` 端口，没有检查或连接真实 8765/8766 服务。
 
-| 资源 | production fixture | development fixture | 交叉 |
-|---|---|---|---|
-| 数据根 | `<temp-home>/Library/Application Support/AudioMemory` | `<temp-project>/.runtime/dev` | 无 |
-| 数据库 | `.../AudioMemory/audio-memory.sqlite3` | `.../.runtime/dev/audio-memory.sqlite3` | 无 |
-| runtime | `.../AudioMemory/runtime` | `.../.runtime/dev/runtime` | 无 |
-| 实例锁 | `.../runtime/audio-memory.lock` | `.../runtime/audio-memory.lock` | 无 |
-| 本地会话库 | `.../runtime/local-web-security.sqlite3` | `.../runtime/local-web-security.sqlite3` | 无 |
-| 日志 | `.../runtime/audio-memory.log` | `.../runtime/audio-memory-dev.log` | 无 |
-| 开发 PID/启动锁 | 不适用 | `.../runtime/audio-memory-dev.pid` / `.start.lock` | 无 |
-| staging | `.../AudioMemory/staging` | `.../.runtime/dev/staging` | 无 |
-| audio | `.../AudioMemory/audio` | `.../.runtime/dev/audio` | 无 |
-| prompts | `.../AudioMemory/prompts` | `.../.runtime/dev/prompts` | 无 |
-| feedback | `.../AudioMemory/意见反馈` | `.../.runtime/dev/意见反馈` | 无 |
-| models | `.../AudioMemory/models`，可写 | 同一路径，只读共享 | 不属于 development 可写集合；哈希不变 |
+## 发布归档与安装历史
 
-实际文件清单分别只出现于 `home/Library/Application Support/AudioMemory/...` 和 `project/.runtime/dev/...`。production 的默认数据库路径仍精确为：
+发布测试不再使用或修改工作树中忽略的 `prototype/dist`。每次测试都在 `tmp_path/clean-checkout` 中复制发布必需的受控后端源码、迁移、元数据和脚本，并当场创建最小前端产物 `index.html`/`app.js`。归档输出也只写入该临时夹具。因此该测试可从干净 checkout 重现，不依赖忽略的本地构建产物，也不改写仓库构建输出。
+
+污染夹具包含 `.RUNTIME`、`.VeNv`、`.GiT`、`.EnV.Secrets`、`Node_Modules`、`.UV-CACHE`、`.PyTeSt_CaChE`、`.MYPY_CACHE`、`.RuFf_CaChE`、`Fixture.EGG-INFO`、`TeStS`、`OuTpUtS`、`ScReEnShOtS`、`DeSiGnS`、`MoDeLs`、`AuDiO`、`BuIlD`、`__PyCaChE__`，以及大写扩展的数据库/音频/日志、`.env` 和符号链接。实现使用 `find -iname` 对目录与文件都做大小写不敏感清理；测试再对归档中的每个路径组件 `casefold()` 后扫描。
+
+从临时隔离 checkout 生成的证据归档包含 191 个 tar 成员，其 SHA-256 和生成的 `.sha256` 文件一致：
+
+```text
+3bce3727f5aaf0f4cd155c82f583b7c85f3a627339704ab81f46f76fde36e339
+```
+
+归档保留 `main.py`、完整迁移链、最小前端产物，以及 `audio-memory`、`backup_data.py`、LaunchAgent 模板、`doctor.sh`、`doctor_checks.py`、`install-release.sh`、`install.sh`、`runtime_config.py`、`start.sh` 等安装/运行必需助手。
+
+安装器测试使用临时 HOME 的默认正式路径，先安装 beta.1 夹具、写入一条历史记录，再安装 beta.2 夹具。顺序感知的假备份脚本观察到备份时 `current` 仍指向 beta.1，之后才切到 beta.2，原数据库行继续可读。默认正式数据库路径逐字符保持：
 
 ```text
 <HOME>/Library/Application Support/AudioMemory/audio-memory.sqlite3
 ```
 
-## Release 白名单与安装历史
+## 界面证据与非阻断项
 
-独立临时归档（完成清单与哈希记录后已删除临时目录）：
+Task 7 原始验收已在临时 Vite 和随机回环假后端上确认小尺寸、低饱和度的“开发环境”徽标，以及 production profile mismatch 时隐藏可写主界面并显示阻断卡片。假后端写入计数为 0，没有打开真实安装。截图位于 `.gitignore` 覆盖的 `prototype/output/playwright/`。本次审查修正没有改动前端，因此没有重复打开浏览器。
 
-```text
-/private/tmp/audio-memory-task7-release.pJ3Uzn/audio-memory-v0.1.0-beta.1-macos-arm64.tar.gz
-entries: 192
-SHA-256: 6b9b4e4243702faa7eac47e8393621d19593823ec69af6e6b15ab027e447a765
-```
+已知非阻断项保持不变：
 
-确认包含：
-
-- `VERSION`、README/CHANGELOG/PRIVACY；
-- `backend/pyproject.toml`、`uv.lock`、`alembic.ini`、`src/audio_memory/main.py` 和完整迁移链（含 `0014_app_settings.py`）；
-- `prototype/dist/client/index.html` 与前端生产静态资源；
-- `audio-memory`、`backup_data.py`、LaunchAgent 模板、`doctor.sh`、`doctor_checks.py`、`install-release.sh`、`install.sh`、`runtime_config.py`、`start.sh`。
-
-确认排除：
-
-- `.git`、`.venv`、`.runtime`、`node_modules` 和任何符号链接；
-- `.env*`、SQLite/DB 的 WAL/SHM/journal 伴随文件、日志/滚动日志和缓存字节码；
-- MP3/AAC/M4A/WAV/FLAC/OGG/OPUS/WMA/CAF/AIFF（扩展大小写不敏感）、models、audio；
-- `.uv-cache`、pytest/mypy/ruff 缓存、egg-info、tests、outputs、screenshots、designs 和嵌套 build 目录。
-
-测试会在被复制的前端目录中主动放置每一种伪造污染物再构建归档，因此不是只对当前干净目录做名称扫描。安装器测试使用临时 HOME 的默认正式路径，先安装 beta.1 fixture、写入一条“历史报告”，再安装 beta.2 fixture；备份脚本观察到 `current` 仍指向 beta.1，之后才切到 beta.2，原数据库行继续可读。
-
-## 界面人工检查
-
-只打开临时 Vite `127.0.0.1:54151`，其后端是随机回环 `127.0.0.1:54150` 上的测试 app；安全数据库位于 `/private/tmp/audio-memory-task7-ui.PRCNCG/`。没有打开真实安装；截图落盘后临时服务和该 `/private/tmp` 目录均已关闭/删除。
-
-- development profile：顶部现有品牌区域旁显示小尺寸、低饱和描边的“开发环境”徽标。它持续可见、容易辨认，但不改变上传、Feed、历史或设置布局。
-- production profile mismatch：把同一个测试后端切换为 `production` 后重新加载，页面隐藏可写主界面，只显示“已停止本地写入 / 开发界面未连接到开发服务”的阻断卡片。测试后端写入计数保持 `0`。
-
-截图（均位于 `.gitignore` 已覆盖的 `prototype/output/`）：
-
-- `prototype/output/playwright/development/.playwright-cli/page-2026-08-19T05-33-52-022Z.png`
-- `prototype/output/playwright/profile-mismatch/.playwright-cli/page-2026-08-19T05-34-55-656Z.png`
-
-轻量测试后端只实现 health/session/effect，未实现完整 Feed/设置读取 API，因此开发页面控制台存在预期的 fixture 404；这不涉及真实服务，且不影响徽标/阻断态判断。完整前端自动化命令没有失败或警告。
-
-## 已知非阻断项
-
-1. 后端在同一地址从 development 被替换为 production 后，顶部仅展示用的缓存徽标不会自动刷新；任何 fetch 写入会重新检查 health，XHR 每次 send（含重试）也走新鲜 guard。人工验收通过重新加载确认阻断态。该问题只影响替换后的显示即时性，不会放行写入。
-2. 已检入的“后端替换后再次写入”测试覆盖 fetch；没有单独的 XHR 替换场景测试。现有 XHR 重试测试和共享的新鲜 guard 覆盖每次 send，代码审查未发现绕过路径。保留为后续增强，不作为本次隔离发布阻断项。
-
-## 安全边界确认
-
-- 未读取、哈希、迁移、复制或改写用户真实 `~/Library/Application Support/AudioMemory`。
-- 未读取或写入真实 Keychain；所有应用启动均注入假 Security client。
-- 未调用 provider，未使用真实音频；应用验收流量只访问随机 loopback 夹具。
-- 未加载、创建或停止真实 LaunchAgent，未检查或连接真实运行服务。
-- 未执行 merge、push、tag、GitHub Release 或任何远端 Git 操作。
-- 当前隔离工作树没有本地 `v0.1.0-beta.1` tag ref；本 Task 未执行任何 tag 或远端命令，因此没有创建、删除或改写该标签，也没有修改 Release。临时归档只写入 `/private/tmp`。
+1. 同一地址的后端被替换后，仅用于展示的缓存徽标不会自动刷新；每次 fetch 写入和每次 XHR send 都会重新检查 health，因此不会放行写入。
+2. 已检入的“后端替换后再写入”回归覆盖 fetch；XHR 没有单独的替换场景测试，但共享的新鲜 guard 在每次 send（包含重试）执行。
 
 ## 完成判据映射
 
-| 设计完成判据 | 证据 |
+| 设计完成判据 | 直接证据 |
 |---|---|
-| 统一配置、危险路径、Keychain service 分离 | Tasks 1–5 回归 + 本次两个 profile 的真实应用启动和假 Keychain service 断言 |
-| 两个健康端口/profile 正确 | 逻辑 8765/8766；安全随机监听 53933/53934；顺序和并行健康响应均匹配 |
-| 所有可写目录不交叉 | `writable_paths(...).isdisjoint(...)` + 路径矩阵 + 实际文件清单 |
-| 开发写入不改变正式历史 | 数据库 SHA-256 相同、sentinel 1 行保持 1 行、production 全树快照相同 |
-| 共享模型只读 | `models_writable=False`；模型哨兵 SHA-256 相同 |
-| production 回归、CLI、安装备份、前端和构建 | 完整后端/前端套件，发布/安装/备份 8/8，Vite build，shell syntax |
-| 开发标识和误连阻断 | 两张临时 fixture 截图；production mismatch 写入计数 0 |
-| 真实系统与现有 Release 未触碰 | 上述安全边界确认 + 最终 Git/tag/diff 检查 |
+| 正式/开发健康身份 | 顺序与并行子进程的 health profile 分别为 `production` / `development` |
+| 所有可写路径隔离 | 解析后根的祖先不重叠 + 全部派生可写集合 `isdisjoint` |
+| 开发写入不改正式历史 | 设置/staging/session/feedback/audio 实际写入后，正式数据库 SHA/1 行哨兵和正式完整树不变 |
+| 临时边界没有意外写入 | 文件/目录/符号链接快照；除开发根和明示的 provider 审计控制件外无差异 |
+| 共享模型无写入 | `models_writable=False`，哨兵 SHA-256 不变 |
+| provider 不能外联 | 4 个应用夹具各观察到 5 个 fail-closed client；审计实测 `provider_calls=0` |
+| 归档无运行/秘密/依赖/构建产物 | 临时隔离 checkout 主动注入混合大小写污染，归档路径组件 casefold 扫描为空 |
+| 归档包含安装/运行助手 | 所有必需脚本、`doctor_checks.py` 和 `runtime_config.py` 均在归档成员必需集合中 |
+| 生产数据库路径与历史保留 | 精确默认路径断言 + 备份先于 `current` 切换 + 升级后原行可读 |
 
 ## 最终复验
 
-提交前最后一次完整命令结果：
+提交前最后一轮完整命令结果：
 
 ```text
 cd backend
 PYTHONPATH="$PWD/src" .venv/bin/pytest -q
-1014 passed, 28 skipped in 46.94s
+1014 passed, 28 skipped in 59.45s
 
 cd ../prototype
 node --test tests/*.test.mjs
-91 passed, 0 failed, 0 skipped in 2.24s
+91 passed, 0 failed, 0 skipped in 2.20s
 
 npm run build
-39 modules transformed; built in 403ms
+39 modules transformed; built in 396ms
 Prepared Sites build: dist/server/index.js and dist/.openai/hosting.json
 
 cd ..
@@ -235,4 +181,4 @@ bash -n scripts/*.sh
 exit 0
 ```
 
-最终后端轮次包含本 Task 新增的两个隔离集成测试；没有 warning summary。28 个 skip 全部来自既有 legacy Event Map compatibility-only 标记。前端、构建和 shell 语法均为该轮代码上的新鲜结果。
+28 项 skip 全部来自既有 legacy Event Map compatibility-only 标记，本 Task 没有新增 skip。
