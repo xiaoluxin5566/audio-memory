@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  analysisProgressCopy,
   createInitialState,
   formatJobEta,
   getFeedbackFormState,
   jobFailureCopy,
-  jobModelDisplayName,
   jobProgressValue,
   orderCards,
   uploadFailureState,
@@ -361,13 +361,16 @@ function UploadFile({ file, onRemove }) {
 
 function JobPanel({ job, onRetry, onCancel }) {
   if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
-  if (job.stage === 'failed') {
-    const failure = jobFailureCopy(job);
-    return <div className="job-card error"><b>{failure.title}</b>{job.error_code && <code>{job.error_code}</code>}<p>{failure.body}</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>{failure.action}</button></div></div>;
-  }
+  if (job.stage === 'completed') return null;
   const transcribing = job.stage === 'transcribing';
-  const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : `${jobModelDisplayName(job)} 正在阅读全文并生成报告`;
-  return <div className="job-card"><div className="job-title"><b>{phase}</b>{transcribing && <span>{Math.round(job.progress * 10) / 10}%</span>}</div>{transcribing && <div className="progress large"><i style={{ width: `${job.progress}%` }} /></div>}<p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : '进行中'}</span></div>{transcribing ? <button className="secondary full" onClick={onCancel}>取消本次分析</button> : <p>报告正在安全发布，完成前请保持应用运行。</p>}</div>;
+  const analysis = job.stage === 'analyzing' ? analysisProgressCopy(job) : null;
+  if (job.stage === 'failed' || analysis?.failed) {
+    const failure = jobFailureCopy(job);
+    return <div className="job-card error"><b>{analysis?.title || failure.title}</b>{job.error_code && <code>{job.error_code}</code>}<p>{analysis?.detail || failure.body}</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>{failure.action}</button></div></div>;
+  }
+  const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : analysis.title;
+  const analysisStage = job.analysis_phase === 'pending' ? '等待领取' : '进行中';
+  return <div className="job-card"><div className="job-title"><b>{phase}</b>{transcribing && <span>{Math.round(job.progress * 10) / 10}%</span>}</div>{transcribing && <div className="progress large"><i style={{ width: `${job.progress}%` }} /></div>}<p className="job-eta">{formatJobEta(job)}</p>{transcribing && <p>快速转写（Beta）可能遗漏低音量、远场或重叠语音，也可能把背景媒体识别为对话。关键人物、数字、日期和待办请回听原音频确认。</p>}<div className="stage-row done"><i />音频上传<span>已完成</span></div><div className={`stage-row ${transcribing ? 'doing' : 'done'}`}><i />本地转写与时间轴校验<span>{transcribing ? '进行中' : '已完成'}</span></div><div className={`stage-row ${transcribing ? 'waiting' : 'doing'}`}><i />生成全天报告<span>{transcribing ? '等待中' : analysisStage}</span></div>{transcribing ? <button className="secondary full" onClick={onCancel}>取消本次分析</button> : <p>{analysis.detail}</p>}</div>;
 }
 
 function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {
@@ -419,7 +422,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
   const presentation = card.reportDocument ? null : buildReportEventMap(card.reportMarkdown);
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p>{card.reportQuality && <ReportQualityStatus quality={card.reportQuality} />}</div><div className="detail-header-actions"><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} reportMetrics={card.reportMetrics} />}{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p>{card.reportQuality && <ReportQualityStatus quality={card.reportQuality} />}</div><div className="detail-header-actions"><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} reportMetrics={card.reportMetrics} />}<ExternalSources sources={card.sources} />{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
 }
 
 export function reportQualityLabel(quality) {

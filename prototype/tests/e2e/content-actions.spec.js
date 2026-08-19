@@ -21,7 +21,7 @@ function feedPayload(todoText = '整理会议结论', completed = false, cleared
   }
 }
 
-test('todo, card question and clear-history actions remain connected while feedback is hidden', async ({ page }) => {
+test('todo, card detail and clear-history actions remain connected while feedback is hidden', async ({ page }) => {
   let todoText = '整理会议结论'
   let completed = false
   let cleared = false
@@ -46,13 +46,6 @@ test('todo, card question and clear-history actions remain connected while feedb
       if (typeof body.completed === 'boolean') completed = body.completed
       return route.fulfill({ json: { id: 'todo-1', text: todoText, completed } })
     }
-    if (pathname === '/api/cards/card-1/questions' && request.method() === 'POST') {
-      const question = request.postDataJSON().question
-      return route.fulfill({ json: { messages: [
-        { role: 'user', content: question },
-        { role: 'assistant', content: '下一步先明确负责人和验收日期。' },
-      ] } })
-    }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
   await page.goto('/')
@@ -66,10 +59,6 @@ test('todo, card question and clear-history actions remain connected while feedb
 
   await page.getByRole('heading', { name: '周会重点复盘' }).click()
   await expect(page.getByRole('heading', { name: '核心结论' })).toBeVisible()
-  await page.getByPlaceholder('例如：帮我把最关键的下一步说得更具体').fill('下一步怎么做？')
-  await page.getByRole('button', { name: '发送' }).click()
-  await expect(page.locator('.chat-message.user')).toContainText('下一步怎么做？')
-  await expect(page.locator('.chat-message.assistant')).toContainText('下一步先明确负责人和验收日期。')
 
   await expect(page.getByRole('button', { name: '意见反馈' })).toHaveCount(0)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -12,7 +13,8 @@ from sqlalchemy import select
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisVersion
+from audio_memory.models import AnalysisJob, AnalysisVersion
+from audio_memory.observability import emit_analysis_event
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
@@ -20,6 +22,7 @@ from audio_memory.uploads.service import UploadError, UploadService
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger("uvicorn.error")
+ANALYSIS_SUBMISSION_TIMEOUT_SECONDS = 30.0
 
 
 class FileView(BaseModel):
@@ -51,6 +54,8 @@ class JobView(BaseModel):
     batch_current: int = 0
     batch_total: int = 0
     sleep_prevention_status: str | None = None
+    analysis_phase: str | None = None
+    analysis_detail_phase: str | None = None
 
 
 def service_from(request: Request) -> UploadService:
@@ -96,6 +101,31 @@ async def protect_job_if_enabled(request: Request, job_id: str) -> str:
 
 async def job_view_with_sleep_status(request: Request, job) -> JobView:
     view = JobView.model_validate(job, from_attributes=True)
+    if job.stage in {JobStage.ANALYZING.value, JobStage.FAILED.value}:
+        async with service_from(request).database.session() as session:
+            version = await session.scalar(
+                select(AnalysisVersion)
+                .where(
+                    AnalysisVersion.source_job_id == job.id,
+                    AnalysisVersion.reanalysis_batch_id.is_(None),
+                )
+                .order_by(AnalysisVersion.created_at.desc())
+                .limit(1)
+            )
+        if job.stage == JobStage.FAILED.value:
+            view.analysis_phase = "failed"
+        elif version is not None and version.status in {"pending", "running"}:
+            view.analysis_phase = version.status
+            if version.status == "running":
+                try:
+                    checkpoints = json.loads(version.pipeline_checkpoints_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    checkpoints = {}
+                detail_phase = checkpoints.get("report_phase")
+                if detail_phase in {"generating", "auditing", "revising", "publishing"}:
+                    view.analysis_detail_phase = detail_phase
+        else:
+            view.analysis_phase = "failed"
     if job.stage in {JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value}:
         enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
         view.sleep_prevention_status = (
@@ -135,14 +165,59 @@ async def run_pipeline(
     transcription = request.app.state.transcription_service
     engine = request.app.state.whisper_engine
     submitted = False
+    pipeline_started_at = time.monotonic()
     try:
         if resume:
             await transcription.resume_job(job_id, engine)
         else:
             await transcription.run_job(job_id, engine)
-        await request.app.state.analysis_task_coordinator.submit_new_upload(
-            analysis_request
+        emit_analysis_event(
+            logger,
+            "transcription.completed",
+            job_id=job_id,
+            provider_id=getattr(analysis_request, "provider_id", None),
+            model_id=getattr(analysis_request, "model_id", None),
+            elapsed_ms=round((time.monotonic() - pipeline_started_at) * 1000),
+            status="completed",
         )
+        try:
+            async with asyncio.timeout(ANALYSIS_SUBMISSION_TIMEOUT_SECONDS):
+                await request.app.state.analysis_task_coordinator.submit_new_upload(
+                    analysis_request
+                )
+        except BaseException as error:
+            async with request.app.state.database.session() as session:
+                durable_version_id = await session.scalar(
+                    select(AnalysisVersion.id).where(
+                        AnalysisVersion.source_job_id == job_id,
+                        AnalysisVersion.reanalysis_batch_id.is_(None),
+                        AnalysisVersion.status.in_(("pending", "running")),
+                    )
+                )
+                if durable_version_id is not None:
+                    submitted = True
+                else:
+                    job = await session.get(AnalysisJob, job_id)
+                    if job is not None:
+                        job.stage = JobStage.FAILED.value
+                        job.error_code = "model_analysis_failed"
+                        await session.commit()
+            if not submitted:
+                emit_analysis_event(
+                    logger,
+                    "analysis.job.failed",
+                    job_id=job_id,
+                    provider_id=getattr(analysis_request, "provider_id", None),
+                    model_id=getattr(analysis_request, "model_id", None),
+                    elapsed_ms=round(
+                        (time.monotonic() - pipeline_started_at) * 1000
+                    ),
+                    status="failed",
+                    error=error,
+                )
+            if submitted and not isinstance(error, asyncio.CancelledError):
+                return
+            raise
         submitted = True
     finally:
         if sleep_protected and not submitted:

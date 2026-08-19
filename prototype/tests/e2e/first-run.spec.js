@@ -154,8 +154,8 @@ test('initial page load validates configured providers once across route changes
   await expect(page.getByText('连接可用', { exact: false })).toBeVisible()
   await page.getByRole('button', { name: '音频历史' }).click()
   await expect(page.getByRole('heading', { name: '音频历史' })).toBeVisible()
-  await page.getByRole('button', { name: 'Prompt 设置' }).click()
-  await expect(page.getByRole('heading', { name: 'Prompt 设置' })).toBeVisible()
+  await page.getByRole('button', { name: '信息流' }).click()
+  await expect(page.getByRole('heading', { name: '先上传音频' })).toBeVisible()
   await expect.poll(() => calls.filter((call) => call === 'POST /api/providers/validate-configured').length).toBe(1)
 })
 

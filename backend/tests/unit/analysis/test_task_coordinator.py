@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 
@@ -207,6 +208,61 @@ async def test_restart_returns_linked_history_item_to_pending(tmp_path) -> None:
         version = await session.scalar(select(AnalysisVersion))
     assert version is not None and version.status == "pending"
     assert stored_item is not None and stored_item.status == "pending"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_only_orphan_analyzing_jobs(tmp_path, caplog) -> None:
+    database = Database(tmp_path / "orphan-analysis.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-orphan", "job-healthy")
+    async with database.session() as session:
+        session.add(
+            AnalysisVersion(
+                id="version-healthy",
+                source_job_id="job-healthy",
+                batch_id=None,
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                staged_results_json="{}",
+                status="pending",
+            )
+        )
+        await session.commit()
+    caplog.set_level("INFO", logger="uvicorn.error")
+
+    await AnalysisTaskCoordinator(database).initialize()
+
+    async with database.session() as session:
+        orphan = await session.get(AnalysisJob, "job-orphan")
+        healthy = await session.get(AnalysisJob, "job-healthy")
+        version = await session.get(AnalysisVersion, "version-healthy")
+    assert orphan is not None
+    assert (orphan.stage, orphan.error_code) == (
+        "failed",
+        "model_analysis_failed",
+    )
+    assert healthy is not None and healthy.stage == "analyzing"
+    assert version is not None and version.status == "pending"
+    payloads = []
+    for record in caplog.records:
+        try:
+            payloads.append(json.loads(record.message))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    assert payloads == [
+        {
+            "timestamp": payloads[0]["timestamp"],
+            "event": "analysis.recovery.reconciled",
+            "status": "reconciled",
+            "repair_type": "orphan_analyzing_to_failed",
+            "affected_count": 1,
+        }
+    ]
     await database.dispose()
 
 
@@ -564,6 +620,88 @@ async def test_two_coordinators_cannot_claim_the_same_pending_version(tmp_path) 
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_queue_commit_still_wakes_waiting_worker(tmp_path) -> None:
+    database = Database(tmp_path / "cancel-after-commit.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-cancel-after-commit")
+    coordinator = AnalysisTaskCoordinator(database)
+    await coordinator.initialize()
+    item = request("job-cancel-after-commit", batch_id=None, priority=0)
+
+    waiting_worker = asyncio.create_task(coordinator.next_request())
+    await asyncio.sleep(0.05)
+    session_exiting = asyncio.Event()
+
+    class PauseFirstSessionExit:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @asynccontextmanager
+        async def session(self):
+            self.calls += 1
+            call = self.calls
+            async with database.session() as session:
+                yield session
+                if call == 1:
+                    session_exiting.set()
+                    await asyncio.Event().wait()
+
+    coordinator.database = PauseFirstSessionExit()
+    submitting = asyncio.create_task(coordinator.submit_new_upload(item))
+    await asyncio.wait_for(session_exiting.wait(), timeout=1)
+    submitting.cancel()
+    result = await asyncio.gather(submitting, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert await asyncio.wait_for(waiting_worker, timeout=1) == item
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_and_claim_emit_ordered_structured_events(
+    tmp_path, caplog
+) -> None:
+    database = Database(tmp_path / "queue-events.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-events")
+    coordinator = AnalysisTaskCoordinator(database)
+    caplog.set_level("INFO", logger="uvicorn.error")
+
+    version_id = await coordinator.submit_new_upload(
+        request("job-events", batch_id=None, priority=0)
+    )
+    await coordinator.next_request()
+
+    payloads = []
+    for record in caplog.records:
+        try:
+            payloads.append(json.loads(record.message))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    payloads = [
+        payload
+        for payload in payloads
+        if str(payload.get("event", "")).startswith("analysis.enqueue.")
+        or payload.get("event") == "analysis.worker.claimed"
+    ]
+    events = [payload.get("event") for payload in payloads]
+    assert events == [
+        "analysis.enqueue.started",
+        "analysis.enqueue.lock_acquired",
+        "analysis.enqueue.transaction_started",
+        "analysis.enqueue.committed",
+        "analysis.enqueue.worker_notified",
+        "analysis.worker.claimed",
+    ]
+    assert all(payload.get("job_id") == "job-events" for payload in payloads)
+    assert all(payload.get("provider_id") == "kimi" for payload in payloads)
+    assert all(payload.get("model_id") == "kimi-k2.5" for payload in payloads)
+    assert payloads[3]["analysis_version_id"] == version_id
+    assert payloads[-1]["queue_owner_id"] == coordinator.owner_id
     await database.dispose()
 
 

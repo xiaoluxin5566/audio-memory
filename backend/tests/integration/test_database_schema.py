@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from json import loads
 from pathlib import Path
@@ -76,6 +77,43 @@ def test_initial_migration_creates_all_phase_one_tables(tmp_path: Path) -> None:
         "temp_file_manifest",
         "feedback_index",
     }.issubset(tables)
+
+
+def test_migrations_preserve_existing_application_loggers(tmp_path: Path) -> None:
+    logger = logging.getLogger("audio_memory.test.migration_logging")
+    original_disabled = logger.disabled
+    logger.disabled = False
+    try:
+        run_migrations(tmp_path / "logging.sqlite3")
+        assert logger.disabled is False
+    finally:
+        logger.disabled = original_disabled
+
+
+def test_migrations_enable_wal_and_normal_synchronous_mode(tmp_path: Path) -> None:
+    database_path = tmp_path / "sqlite-pragmas.sqlite3"
+
+    run_migrations(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+@pytest.mark.asyncio
+async def test_every_application_connection_has_bounded_sqlite_pragmas(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "application-pragmas.sqlite3")
+    await database.create_schema()
+
+    async with database.session() as first, database.session() as second:
+        for session in (first, second):
+            assert await session.scalar(text("PRAGMA foreign_keys")) == 1
+            assert await session.scalar(text("PRAGMA journal_mode")) == "wal"
+            assert await session.scalar(text("PRAGMA busy_timeout")) == 5_000
+            assert await session.scalar(text("PRAGMA synchronous")) == 1
+
+    await database.dispose()
 
 
 @pytest.mark.asyncio

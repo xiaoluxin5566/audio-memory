@@ -1,0 +1,182 @@
+# beta.3 旧分支价值审计
+
+审计日期：2026-08-19  
+集成基线：`main@d65c3c0`  
+审计分支：`codex/beta3-stability`
+
+## 结论摘要
+
+| 分支 | 状态 | 结论 | 删除前置条件 |
+| --- | --- | --- | --- |
+| `codex/analysis-sleep-prevention` | 工作树干净 | `equivalent-on-main` | 确认 `main@1ce96dc` 回归通过后可删除 |
+| `codex/smooth-progress` | 仅未跟踪依赖目录 | `equivalent-on-main` | 确认 `main@b3356a6` 回归通过；依赖目录不迁移 |
+| `codex/dev-prod-isolation` | 4 个业务/测试文件未提交 | `migrate-to-beta3` | 迁移虚拟环境启动修复；按新设计重写交接修复并通过回归 |
+| `codex/cloud-asr-evaluation` | 工作树干净 | `retain-as-research-evidence` | 抽取最终方法、结论和复现入口到当前基线；不迁移生产代码 |
+| `codex/report-audit-revision-pipeline` | 主工作树高度脏 | 混合：已合并、研究成果和临时产物 | 完成下述文件组处置并验证后才能移除工作树/分支 |
+
+当前 `git branch --no-merged main` 除本审计分支外，正好是以上五个旧分支；没有遗漏其他未合并本地分支。
+
+### 已完全合并到 `main` 的本地历史分支
+
+以下分支均被 `git branch --merged main` 确认为其顶端已被 `main` 包含，没有独有提交，不需要再次迁移代码：
+
+- `codex/adaptive-audit-main-integration`
+- `codex/audio-memory-phase1`
+- `codex/autonomous-day-map`
+- `codex/card-model-provenance`
+- `codex/direct-single-report`
+- `codex/full-release-validation`
+- `codex/glm-report-recovery`
+- `codex/local-fast-v0`
+- `codex/local-fast-v0-1`
+- `codex/release-v0-1-beta`
+- `codex/report-metrics-display`
+- `codex/single-upload-report`
+- `codex/transcription-phase0`
+
+这些分支是首批本地删除候选。删除前仍需检查对应工作树是否干净；`codex/release-v0-1-beta` 指向的发布历史已由不可变标签 `v0.1.0-beta.1`、`v0.1.0-beta.2` 保留，删除本地分支不会删除标签或已发布版本。
+
+### 已合并但工作树仍含未跟踪文件的处置
+
+| 工作树 | 未跟踪内容 | 价值与处置 |
+| --- | --- | --- |
+| `audio-memory-phase1` | 两份旧交接和 Playwright 状态 | 交接描述的代码已被后续主线替代；不迁移。Playwright 目录是可重建测试状态 |
+| `codex-transcription-phase0` | `benchmark-local-transcription.py` | 依赖早期内部转写接口且无当前测试；不迁入 beta.3。现有正式 benchmark evidence 足以保留历史方法 |
+| `local-fast-v0-1` / `autonomous-day-map` | 交接、只读排查、截图、导出、依赖、数据库读取和真实模型辅助脚本 | 脱敏产品结论迁移至 `docs/research/2026-08-19-day-map-followup-archive.md`；真实转写、ID、截图、导出和会读取 Keychain/调用外部模型的脚本不迁移 |
+| `smooth-progress` | `.venv`、`node_modules` | 可重建依赖，不迁移 |
+
+这些未跟踪文件仍属于各工作树，在用户批准删除工作树前不做清理。
+
+## 1. `codex/analysis-sleep-prevention`
+
+- 分叉点：`85e01ff`
+- 分支顶端：`92a07f3 feat: prevent sleep during audio analysis`
+- 状态：工作树干净。
+- 等价证据：`main` 已包含 `1ce96dc feat: prevent sleep during audio analysis`；核心迁移、设置 API、`SleepPreventionManager`、协调器资源回收和测试均已存在于当前基线。
+- 处置：`equivalent-on-main`。不再次迁移，避免重复数据库迁移和冲突。
+- 删除门槛：运行防休眠、设置 API、上传任务和应用关闭回归；确认当前实现覆盖分支测试。
+
+## 2. `codex/smooth-progress`
+
+- 分叉点：`85e01ff`
+- 分支顶端：`92feabf feat: smooth transcription progress between checkpoints`
+- 状态：只有 `backend/.venv` 与 `prototype/node_modules` 未跟踪目录，均为可重建依赖，不是产品成果。
+- 等价证据：`main` 已包含 `b3356a6 feat: smooth transcription progress between checkpoints`；当前 `main` 的进度实现随后继续演进，不能用旧文件覆盖。
+- 处置：`equivalent-on-main`。依赖目录不迁移。
+- 删除门槛：运行 ETA、上传进度、前端状态和相关端到端测试。
+
+## 3. `codex/dev-prod-isolation`
+
+- 分叉点：`339a067`
+- 已提交独有提交：`3deeaa0 fix: launch development with virtualenv python`。
+- 主体等价证据：`main` 已包含从 `7c389a7` 到 `ac61db1` 的开发/正式隔离系列提交，包括固定开发根、别名防护、生命周期身份和合并提交。
+
+### 待迁移文件
+
+| 文件 | 价值结论 | beta.3 处置 |
+| --- | --- | --- |
+| `scripts/dev_lifecycle.py` | 虚拟环境解释器选择有价值 | 基于当前 `main` 重新实现并测试 |
+| `backend/tests/unit/test_dev_scripts.py` | 防止回退到系统 Python 的测试有价值 | 迁移为当前基线回归测试 |
+| `backend/src/audio_memory/analysis/task_coordinator.py` | commit 后取消仍通知 worker 的思路有价值 | 不直接复制；纳入原子交接与真实 worker 竞争测试 |
+| `backend/src/audio_memory/api/jobs.py` | 超时、持久状态复核、失败回收有价值 | 不直接复制；当前补丁会在取消时留下假 `analyzing`，按新状态机重写 |
+| `backend/tests/integration/test_transcription_recovery.py` | 转写保留、超时、取消、commit 后异常测试有价值 | 迁移并补齐取消状态和资源所有权断言 |
+| `backend/tests/unit/analysis/test_task_coordinator.py` | 真实 worker 唤醒竞态测试有价值 | 迁移到新的 cancellation-safe 通知实现 |
+
+删除门槛：以上价值全部进入 `codex/beta3-stability` 的独立提交，相关测试和全量回归通过，并再次确认旧工作树没有新增内容。
+
+## 4. `codex/cloud-asr-evaluation`
+
+- 分叉点：`24e0867`
+- 独有提交：34 个。
+- 规模：41 个文件，约 20,112 行新增；工作树干净。
+- 内容：阿里云与火山 ASR 适配、分块合并、证据清单、事实对比、盲审包、报告生成、CLI 和完整测试。
+- 产品判断：用户当前版本的核心承诺是本地转写；把云 ASR 运行时代码合入 beta.3 会扩大凭据、网络、隐私和维护面，不符合本次稳定性目标。
+- 价值判断：评测方法、事实审计原则、清单 schema、已验证的错误处理结论具有研究价值。
+- 处置：`research-evidence-archived`。精简方法与证据边界已迁移至 `docs/research/2026-08-19-cloud-asr-evaluation-archive.md`；不迁移 `audio_memory/transcription/cloud/` 到生产包，不迁移供应商凭据或真实运行产物。
+- 事实边界：该分支没有获授权的真实音频/API 评测结果，不能产生供应商胜负结论；原实现可从提交 `2ee16d9` 恢复。
+- 删除门槛：归档文档通过审查，并再次确认云评测工作树干净。
+
+## 5. `codex/report-audit-revision-pipeline` 与主工作树
+
+- 分叉点：`85e01ff`
+- 已提交顶端：`a61234b`。
+- 提交等价性：设计、计划和 provider 范围修复已以等价补丁进入 `main`；`dfe9f8f` 的大提交补丁 ID 不等价，但当前 `main` 已包含后来演进的直接报告、分段审计、恢复和 GLM 审计链，禁止整分支合并。
+- 状态：主工作树包含大量已修改与未跟踪文件，是仍在演进的研发集合；当前不可删除、不可强制清理。
+
+### 已跟踪修改文件组
+
+以下路径下的所有已跟踪修改逐文件归入对应处置；完整文件名以本次 `git status --short` 快照为准：
+
+| 文件/路径组 | 处置 |
+| --- | --- |
+| `backend/src/audio_memory/analysis/{provider,publisher,runner,task_coordinator}.py`、`api/*.py`、`main.py` | 与当前生产链交叉；逐功能对照 `main`，只迁移 beta.3 已批准的交接/恢复/日志价值 |
+| `backend/src/audio_memory/providers/**`、`repositories.py` | GLM/provider 演进；当前 `main` 已有正式实现，默认 `equivalent-on-main`，差异须有独立测试才迁移 |
+| `backend/src/audio_memory/transcription/{checkpoints,engine}.py` | 转写实验；不得覆盖 beta.2 基线，只有诊断/去重价值经独立测试后迁移 |
+| `backend/src/audio_memory/prompts/**` | Prompt/报告质量研究；不属于本次稳定性修复，保留为研究证据，另行质量验收后才能进入生产 |
+| `backend/tests/**` | 测试本身有证据价值；随其验证的功能迁移，不能单独证明生产代码可合并 |
+| `prototype/src/**`、`prototype/tests/**`、`prototype/vite.config.mjs` | UI 与安全实验；只迁移持久分析状态展示及已验证的安全修复 |
+| `scripts/{doctor,doctor_checks,start}.sh`、`tests/real-pipeline-smoke.py` | doctor/启动价值与 beta.3 目标相关；基于当前 `main` 重写并用假 provider 验证 |
+| `backend/migrations/env.py` | SQLite 配置价值相关；不复制旧差异，按 WAL/busy timeout 新设计实现 |
+
+### 未跟踪成果文件组
+
+| 文件/路径组 | 处置 |
+| --- | --- |
+| `backend/src/audio_memory/analysis/*.py` 新实验模块及对应 `backend/tests/**` | 研究价值高但不在 beta.3 稳定性范围；先保留，后续单独产品评审，当前删除阻塞 |
+| `backend/src/audio_memory/transcription/{deduplication,diagnostics}.py` 及测试 | 诊断可能服务本次可观测性；只迁移无正文泄漏的通用诊断，其余保留研究 |
+| `backend/src/audio_memory/providers/adapters/glm.py`、provider 模型选择测试 | 当前 `main` 已有 GLM 正式实现；对照后按 `equivalent-on-main` 处置 |
+| `backend/src/audio_memory/prompts/*.md` 新 Prompt 与 Prompt 测试 | 报告质量研究，暂不进入 beta.3 稳定性提交；保留研究证据 |
+| `docs/HANDOFF-*`、`docs/PROJECT-*`、`docs/superpowers/**`、`docs/benchmark-evidence/**`、`design-qa.md` | 文档证据应筛选迁入当前基线；涉及已完成主线的归档，重复草稿不迁移 |
+| `backend/experiments/`、`backend/tests/experiments/`、`tests/real-*.py` | 离线实验/真实评测；不进入发布包，保留最小复现说明后归档 |
+| `prototype/src/mockEngine.js`、`prototype/tests/mock-engine.test.mjs`、`prototype/output/**` | fake provider 对 beta.3 验收有价值；迁移通用假实现与测试，不迁移截图/生成输出 |
+| `.playwright-cli/`、`.private-eval/`、`.superpowers/brainstorm/`、`.vite/`、`audio-memory.sqlite3`、`outputs/` | 本地状态、私有评测、缓存、数据库或生成物；绝不提交，不作为代码迁移 |
+| `docs/assets/`、其他输出图片/JSON | 逐项确认是否被正式文档引用；未引用生成物不迁移 |
+
+### 当前处置
+
+该分支不是“无用分支”，而是尚未拆分的混合研发工作树。先迁移 beta.3 范围内的诊断、fake provider 和安全测试；报告体系实验另立产品评审。未完成拆分前保持原状，不删除。
+
+## 删除与集成规则
+
+1. 任何旧工作树在删除前重新执行 `git status --short`，防止审计后新增成果。
+2. 有价值代码必须从当前 `main` 重新实现或选择性迁移，并有独立测试；禁止整分支 merge。
+3. 未跟踪依赖、缓存、数据库和输出不进入 Git；删除它们仍需和工作树删除一起经过用户批准。
+4. 先验证迁移提交，再移除工作树，再删除本地分支；远程分支单独列出并批准。
+5. Release 标签永久保留。真实 Keychain、正式数据和真实 provider 不属于本次审计读取范围。
+
+## 建议执行的清理批次
+
+### 批次 A：已确认无独有成果
+
+在用户明确批准后，可移除以下工作树并删除对应本地分支：
+
+- `analysis-sleep-prevention` / `codex/analysis-sleep-prevention`：能力已等价进入主线，工作树干净。
+- `card-model-provenance` / `codex/card-model-provenance`：分支已完全合并，工作树干净。
+- `cloud-asr-evaluation` / `codex/cloud-asr-evaluation`：工作树干净，方法和事实边界已脱敏归档。
+- `full-release-validation` / `codex/full-release-validation`：分支已完全合并，工作树干净。
+- `release-v0-1-beta` / `codex/release-v0-1-beta`：分支已完全合并；发布历史由 `v0.1.0-beta.1` 和 `v0.1.0-beta.2` 标签保留。
+- `smooth-progress` / `codex/smooth-progress`：能力已等价进入主线；未跟踪内容只有可重建的 `.venv` 和 `node_modules`。
+- `glm-report-recovery`：该工作树当前检出 `main`，工作树干净；只移除额外工作树，不删除 `main`。
+
+以下没有挂载工作树、且已完全合并的本地分支也可删除：
+
+- `codex/adaptive-audit-main-integration`
+- `codex/direct-single-report`
+- `codex/local-fast-v0`
+- `codex/local-fast-v0-1`
+- `codex/report-metrics-display`
+- `codex/single-upload-report`
+
+### 批次 B：审计后判定不迁移，但删除会丢弃未跟踪文件
+
+只有在用户明确接受丢弃下列未跟踪文件后才移除：
+
+- `audio-memory-phase1` / `codex/audio-memory-phase1`：两份过时交接和 Playwright 本地状态。
+- `codex-transcription-phase0` / `codex/transcription-phase0`：一个依赖早期内部接口、无当前测试的本地 benchmark 脚本。
+- `dev-prod-isolation` / `codex/dev-prod-isolation`：4 个未提交文件的 patch 已逐项对照；取消后通知、30 秒提交超时、持久状态复核、转写保留和资源所有权测试均已由 beta.3 更严格实现并通过完整回归。旧 patch 中“取消后仍保持 analyzing”的行为已被修正，不应保留。
+
+### 当前必须保留
+
+- `local-fast-v0-1` 工作树 / `codex/autonomous-day-map`：含真实导出、截图、研究文档、依赖和辅助脚本；其中可能有用户文件，不删除。
+- 仓库根工作树 / `codex/report-audit-revision-pipeline`：大量未提交研发成果和本地数据；不删除、不清理。
+- `codex/beta3-stability`：当前 beta.3 集成分支，待审查完成后合并 `main`。

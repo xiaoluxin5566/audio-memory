@@ -19,8 +19,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_HELPER = REPOSITORY_ROOT / "scripts" / "runtime_config.py"
 DEV_START = REPOSITORY_ROOT / "scripts" / "dev-start.sh"
 DEV_STOP = REPOSITORY_ROOT / "scripts" / "dev-stop.sh"
+QUALITY_GATE = REPOSITORY_ROOT / "scripts" / "quality-gate.sh"
 PYTHON = REPOSITORY_ROOT / "backend" / ".venv" / "bin" / "python"
-REAL_PYTHON = str(PYTHON.resolve())
+REAL_PYTHON = str(PYTHON)
 SCRIPTS_ROOT = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 import dev_lifecycle  # noqa: E402
@@ -105,6 +106,88 @@ def expected_server_argv(port: int = 8766) -> list[str]:
         "--port",
         str(port),
     ]
+
+
+def test_server_argv_preserves_virtualenv_python_path() -> None:
+    argv = dev_lifecycle._server_argv(REPOSITORY_ROOT, 8766)
+
+    assert argv[0] == str(PYTHON)
+
+
+def test_server_argv_can_use_a_verified_shared_toolchain_python(
+    tmp_path: Path,
+) -> None:
+    shared_python = tmp_path / "toolchain" / "python"
+    shared_python.parent.mkdir()
+    shared_python.write_bytes(b"python")
+    shared_python.chmod(0o755)
+
+    argv = dev_lifecycle._server_argv(
+        REPOSITORY_ROOT, 8766, python_executable=shared_python
+    )
+
+    assert argv[0] == str(shared_python.resolve())
+
+
+def test_server_argv_preserves_symlinked_shared_virtualenv_python(
+    tmp_path: Path,
+) -> None:
+    interpreter = tmp_path / "runtime" / "python3"
+    interpreter.parent.mkdir()
+    interpreter.write_bytes(b"python")
+    interpreter.chmod(0o755)
+    shared_python = tmp_path / "toolchain" / "bin" / "python"
+    shared_python.parent.mkdir(parents=True)
+    shared_python.symlink_to(interpreter)
+
+    argv = dev_lifecycle._server_argv(
+        REPOSITORY_ROOT, 8766, python_executable=shared_python
+    )
+
+    assert argv[0] == str(shared_python.absolute())
+    assert argv[5] == str(REPOSITORY_ROOT / "backend" / "src")
+
+
+def test_quality_gate_prefers_feature_local_playwright_to_avoid_mixed_versions(
+    tmp_path: Path,
+) -> None:
+    feature = tmp_path / "feature"
+    toolchain = tmp_path / "toolchain"
+    (feature / "prototype/node_modules/.bin").mkdir(parents=True)
+    (toolchain / "prototype/node_modules/.bin").mkdir(parents=True)
+    (toolchain / "backend/.venv/bin").mkdir(parents=True)
+    write_executable(
+        feature / "prototype/node_modules/.bin/playwright",
+        "printf 'feature-playwright\\n'",
+    )
+    write_executable(
+        toolchain / "prototype/node_modules/.bin/playwright",
+        "printf 'toolchain-playwright\\n'",
+    )
+    write_executable(toolchain / "backend/.venv/bin/pytest", "exit 0")
+
+    result = subprocess.run(
+        [str(QUALITY_GATE), "browser"],
+        cwd=feature,
+        env={**os.environ, "AUDIO_MEMORY_TOOLCHAIN_ROOT": str(toolchain)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "feature-playwright" in result.stdout
+    assert "toolchain-playwright" not in result.stdout
+
+
+def test_server_argv_rejects_untrusted_shared_python(tmp_path: Path) -> None:
+    shared_python = tmp_path / "python"
+    shared_python.write_bytes(b"not executable")
+
+    with pytest.raises(dev_lifecycle.LifecycleError, match="Python"):
+        dev_lifecycle._server_argv(
+            REPOSITORY_ROOT, 8766, python_executable=shared_python
+        )
 
 
 def process_record(

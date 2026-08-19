@@ -11,11 +11,11 @@ export function useActiveJob(jobId, onUpdate, onComplete) {
       try {
         const job = await api.job(jobId)
         if (cancelled) return
-        onUpdate(job)
         if (job.stage === 'completed') {
-          onComplete(job)
+          await onComplete(job)
           return
         }
+        onUpdate(job)
         if (!['failed', 'interrupted', 'cancelled'].includes(job.stage)) {
           setTimeout(poll, 1200)
         }
@@ -27,4 +27,3 @@ export function useActiveJob(jobId, onUpdate, onComplete) {
     return () => { cancelled = true }
   }, [jobId, onUpdate, onComplete])
 }
-

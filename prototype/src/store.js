@@ -49,6 +49,48 @@ export function jobModelDisplayName(job) {
   return modelId || job?.provider_id || '模型';
 }
 
+export function analysisProgressCopy(job) {
+  if (job?.analysis_phase === 'pending') {
+    return {
+      title: '等待分析线程开始',
+      detail: '转写已安全保存，任务正在队列中等待领取。',
+      failed: false,
+    };
+  }
+  if (job?.analysis_phase === 'running') {
+    const phases = {
+      generating: {
+        title: `${jobModelDisplayName(job)} 正在生成报告初稿`,
+        detail: '转写已安全保存，正在整理全文要点。',
+      },
+      auditing: {
+        title: `${jobModelDisplayName(job)} 正在审校报告`,
+        detail: '初稿已安全保存，正在检查完整性和证据。',
+      },
+      revising: {
+        title: `${jobModelDisplayName(job)} 正在修订报告`,
+        detail: '审校已完成，正在修正需要改进的内容。',
+      },
+      publishing: {
+        title: '正在发布报告',
+        detail: '分析已完成，正在将最终报告安全写入首页。',
+      },
+    };
+    const current = phases[job.analysis_detail_phase];
+    if (current) return { ...current, failed: false };
+    return {
+      title: `${jobModelDisplayName(job)} 正在阅读全文并生成报告`,
+      detail: '报告正在安全发布，完成前请保持应用运行。',
+      failed: false,
+    };
+  }
+  return {
+    title: '分析未开始，可重试',
+    detail: '完整转写已保留，重试不会再次执行 Whisper。',
+    failed: true,
+  };
+}
+
 export function getFeedbackFormState(rating, comment = '') {
   const showDetails = rating === 'inaccurate';
   return {

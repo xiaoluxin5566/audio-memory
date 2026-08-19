@@ -96,10 +96,34 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _server_argv(project_root: Path, port: int) -> tuple[str, ...]:
+def _server_argv(
+    project_root: Path,
+    port: int,
+    *,
+    python_executable: Path | None = None,
+) -> tuple[str, ...]:
     backend_source = project_root / "backend" / "src"
+    configured_python = python_executable
+    if configured_python is None:
+        override = os.environ.get("AUDIO_MEMORY_DEV_PYTHON")
+        configured_python = (
+            Path(override)
+            if override
+            else project_root / "backend" / ".venv" / "bin" / "python"
+        )
+    try:
+        resolved_python = configured_python.resolve(strict=True)
+    except OSError as exc:
+        raise LifecycleError("开发 Python 运行环境不存在。") from exc
+    if not resolved_python.is_file() or not os.access(
+        resolved_python, os.X_OK
+    ):
+        raise LifecycleError("开发 Python 运行环境不可执行。")
+    # 即使是共享工具链，也必须保留 venv 入口；解析符号链接
+    # 会绕过虚拟环境的 site-packages。
+    virtualenv_python = configured_python.absolute()
     return (
-        str(Path(sys.executable).resolve()),
+        str(virtualenv_python),
         "-m",
         "uvicorn",
         "audio_memory.main:app",

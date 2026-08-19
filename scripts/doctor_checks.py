@@ -8,6 +8,7 @@ import ast
 import hashlib
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -215,13 +216,52 @@ def check_recovery(database: Path) -> bool:
         return False
 
 
+def check_queue(database: Path) -> bool:
+    now = datetime.now(UTC)
+    stale_before = (now - timedelta(minutes=10)).isoformat()
+    queries = (
+        """SELECT count(*) FROM analysis_jobs job
+             WHERE job.stage = 'analyzing' AND NOT EXISTS (
+                 SELECT 1 FROM analysis_versions version
+                 WHERE version.source_job_id = job.id
+                   AND version.reanalysis_batch_id IS NULL
+                   AND version.status IN ('pending', 'running')
+             )""",
+        """SELECT count(*) FROM analysis_versions
+             WHERE status = 'running'
+               AND (coalesce(worker_owner_id, '') = ''
+                    OR coalesce(lease_expires_at, '') = ''
+                    OR lease_expires_at < ?)""",
+        """SELECT count(*) FROM analysis_versions
+             WHERE status = 'pending' AND created_at < ?""",
+        """SELECT count(*) FROM analysis_jobs job
+             JOIN analysis_versions version ON version.source_job_id = job.id
+             WHERE job.stage = 'failed'
+               AND version.reanalysis_batch_id IS NULL
+               AND version.status IN ('pending', 'running')""",
+    )
+    try:
+        with _connect(database) as connection:
+            if connection.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+                return False
+            if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5_000:
+                return False
+            parameters = ((), (now.isoformat(),), (stale_before,), ())
+            return all(
+                connection.execute(query, values).fetchone()[0] == 0
+                for query, values in zip(queries, parameters, strict=True)
+            )
+    except sqlite3.Error:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("check", choices=("whisper", "diarization", "migrations", "database", "recovery"))
+    parser.add_argument("check", choices=("whisper", "diarization", "migrations", "database", "recovery", "queue"))
     parser.add_argument("path", type=Path)
     parser.add_argument("model_root", type=Path, nargs="?")
     args = parser.parse_args()
-    check = {"whisper": check_whisper, "diarization": check_diarization, "migrations": check_migrations, "database": check_database, "recovery": check_recovery}[args.check]
+    check = {"whisper": check_whisper, "diarization": check_diarization, "migrations": check_migrations, "database": check_database, "recovery": check_recovery, "queue": check_queue}[args.check]
     if args.model_root is not None and args.check not in {"whisper", "diarization"}:
         parser.error("model root is only valid for model checks")
     if args.model_root is not None:

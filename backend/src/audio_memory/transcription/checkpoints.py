@@ -74,7 +74,6 @@ class TranscriptionService:
             )
             raise
         self.eta_tracker.clear(job_id)
-        await self._set_stage(job_id, JobStage.ANALYZING)
 
     async def resume_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         self.eta_tracker.clear(job_id)
@@ -93,11 +92,7 @@ class TranscriptionService:
         async with self.database.session() as session:
             result = await session.execute(
                 update(AnalysisJob)
-                .where(
-                    AnalysisJob.stage.in_(
-                        [JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value]
-                    )
-                )
+                .where(AnalysisJob.stage == JobStage.TRANSCRIBING.value)
                 .values(stage=JobStage.INTERRUPTED.value)
             )
             await session.commit()

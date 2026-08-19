@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from hashlib import sha256
 import json
+import logging
 import time
 from typing import Protocol
 
@@ -41,6 +42,7 @@ from audio_memory.analysis.segmented_report_audit import (
 )
 from audio_memory.db import Database
 from audio_memory.models import AnalysisVersion, JobFile, Transcript
+from audio_memory.observability import emit_analysis_event
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.direct_report_schema import DirectReportDocument
 from audio_memory.prompts.direct_report_audit_schema import ReportAudit
@@ -90,6 +92,7 @@ class SingleReportRunner:
         return await self._run_markdown(version, staged, worker_owner_id=worker_owner_id)
 
     async def _run_markdown(self, version, staged, *, worker_owner_id):
+        await self._set_report_phase(version.id, "generating", worker_owner_id)
         transcript, markdown, profile, goal_content = await self._inputs(version)
         raw_report = staged.get("direct_report_v1_markdown")
         if not isinstance(raw_report, str) or not raw_report.strip():
@@ -148,6 +151,7 @@ class SingleReportRunner:
             except ValueError:
                 staged.pop("direct_report_v1_audit", None)
         if audit is None:
+            await self._set_report_phase(version.id, "auditing", worker_owner_id)
             started = time.monotonic()
             try:
                 transcript_by_id = {
@@ -463,6 +467,7 @@ class SingleReportRunner:
         ]
         valid_segment_ids = {str(item["segment_id"]) for item in transcript}
         allowed_ids = audit_transcript_evidence_ids(audit, valid_segment_ids)
+        await self._set_report_phase(version.id, "revising", worker_owner_id)
         revision_payload = staged.get("direct_report_v2_revisions")
         if isinstance(revision_payload, dict):
             revision = TargetedReportRevision.model_validate(revision_payload)
@@ -540,6 +545,7 @@ class SingleReportRunner:
         if isinstance(final_payload, dict):
             final_audit = ReportAudit.model_validate(final_payload)
         else:
+            await self._set_report_phase(version.id, "auditing", worker_owner_id)
             request = self.composer.compose_revision_final_audit(
                 v2_markdown=v2_result.report_markdown, section_diffs=diffs,
                 v1_audit=audit, revision=revision,
@@ -592,6 +598,7 @@ class SingleReportRunner:
         metadata: ReportQualityMetadata, deterministic_quality,
         worker_owner_id: str | None, duration_ms: int,
     ):
+        await self._set_report_phase(version.id, "publishing", worker_owner_id)
         initial_audit_payload = staged.get("direct_report_v1_audit")
         initial_score = None
         if isinstance(initial_audit_payload, dict):
@@ -628,6 +635,7 @@ class SingleReportRunner:
         )
 
     async def _run_structured(self, version, staged, *, worker_owner_id):
+        await self._set_report_phase(version.id, "generating", worker_owner_id)
         raw_document = staged.get("direct_report_document")
         checkpoint_mode = staged.get("direct_report_output_mode")
         if isinstance(raw_document, dict) and checkpoint_mode == "structured":
@@ -661,6 +669,7 @@ class SingleReportRunner:
                 duration_ms=int((time.monotonic() - started) * 1_000),
             )
         result = StructuredReportResult.from_document(document)
+        await self._set_report_phase(version.id, "publishing", worker_owner_id)
         return await self.publisher.publish(
             version.id, result, [], worker_owner_id=worker_owner_id
         )
@@ -752,3 +761,30 @@ class SingleReportRunner:
                 await session.rollback()
                 raise LeaseLostError("Analysis worker lease was lost")
             await session.commit()
+
+    async def _set_report_phase(
+        self, version_id: str, phase: str, worker_owner_id: str | None
+    ) -> None:
+        if phase not in {"generating", "auditing", "revising", "publishing"}:
+            raise ValueError(f"Unsupported report phase: {phase}")
+        async with self.database.session() as session:
+            version = await session.get(AnalysisVersion, version_id)
+            if version is None or version.status != "running":
+                raise LeaseLostError("Analysis worker lease was lost")
+            if worker_owner_id is not None and version.worker_owner_id != worker_owner_id:
+                raise LeaseLostError("Analysis worker lease was lost")
+            try:
+                checkpoints = json.loads(version.pipeline_checkpoints_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                checkpoints = {}
+            checkpoints["report_phase"] = phase
+            version.pipeline_checkpoints_json = json.dumps(
+                checkpoints, ensure_ascii=False
+            )
+            await session.commit()
+        emit_analysis_event(
+            logging.getLogger("uvicorn.error"),
+            "analysis.report.phase_changed",
+            analysis_version_id=version_id,
+            status=phase,
+        )

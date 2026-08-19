@@ -99,7 +99,7 @@ test('single report renders structured markdown and runtime metrics without old 
 
   assert.match(detail, /<MarkdownReport markdown=\{card\.reportMarkdown\}/);
   assert.doesNotMatch(appSource, /DeepSeek 正在阅读全文并生成报告/);
-  assert.match(appSource, /jobModelDisplayName\(job\)/);
+  assert.match(appSource, /analysisProgressCopy\(job\)/);
   assert.match(appSource, /transcribing && <span>/);
   assert.match(appSource, /transcribing && <div className="progress large">/);
   assert.match(appSource, /生成全天报告/);

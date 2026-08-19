@@ -124,6 +124,8 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
         "__PyCaChE__/cache.pyc",
         ".VeNv/dependency.py",
         ".GiT/config",
+        "audio-memory-governance/features/private.json",
+        ".worktrees/feature/private.txt",
     )
     for relative_path in fixture_files:
         path = contamination / relative_path
@@ -209,6 +211,8 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
         "build",
         "audio-memory.sqlite3",
         ".env",
+        "audio-memory-governance",
+        ".worktrees",
         "__pycache__",
     }
     assert not any(
