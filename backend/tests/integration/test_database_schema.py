@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from json import loads
 from pathlib import Path
@@ -76,6 +77,17 @@ def test_initial_migration_creates_all_phase_one_tables(tmp_path: Path) -> None:
         "temp_file_manifest",
         "feedback_index",
     }.issubset(tables)
+
+
+def test_migrations_preserve_existing_application_loggers(tmp_path: Path) -> None:
+    logger = logging.getLogger("audio_memory.test.migration_logging")
+    original_disabled = logger.disabled
+    logger.disabled = False
+    try:
+        run_migrations(tmp_path / "logging.sqlite3")
+        assert logger.disabled is False
+    finally:
+        logger.disabled = original_disabled
 
 
 def test_migrations_enable_wal_and_normal_synchronous_mode(tmp_path: Path) -> None:

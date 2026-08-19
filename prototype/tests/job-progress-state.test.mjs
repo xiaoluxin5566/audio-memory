@@ -32,6 +32,19 @@ test('provider reading copy is shown only after a worker claim', () => {
 })
 
 
+test('durable report phase gives useful progress without exposing content', () => {
+  assert.deepEqual(analysisProgressCopy({
+    stage: 'analyzing', analysis_phase: 'running',
+    analysis_detail_phase: 'auditing', provider_id: 'deepseek',
+    model_id: 'deepseek-v4-pro',
+  }), {
+    title: 'DeepSeek V4 Pro 正在审校报告',
+    detail: '初稿已安全保存，正在检查完整性和证据。',
+    failed: false,
+  })
+})
+
+
 test('missing durable queue is presented as retryable instead of running', () => {
   assert.deepEqual(analysisProgressCopy({
     stage: 'analyzing',

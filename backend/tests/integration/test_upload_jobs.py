@@ -185,6 +185,30 @@ async def test_job_api_projects_analysis_phase_from_durable_version(
 
 
 @pytest.mark.asyncio
+async def test_job_api_projects_safe_durable_analysis_detail_phase(job_client):
+    client, _, database = job_client
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.ANALYZING.value))
+        session.add(AnalysisVersion(
+            id=str(uuid4()), source_job_id=job_id, batch_id=None,
+            provider_id="deepseek", model_id="deepseek-v4-pro",
+            credential_generation=1, prompt_snapshot_json="{}",
+            profile_snapshot_json="[]", fixed_rules_hash="f" * 64,
+            staged_results_json="{}", status="running",
+            worker_owner_id="worker-1",
+            lease_expires_at="2099-01-01T00:00:00+00:00",
+            pipeline_checkpoints_json='{"report_phase":"auditing"}',
+        ))
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["analysis_detail_phase"] == "auditing"
+
+
+@pytest.mark.asyncio
 async def test_job_api_never_claims_model_running_without_a_version(job_client):
     client, _, database = job_client
     job_id = str(uuid4())

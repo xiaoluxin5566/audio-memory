@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import audio_memory.analysis.single_report_runner as runner_module
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.single_report_runner import SingleReportRunner
 from audio_memory.db import Database
@@ -381,6 +382,48 @@ async def test_clean_segmented_v1_audit_publishes_v1_after_merge(tmp_path) -> No
     assert report.quality_metadata.audit_status == "completed"
     assert report.quality_metadata.quality_score == 91
     assert staged["direct_report_publication_metadata"]["report_version"] == "v1"
+
+
+@pytest.mark.asyncio
+async def test_report_runner_persists_and_logs_each_user_visible_phase(
+    tmp_path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "report-phases.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    runner = SingleReportRunner(
+        database=database,
+        provider=PipelineProvider(
+            v1_audit=audit_payload(mode="full_v1_audit", issue=True),
+            revision=revision_payload(),
+            final_audit=audit_payload(
+                mode="revision_final_audit", issue=False
+            ),
+        ),
+        publisher=Publisher(),
+        generation_source=GenerationSource(),
+    )
+    phases: list[str] = []
+    logged_phases: list[str] = []
+    monkeypatch.setattr(
+        runner_module,
+        "emit_analysis_event",
+        lambda _logger, _event, **fields: logged_phases.append(fields["status"]),
+    )
+    save_phase = runner._set_report_phase
+
+    async def capture_phase(version_id, phase, worker_owner_id):
+        await save_phase(version_id, phase, worker_owner_id)
+        async with database.session() as session:
+            version = await session.get(AnalysisVersion, version_id)
+            phases.append(json.loads(version.pipeline_checkpoints_json)["report_phase"])
+
+    runner._set_report_phase = capture_phase
+    await runner.run("version-1", "worker-1")
+
+    assert phases == ["generating", "auditing", "revising", "auditing", "publishing"]
+    assert logged_phases == phases
+    await database.dispose()
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ class JobView(BaseModel):
     batch_total: int = 0
     sleep_prevention_status: str | None = None
     analysis_phase: str | None = None
+    analysis_detail_phase: str | None = None
 
 
 def service_from(request: Request) -> UploadService:
@@ -102,8 +103,8 @@ async def job_view_with_sleep_status(request: Request, job) -> JobView:
     view = JobView.model_validate(job, from_attributes=True)
     if job.stage in {JobStage.ANALYZING.value, JobStage.FAILED.value}:
         async with service_from(request).database.session() as session:
-            version_status = await session.scalar(
-                select(AnalysisVersion.status)
+            version = await session.scalar(
+                select(AnalysisVersion)
                 .where(
                     AnalysisVersion.source_job_id == job.id,
                     AnalysisVersion.reanalysis_batch_id.is_(None),
@@ -113,8 +114,16 @@ async def job_view_with_sleep_status(request: Request, job) -> JobView:
             )
         if job.stage == JobStage.FAILED.value:
             view.analysis_phase = "failed"
-        elif version_status in {"pending", "running"}:
-            view.analysis_phase = version_status
+        elif version is not None and version.status in {"pending", "running"}:
+            view.analysis_phase = version.status
+            if version.status == "running":
+                try:
+                    checkpoints = json.loads(version.pipeline_checkpoints_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    checkpoints = {}
+                detail_phase = checkpoints.get("report_phase")
+                if detail_phase in {"generating", "auditing", "revising", "publishing"}:
+                    view.analysis_detail_phase = detail_phase
         else:
             view.analysis_phase = "failed"
     if job.stage in {JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value}:

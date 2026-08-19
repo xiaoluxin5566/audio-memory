@@ -9,7 +9,10 @@ from audio_memory.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Migrations run inside the already-configured web process.  The default
+    # disables every logger not named by alembic.ini, including uvicorn and our
+    # structured lifecycle loggers.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
