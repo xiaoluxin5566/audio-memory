@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict, dataclass, fields
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 from typing import ClassVar
 
@@ -179,6 +182,25 @@ class FeatureStore:
             raise GovernanceError("功能状态文件与文件名不一致。")
         return record
 
+    def prepare(self) -> None:
+        self._validate_directory(self.governance_root, create=True)
+        self._validate_directory(self.features_root, create=True)
+
+    def exists(self, feature_id: str) -> bool:
+        FeatureRecord._validate_feature_id(feature_id)
+        path = self.features_root / f"{feature_id}.json"
+        return path.exists() or path.is_symlink()
+
+    def list(self) -> tuple[FeatureRecord, ...]:
+        if not self.governance_root.exists():
+            return ()
+        self._validate_directory(self.governance_root, create=False)
+        if not self.features_root.exists():
+            return ()
+        self._validate_directory(self.features_root, create=False)
+        records = [self.load(path.stem) for path in self.features_root.glob("*.json")]
+        return tuple(sorted(records, key=lambda item: item.feature_id))
+
     def save(self, record: FeatureRecord) -> Path:
         validated = FeatureRecord.from_dict(record.to_dict())
         self._validate_directory(self.governance_root, create=True)
@@ -251,4 +273,242 @@ class FeatureStore:
             raise GovernanceError("拒绝读写硬链接的功能状态文件。")
 
 
-__all__ = ["FeatureRecord", "FeatureStore", "GovernanceError"]
+@dataclass(frozen=True, slots=True)
+class WorktreeInfo:
+    path: Path
+    head_commit: str
+    branch: str | None
+
+
+class GitRepository:
+    def __init__(self, checkout: Path) -> None:
+        self.checkout = checkout.resolve()
+        self.top_level = Path(self._git("rev-parse", "--show-toplevel")).resolve()
+        raw_common = Path(self._git("rev-parse", "--git-common-dir"))
+        self.common_dir = (
+            raw_common if raw_common.is_absolute() else self.top_level / raw_common
+        ).resolve()
+        self.repository_root = self.common_dir.parent
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(self.checkout), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _git(self, *args: str) -> str:
+        result = self._run(*args)
+        if result.returncode != 0:
+            diagnostic = (result.stderr or result.stdout).strip()
+            raise GovernanceError(f"Git 操作失败：{diagnostic}")
+        return result.stdout.strip()
+
+    @property
+    def current_branch(self) -> str:
+        branch = self._git("branch", "--show-current")
+        if not branch:
+            raise GovernanceError("当前 Git 检出处于 detached HEAD。")
+        return branch
+
+    @property
+    def head_commit(self) -> str:
+        return self._git("rev-parse", "HEAD")
+
+    @property
+    def is_clean(self) -> bool:
+        return not self._git("status", "--porcelain")
+
+    def branch_exists(self, branch: str) -> bool:
+        result = self._run("show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if result.returncode not in {0, 1}:
+            raise GovernanceError("Git 分支检查失败。")
+        return result.returncode == 0
+
+    def worktree_root_is_ignored(self) -> bool:
+        result = self._run(
+            "check-ignore", "--quiet", ".worktrees/governance-probe"
+        )
+        if result.returncode not in {0, 1}:
+            raise GovernanceError("Git ignore 规则检查失败。")
+        return result.returncode == 0
+
+    def worktrees(self) -> tuple[WorktreeInfo, ...]:
+        entries: list[WorktreeInfo] = []
+        current: dict[str, str] = {}
+        output = self._git("worktree", "list", "--porcelain")
+        for line in [*output.splitlines(), ""]:
+            if not line:
+                if current:
+                    branch_ref = current.get("branch")
+                    entries.append(
+                        WorktreeInfo(
+                            path=Path(current["worktree"]).resolve(),
+                            head_commit=current["HEAD"],
+                            branch=(
+                                branch_ref.removeprefix("refs/heads/")
+                                if branch_ref
+                                else None
+                            ),
+                        )
+                    )
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            if key in {"worktree", "HEAD", "branch"}:
+                current[key] = value
+        return tuple(entries)
+
+    def create_worktree(self, feature_id: str) -> Path:
+        branch = f"codex/{feature_id}"
+        path = (self.repository_root / ".worktrees" / feature_id).resolve()
+        result = self._run(
+            "worktree", "add", str(path), "-b", branch, "main"
+        )
+        if result.returncode != 0:
+            diagnostic = (result.stderr or result.stdout).strip()
+            raise GovernanceError(f"创建功能 worktree 失败：{diagnostic}")
+        return path
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureStatus:
+    record: FeatureRecord
+    path: Path
+    valid: bool
+    diagnostic: str | None = None
+
+
+class FeatureService:
+    def __init__(self, repository: GitRepository) -> None:
+        self.repository = repository
+        self.store = FeatureStore(repository.common_dir)
+
+    def start(self, feature_id: str, target_version: str) -> FeatureStatus:
+        FeatureRecord._validate_feature_id(feature_id)
+        self.store.prepare()
+        if self.store.exists(feature_id):
+            record = self.store.load(feature_id)
+            if record.target_version != target_version:
+                raise GovernanceError("功能开发进度记录的目标版本不一致。")
+            return self._verified_status(record)
+        if self.repository.current_branch != "main" or not self.repository.is_clean:
+            raise GovernanceError(
+                "新功能必须从 main 的干净检出创建；"
+                "当前 main 存在未提交修改或当前不在 main。"
+            )
+        if not self.repository.worktree_root_is_ignored():
+            raise GovernanceError(
+                ".worktrees 未被 Git ignore 规则保护，拒绝创建功能 worktree。"
+            )
+        branch = f"codex/{feature_id}"
+        path = (self.repository.repository_root / ".worktrees" / feature_id).resolve()
+        if self.repository.branch_exists(branch) or path.exists():
+            raise GovernanceError(
+                "功能分支或 worktree 已存在，但缺少开发进度记录。"
+            )
+        base_commit = self.repository.head_commit
+        created_path = self.repository.create_worktree(feature_id)
+        record = FeatureRecord.new(
+            feature_id,
+            base_commit,
+            target_version=target_version,
+        )
+        self.store.save(record)
+        return FeatureStatus(record=record, path=created_path, valid=True)
+
+    def status(self, feature_id: str | None = None) -> tuple[FeatureStatus, ...]:
+        records = (
+            (self.store.load(feature_id),)
+            if feature_id is not None
+            else self.store.list()
+        )
+        statuses: list[FeatureStatus] = []
+        for record in records:
+            try:
+                statuses.append(self._verified_status(record))
+            except GovernanceError as exc:
+                statuses.append(
+                    FeatureStatus(
+                        record=record,
+                        path=self._expected_path(record),
+                        valid=False,
+                        diagnostic=str(exc),
+                    )
+                )
+        return tuple(statuses)
+
+    def _verified_status(self, record: FeatureRecord) -> FeatureStatus:
+        expected_path = self._expected_path(record)
+        matching = [
+            item
+            for item in self.repository.worktrees()
+            if item.path == expected_path and item.branch == record.branch
+        ]
+        if not self.repository.branch_exists(record.branch) or len(matching) != 1:
+            raise GovernanceError(
+                f"功能开发进度记录与 worktree 或分支不一致：{record.feature_id}"
+            )
+        return FeatureStatus(record=record, path=expected_path, valid=True)
+
+    def _expected_path(self, record: FeatureRecord) -> Path:
+        return (self.repository.repository_root / record.worktree).resolve()
+
+
+def _repository_from_current_directory() -> GitRepository:
+    return GitRepository(Path.cwd())
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Audio Memory 功能轨道管理")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("feature_id")
+    start_parser.add_argument(
+        "--target-version", default="v0.1.0-beta.3"
+    )
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("feature_id", nargs="?")
+    arguments = parser.parse_args(argv)
+    try:
+        service = FeatureService(_repository_from_current_directory())
+        if arguments.command == "start":
+            status = service.start(arguments.feature_id, arguments.target_version)
+            print(json.dumps({
+                "feature_id": status.record.feature_id,
+                "branch": status.record.branch,
+                "worktree": str(status.path),
+                "status": status.record.status,
+            }, ensure_ascii=False))
+        else:
+            statuses = service.status(arguments.feature_id)
+            print(json.dumps([
+                {
+                    "feature_id": item.record.feature_id,
+                    "branch": item.record.branch,
+                    "worktree": str(item.path),
+                    "status": item.record.status,
+                    "valid": item.valid,
+                    "diagnostic": item.diagnostic,
+                }
+                for item in statuses
+            ], ensure_ascii=False))
+        return 0
+    except GovernanceError as exc:
+        print(f"功能轨道操作失败：{exc}", file=sys.stderr)
+        return 1
+
+
+__all__ = [
+    "FeatureRecord",
+    "FeatureService",
+    "FeatureStatus",
+    "FeatureStore",
+    "GitRepository",
+    "GovernanceError",
+]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -3,19 +3,49 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+FEATURE_START = REPOSITORY_ROOT / "scripts" / "feature-start.sh"
+FEATURE_STATUS = REPOSITORY_ROOT / "scripts" / "feature-status.sh"
 sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
 
 from feature_governance import (  # noqa: E402
     FeatureRecord,
+    FeatureService,
     FeatureStore,
+    GitRepository,
     GovernanceError,
 )
+
+
+def git(path: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(path), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def git_repository(tmp_path: Path) -> Path:
+    root = tmp_path / "repository"
+    root.mkdir()
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.name", "Test User")
+    git(root, "config", "user.email", "test@example.com")
+    (root / "README.md").write_text("fixture\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
+    git(root, "add", "README.md", ".gitignore")
+    git(root, "commit", "-m", "initial")
+    return root
 
 
 @pytest.mark.parametrize(
@@ -121,3 +151,136 @@ def test_store_rejects_hardlinked_state_file(tmp_path: Path) -> None:
 
     with pytest.raises(GovernanceError, match="硬链接"):
         FeatureStore(tmp_path).load("search")
+
+
+def test_start_creates_one_branch_worktree_and_shared_progress_record(
+    git_repository: Path,
+) -> None:
+    service = FeatureService(GitRepository(git_repository))
+
+    started = service.start("report-progress", "v0.1.0-beta.3")
+
+    assert started.record.branch == "codex/report-progress"
+    assert started.path == git_repository / ".worktrees/report-progress"
+    assert git(started.path, "branch", "--show-current") == "codex/report-progress"
+    assert git(git_repository, "status", "--porcelain") == ""
+    common_dir = Path(git(git_repository, "rev-parse", "--git-common-dir"))
+    if not common_dir.is_absolute():
+        common_dir = git_repository / common_dir
+    assert (
+        common_dir
+        / "audio-memory-governance/features/report-progress.json"
+    ).is_file()
+
+
+def test_start_existing_feature_resumes_without_creating_another_branch(
+    git_repository: Path,
+) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    first = service.start("search", "v0.1.0-beta.3")
+
+    second = service.start("search", "v0.1.0-beta.3")
+
+    assert second == first
+    branches = git(git_repository, "branch", "--format=%(refname:short)")
+    assert branches.splitlines().count("codex/search") == 1
+
+
+def test_start_refuses_dirty_main(git_repository: Path) -> None:
+    (git_repository / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(GovernanceError, match="main.*未提交"):
+        FeatureService(GitRepository(git_repository)).start(
+            "search", "v0.1.0-beta.3"
+        )
+
+    assert not (git_repository / ".worktrees/search").exists()
+
+
+def test_start_refuses_unignored_worktree_directory(git_repository: Path) -> None:
+    git(git_repository, "rm", ".gitignore")
+    git(git_repository, "commit", "-m", "remove ignore rule")
+
+    with pytest.raises(GovernanceError, match=r"\.worktrees.*ignore"):
+        FeatureService(GitRepository(git_repository)).start(
+            "search", "v0.1.0-beta.3"
+        )
+
+    assert not (git_repository / ".worktrees/search").exists()
+
+
+def test_start_preflights_progress_storage_before_creating_git_state(
+    git_repository: Path,
+) -> None:
+    common_dir = Path(git(git_repository, "rev-parse", "--git-common-dir"))
+    if not common_dir.is_absolute():
+        common_dir = git_repository / common_dir
+    outside = git_repository.parent / "outside-governance"
+    outside.mkdir()
+    (common_dir / "audio-memory-governance").symlink_to(outside)
+
+    with pytest.raises(GovernanceError, match="符号链接"):
+        FeatureService(GitRepository(git_repository)).start(
+            "search", "v0.1.0-beta.3"
+        )
+
+    assert not (git_repository / ".worktrees/search").exists()
+    assert "codex/search" not in git(
+        git_repository, "branch", "--format=%(refname:short)"
+    ).splitlines()
+
+
+def test_start_refuses_progress_record_without_its_worktree(
+    git_repository: Path,
+) -> None:
+    repository = GitRepository(git_repository)
+    service = FeatureService(repository)
+    started = service.start("search", "v0.1.0-beta.3")
+    git(git_repository, "worktree", "remove", str(started.path))
+
+    with pytest.raises(GovernanceError, match="开发进度记录.*worktree"):
+        service.start("search", "v0.1.0-beta.3")
+
+
+def test_status_lists_tracks_from_shared_git_state(git_repository: Path) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    service.start("one", "v0.1.0-beta.3")
+
+    statuses = service.status()
+
+    assert [(item.record.feature_id, item.valid) for item in statuses] == [
+        ("one", True)
+    ]
+
+
+def test_shell_entries_create_then_report_the_same_track(
+    git_repository: Path,
+) -> None:
+    started = subprocess.run(
+        [str(FEATURE_START), "shell-track"],
+        cwd=git_repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    reported = subprocess.run(
+        [str(FEATURE_STATUS), "shell-track"],
+        cwd=git_repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert started.returncode == 0, started.stderr
+    assert reported.returncode == 0, reported.stderr
+    assert json.loads(started.stdout)["branch"] == "codex/shell-track"
+    assert json.loads(reported.stdout) == [
+        {
+            "feature_id": "shell-track",
+            "branch": "codex/shell-track",
+            "worktree": str(git_repository / ".worktrees/shell-track"),
+            "status": "in_progress",
+            "valid": True,
+            "diagnostic": None,
+        }
+    ]
