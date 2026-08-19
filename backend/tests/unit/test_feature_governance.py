@@ -40,7 +40,7 @@ def test_feature_store_round_trip_preserves_only_workflow_state(
 
     assert store.load("report-progress") == record
     payload = json.loads(
-        (tmp_path / ".codex/features/report-progress.json").read_text(
+        (tmp_path / "audio-memory-governance/features/report-progress.json").read_text(
             encoding="utf-8"
         )
     )
@@ -69,8 +69,8 @@ def test_feature_store_round_trip_preserves_only_workflow_state(
 def test_store_rejects_symlinked_features_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex" / "features").symlink_to(outside)
+    (tmp_path / "audio-memory-governance").mkdir()
+    (tmp_path / "audio-memory-governance" / "features").symlink_to(outside)
 
     with pytest.raises(GovernanceError, match="符号链接"):
         FeatureStore(tmp_path).save(
@@ -104,7 +104,7 @@ def test_store_rejects_symlinked_features_directory(tmp_path: Path) -> None:
 def test_store_rejects_corrupt_or_unknown_state(
     tmp_path: Path, payload: str
 ) -> None:
-    state_root = tmp_path / ".codex" / "features"
+    state_root = tmp_path / "audio-memory-governance" / "features"
     state_root.mkdir(parents=True)
     (state_root / "search.json").write_text(payload, encoding="utf-8")
 
@@ -113,7 +113,7 @@ def test_store_rejects_corrupt_or_unknown_state(
 
 
 def test_store_rejects_hardlinked_state_file(tmp_path: Path) -> None:
-    state_root = tmp_path / ".codex" / "features"
+    state_root = tmp_path / "audio-memory-governance" / "features"
     state_root.mkdir(parents=True)
     source = tmp_path / "outside.json"
     source.write_text("{}", encoding="utf-8")

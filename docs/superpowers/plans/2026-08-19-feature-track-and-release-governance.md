@@ -4,7 +4,7 @@
 
 **目标：** 用仓库内的功能轨道、环境隔离、测试门禁和双重发布授权，强制执行 beta.2 → beta.3 开发发布流程。
 
-**架构：** 新增一个无用户数据的 Python 流程核心，负责验证 Git/worktree/状态文件和原子更新；薄 shell 入口只负责定位仓库与调用核心。开发运行复用已有 `dev_lifecycle.py`，发布复用 `build-release.sh`，不复制已有安全边界。
+**架构：** 新增一个无用户数据的 Python 流程核心，负责验证 Git/worktree/开发进度记录和原子更新；进度记录位于 `git rev-parse --git-common-dir` 下的 `audio-memory-governance`，不参与 Git 提交。薄 shell 入口只负责定位仓库与调用核心。开发运行复用已有 `dev_lifecycle.py`，发布复用 `build-release.sh`。
 
 **技术栈：** Python 3.12、Bash、Git worktree、pytest、Node.js test runner、Playwright、现有 Vite/FastAPI 开发运行时。
 
@@ -14,7 +14,7 @@
 
 - 用户使用版本继续固定为 `v0.1.0-beta.2`，本计划不合并 `main`、不发布、不安装新版。
 - 新功能分支名必须是 `codex/<feature_id>`，且必须从干净 `main` 创建。
-- 功能可跨多个对话，但同一 `feature_id` 只有一个分支、一个 worktree 和一份状态文件。
+- 功能可跨多个对话，但同一 `feature_id` 只有一个分支、一个 worktree 和一份共享开发进度记录。
 - 开发页面是 `127.0.0.1:5173`，开发后端是 `127.0.0.1:8766`，数据根是功能 worktree 内的 `.runtime/dev`。
 - 没有用户明确批准，任何命令都不合并、不发布、不创建标签、不删除分支或 worktree。
 - 所有生产代码遵守 TDD：先观察目标测试失败，再实现最小代码。
@@ -59,7 +59,7 @@ cd backend
 
 - [ ] **步骤 3：实现严格模型、JSON 校验和原子写入**
 
-`FeatureRecord` 必须固定 `schema_version=1`，验证状态枚举、分支名、相对 worktree 路径、Git SHA 和检查名。`FeatureStore.save()` 必须在 `.codex/features` 中使用同目录临时文件、`fsync`、`os.replace` 和目录 `fsync`；拒绝符号链接、硬链接和非普通文件。
+`FeatureRecord` 必须固定 `schema_version=1`，验证状态枚举、分支名、相对 worktree 路径、Git SHA 和检查名。`FeatureStore.save()` 必须在 Git 共享管理目录的 `audio-memory-governance/features` 中使用同目录临时文件、`fsync`、`os.replace` 和目录 `fsync`；拒绝符号链接、硬链接和非普通文件。
 
 - [ ] **步骤 4：增加往返、未知字段、损坏 JSON 和原子替换测试并运行**
 
@@ -272,7 +272,7 @@ git commit -m "feat: gate feature completion on tested commits"
 **接口：**
 - `ReleaseManifest`、`ReleaseService.prepare(version, feature_ids)`
 - `ReleaseService.integrate(manifest_path, approval_token)`
-- 候选清单：`.codex/releases/<version>-candidate.json`
+- 候选清单：`<git-common-dir>/audio-memory-governance/releases/<version>-candidate.json`
 
 - [ ] **步骤 1：先写只有 ready 且 SHA 一致的功能进入候选清单的测试**
 
@@ -361,7 +361,7 @@ cd backend
 
 授权值必须是候选清单规范 JSON 的 SHA-256，任何清单更改都使授权失效。校验通过后才调用现有 `build-release.sh`；只在成功构建和安装边界验证后创建版本标签。
 
-- [ ] **步骤 4：验证发布包不携带 `.codex/features`、worktree 或开发运行数据**
+- [ ] **步骤 4：验证发布包不携带 `audio-memory-governance`、worktree 或开发运行数据**
 
 ```bash
 cd backend
@@ -446,7 +446,7 @@ git commit -m "docs: enforce the feature release workflow"
 ### 任务 8：当前 beta3-stability 轨道的审计式纳管
 
 **文件：**
-- 新建：`.codex/features/beta3-stability.json`
+- 新建（不参与 Git 提交）：`<git-common-dir>/audio-memory-governance/features/beta3-stability.json`
 - 修改：`docs/qa/2026-08-19-feature-release-governance-acceptance.md`
 
 **前置条件：** 只读审计确认当前 worktree、`codex/beta3-stability` 分支、HEAD 和开发运行根的映射正确。
@@ -461,7 +461,7 @@ git commit -m "docs: enforce the feature release workflow"
 
 - [ ] **步骤 2：向用户展示精确纳管映射并获得明确确认**
 
-未获得确认前停止，不创建 `.codex/features/beta3-stability.json`。
+未获得确认前停止，不创建 `audio-memory-governance/features/beta3-stability.json`。
 
 - [ ] **步骤 3：确认后原子写入当前轨道状态并重新校验**
 
@@ -473,7 +473,7 @@ git commit -m "docs: enforce the feature release workflow"
 - [ ] **步骤 4：提交纳管记录**
 
 ```bash
-git add .codex/features/beta3-stability.json docs/qa/2026-08-19-feature-release-governance-acceptance.md
+git add docs/qa/2026-08-19-feature-release-governance-acceptance.md
 git commit -m "chore: enroll the beta3 stability track"
 ```
 

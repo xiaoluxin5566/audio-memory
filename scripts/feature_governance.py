@@ -157,14 +157,14 @@ class FeatureRecord:
 
 
 class FeatureStore:
-    def __init__(self, repository_root: Path) -> None:
-        self.repository_root = repository_root.resolve()
-        self.codex_root = self.repository_root / ".codex"
-        self.features_root = self.codex_root / "features"
+    def __init__(self, git_common_dir: Path) -> None:
+        self.git_common_dir = git_common_dir.resolve()
+        self.governance_root = self.git_common_dir / "audio-memory-governance"
+        self.features_root = self.governance_root / "features"
 
     def load(self, feature_id: str) -> FeatureRecord:
         FeatureRecord._validate_feature_id(feature_id)
-        self._validate_directory(self.codex_root, create=False)
+        self._validate_directory(self.governance_root, create=False)
         self._validate_directory(self.features_root, create=False)
         path = self.features_root / f"{feature_id}.json"
         self._validate_regular_file(path)
@@ -181,7 +181,7 @@ class FeatureStore:
 
     def save(self, record: FeatureRecord) -> Path:
         validated = FeatureRecord.from_dict(record.to_dict())
-        self._validate_directory(self.codex_root, create=True)
+        self._validate_directory(self.governance_root, create=True)
         self._validate_directory(self.features_root, create=True)
         destination = self.features_root / f"{validated.feature_id}.json"
         if destination.exists() or destination.is_symlink():
