@@ -39,6 +39,18 @@ REQUIRED_COVERAGE = {
 }
 
 
+def test_repository_governance_contract_names_all_required_gates() -> None:
+    agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    workflow = (
+        PROJECT_ROOT / ".github/workflows/quality-gate.yml"
+    ).read_text(encoding="utf-8")
+    for name in ("backend", "frontend", "browser", "runtime-isolation"):
+        assert name in agents
+        assert name in workflow
+    assert "scripts/quality-gate.sh" in agents
+    assert "./scripts/quality-gate.sh" in workflow
+
+
 @pytest.fixture(scope="module")
 def evaluator():
     spec = importlib.util.spec_from_file_location("prompt_evaluator", EVALUATOR_PATH)
