@@ -18,7 +18,9 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
     (root / "prototype" / "dist" / "client").mkdir(parents=True)
     (root / "scripts").mkdir()
     (root / "runtime" / "ffmpeg" / "bin").mkdir(parents=True)
+    (root / "runtime" / "uv").mkdir(parents=True)
     (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (root / "THIRD_PARTY_NOTICES.md").write_text("fixture notices\n", encoding="utf-8")
     (root / "backend" / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0.0.0'\n")
     (root / "backend" / "uv.lock").write_text("version = 1\nrevision = 1\nrequires-python = '>=3.12'\n")
     (root / "prototype" / "dist" / "client" / "index.html").write_text("release")
@@ -45,6 +47,9 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
         "source_url": "https://ffmpeg.org/fixture", "source_sha256": "a" * 64,
         "configure_flags": ["--disable-gpl", "--disable-nonfree"], "binaries": binaries,
     }), encoding="utf-8")
+    uv = root / "runtime" / "uv" / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(0o755)
     return root
 
 

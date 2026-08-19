@@ -7,9 +7,9 @@ Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在�
 ## 运行环境
 
 - macOS，Apple Silicon（M 系列）
-- Python 3.12、`uv`
-- Node.js、npm
-- ffmpeg
+- 发布包已自带 `ffmpeg` 和 `ffprobe`，用户无需安装 Homebrew
+- 发布包已自带 `uv`，用户无需预先安装 Python、uv、Node.js 或 npm
+- 安装器会准备应用私有的 Python 环境和本地模型
 
 ## 安装与启动
 
@@ -23,7 +23,7 @@ export PATH="$HOME/.local/bin:$PATH"
 audio-memory start
 ```
 
-安装器会把程序放到 `~/Library/Application Support/AudioMemory/app`，升级前备份数据库，但不会删除同目录下的历史音频、转写、报告、Prompt、反馈或 Keychain 配置。
+安装器会把程序放到 `~/Library/Application Support/AudioMemory/app`，并在切换版本前校验随包音频组件。升级前备份数据库，但不会删除同目录下的历史音频、转写、报告、Prompt、反馈或 Keychain 配置。
 
 常用命令：
 
@@ -37,6 +37,7 @@ audio-memory version
 ```
 
 源码开发环境仍可运行 `./scripts/install.sh` 和 `./scripts/start.sh`。
+发布构建人员先运行 `./scripts/build-ffmpeg-runtime.sh`，再运行 `./scripts/build-release.sh`。FFmpeg 来源与许可信息见 `THIRD_PARTY_NOTICES.md`。
 
 默认只监听 `127.0.0.1:8765`。安装脚本会准备前后端依赖、Whisper 模型和本地说话人分段模型。需要排查环境时运行：
 

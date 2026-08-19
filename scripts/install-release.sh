@@ -17,6 +17,7 @@ fail() {
 
 for required in \
   VERSION \
+  THIRD_PARTY_NOTICES.md \
   backend/pyproject.toml \
   backend/uv.lock \
   prototype/dist/client/index.html \
@@ -29,7 +30,8 @@ for required in \
   runtime/ffmpeg/bin/ffmpeg \
   runtime/ffmpeg/bin/ffprobe \
   runtime/ffmpeg/manifest.json \
-  runtime/ffmpeg/LICENSE.md; do
+  runtime/ffmpeg/LICENSE.md \
+  runtime/uv/uv; do
   [ -f "$RELEASE_ROOT/$required" ] || fail "发布包缺少 $required"
 done
 
@@ -71,7 +73,8 @@ if [ ! -d "$TARGET" ]; then
   chmod +x "$TEMPORARY/scripts/audio-memory" "$TEMPORARY/scripts/install-release.sh" \
     "$TEMPORARY/scripts/start.sh" "$TEMPORARY/scripts/doctor.sh" \
     "$TEMPORARY/scripts/verify-ffmpeg-runtime.py" \
-    "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe"
+    "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe" \
+    "$TEMPORARY/runtime/uv/uv"
   if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ]; then
     AUDIO_MEMORY_PREBUILT=1 "$TEMPORARY/scripts/install.sh"
   fi

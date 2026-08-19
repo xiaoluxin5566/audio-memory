@@ -7,6 +7,7 @@ PACKAGE_NAME="audio-memory-v${VERSION}-macos-arm64"
 ARCHIVE_ROOT="audio-memory-v${VERSION}"
 DIST_ROOT="${AUDIO_MEMORY_RELEASE_DIST:-$PROJECT_ROOT/dist}"
 FFMPEG_RUNTIME="${AUDIO_MEMORY_FFMPEG_RUNTIME:-$PROJECT_ROOT/vendor/ffmpeg-darwin-arm64}"
+UV_BINARY="${AUDIO_MEMORY_UV_BINARY:-$(command -v uv 2>/dev/null || true)}"
 
 if [ "${AUDIO_MEMORY_ALLOW_DIRTY_RELEASE:-0}" != "1" ] && [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
   printf '发布失败：候选工作树存在未提交改动。\n' >&2
@@ -22,6 +23,17 @@ fi
 }
 "$PROJECT_ROOT/backend/.venv/bin/python" \
   "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$FFMPEG_RUNTIME"
+[ -n "$UV_BINARY" ] && [ -x "$UV_BINARY" ] || {
+  printf '发布失败：缺少可随包的 uv 可执行文件。\n' >&2
+  exit 1
+}
+"$UV_BINARY" --version >/dev/null
+if [ "${AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK:-0}" != "1" ]; then
+  /usr/bin/file "$UV_BINARY" | grep -q arm64 || {
+    printf '发布失败：uv 不是 Apple Silicon 可执行文件。\n' >&2
+    exit 1
+  }
+fi
 
 STAGING_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/audio-memory-release.XXXXXX")"
 STAGING="$STAGING_PARENT/$ARCHIVE_ROOT"
@@ -38,6 +50,7 @@ cp "$PROJECT_ROOT/VERSION" "$STAGING/VERSION"
 cp "$PROJECT_ROOT/README.md" "$STAGING/README.md"
 cp "$PROJECT_ROOT/CHANGELOG.md" "$STAGING/CHANGELOG.md"
 cp "$PROJECT_ROOT/PRIVACY.md" "$STAGING/PRIVACY.md"
+cp "$PROJECT_ROOT/THIRD_PARTY_NOTICES.md" "$STAGING/THIRD_PARTY_NOTICES.md"
 cp "$PROJECT_ROOT/backend/pyproject.toml" "$STAGING/backend/pyproject.toml"
 cp "$PROJECT_ROOT/backend/uv.lock" "$STAGING/backend/uv.lock"
 cp "$PROJECT_ROOT/backend/alembic.ini" "$STAGING/backend/alembic.ini"
@@ -47,11 +60,14 @@ find "$STAGING/backend" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGING/backend" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cp -R "$PROJECT_ROOT/prototype/dist/client" "$STAGING/prototype/dist/client"
 cp -R "$FFMPEG_RUNTIME" "$STAGING/runtime/ffmpeg"
+mkdir -p "$STAGING/runtime/uv"
+cp "$UV_BINARY" "$STAGING/runtime/uv/uv"
 
 for script in \
   audio-memory \
   backup_data.py \
   build-release.sh \
+  build-ffmpeg-runtime.sh \
   com.audio-memory.local.plist.template \
   doctor.sh \
   doctor_checks.py \
@@ -63,9 +79,10 @@ done
 cp "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$STAGING/scripts/verify-ffmpeg-runtime.py"
 chmod +x "$STAGING/scripts/audio-memory" "$STAGING/scripts/backup_data.py" \
   "$STAGING/scripts/build-release.sh" "$STAGING/scripts/install-release.sh" \
+  "$STAGING/scripts/build-ffmpeg-runtime.sh" \
   "$STAGING/scripts/install.sh" "$STAGING/scripts/start.sh" "$STAGING/scripts/doctor.sh" \
   "$STAGING/scripts/verify-ffmpeg-runtime.py" "$STAGING/runtime/ffmpeg/bin/ffmpeg" \
-  "$STAGING/runtime/ffmpeg/bin/ffprobe"
+  "$STAGING/runtime/ffmpeg/bin/ffprobe" "$STAGING/runtime/uv/uv"
 
 mkdir -p "$DIST_ROOT"
 ARCHIVE="$DIST_ROOT/$PACKAGE_NAME.tar.gz"

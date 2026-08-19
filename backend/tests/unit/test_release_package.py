@@ -36,6 +36,9 @@ def create_runtime(root: Path) -> Path:
 
 def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
     runtime = create_runtime(tmp_path / "ffmpeg-runtime")
+    uv_binary = tmp_path / "uv"
+    uv_binary.write_text("#!/bin/sh\nprintf 'uv fixture\\n'\n", encoding="utf-8")
+    uv_binary.chmod(0o755)
     result = subprocess.run(
         ["bash", str(BUILDER)],
         cwd=PROJECT_ROOT,
@@ -46,6 +49,7 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
             "AUDIO_MEMORY_SKIP_RELEASE_BUILD": "1",
             "AUDIO_MEMORY_FFMPEG_RUNTIME": str(runtime),
             "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+            "AUDIO_MEMORY_UV_BINARY": str(uv_binary),
         },
         capture_output=True,
         text=True,
@@ -62,6 +66,7 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
     prefix = "audio-memory-v0.1.0-beta.1"
     required = {
         f"{prefix}/VERSION",
+        f"{prefix}/THIRD_PARTY_NOTICES.md",
         f"{prefix}/backend/pyproject.toml",
         f"{prefix}/backend/src/audio_memory/main.py",
         f"{prefix}/backend/migrations/versions/0014_app_settings.py",
@@ -73,6 +78,7 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
         f"{prefix}/runtime/ffmpeg/bin/ffprobe",
         f"{prefix}/runtime/ffmpeg/manifest.json",
         f"{prefix}/runtime/ffmpeg/LICENSE.md",
+        f"{prefix}/runtime/uv/uv",
     }
     assert required <= names
     forbidden_parts = {
