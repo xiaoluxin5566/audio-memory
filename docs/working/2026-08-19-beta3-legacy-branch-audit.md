@@ -36,6 +36,17 @@
 
 这些分支是首批本地删除候选。删除前仍需检查对应工作树是否干净；`codex/release-v0-1-beta` 指向的发布历史已由不可变标签 `v0.1.0-beta.1`、`v0.1.0-beta.2` 保留，删除本地分支不会删除标签或已发布版本。
 
+### 已合并但工作树仍含未跟踪文件的处置
+
+| 工作树 | 未跟踪内容 | 价值与处置 |
+| --- | --- | --- |
+| `audio-memory-phase1` | 两份旧交接和 Playwright 状态 | 交接描述的代码已被后续主线替代；不迁移。Playwright 目录是可重建测试状态 |
+| `codex-transcription-phase0` | `benchmark-local-transcription.py` | 依赖早期内部转写接口且无当前测试；不迁入 beta.3。现有正式 benchmark evidence 足以保留历史方法 |
+| `local-fast-v0-1` / `autonomous-day-map` | 交接、只读排查、截图、导出、依赖、数据库读取和真实模型辅助脚本 | 脱敏产品结论迁移至 `docs/research/2026-08-19-day-map-followup-archive.md`；真实转写、ID、截图、导出和会读取 Keychain/调用外部模型的脚本不迁移 |
+| `smooth-progress` | `.venv`、`node_modules` | 可重建依赖，不迁移 |
+
+这些未跟踪文件仍属于各工作树，在用户批准删除工作树前不做清理。
+
 ## 1. `codex/analysis-sleep-prevention`
 
 - 分叉点：`85e01ff`
