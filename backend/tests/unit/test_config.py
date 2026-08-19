@@ -4,9 +4,117 @@ import pytest
 
 from audio_memory.config import (
     AppPaths,
+    AppProfile,
+    RuntimeConfig,
+    RuntimeConfigurationError,
     UnsupportedPlatformError,
     assert_supported_platform,
 )
+
+
+def test_runtime_config_preserves_production_defaults(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home", project_root=tmp_path / "repo", environ={}
+    )
+
+    assert config.profile is AppProfile.PRODUCTION
+    assert config.paths.root == tmp_path / "home/Library/Application Support/AudioMemory"
+    assert config.paths.models == config.paths.root / "models"
+    assert config.port == 8765
+    assert config.keychain_service == "Audio Memory"
+
+
+def test_runtime_config_uses_isolated_development_defaults(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+
+    assert config.profile is AppProfile.DEVELOPMENT
+    assert config.paths.root == (tmp_path / "repo/.runtime/dev").resolve()
+    assert config.paths.models == (
+        tmp_path / "home/Library/Application Support/AudioMemory/models"
+    ).resolve()
+    assert config.port == 8766
+    assert config.keychain_service == "Audio Memory Dev"
+
+
+@pytest.mark.parametrize("profile", ["staging", "Development", "PRODUCTION"])
+def test_runtime_config_rejects_unknown_or_case_mismatched_profile(
+    tmp_path: Path, profile: str
+) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="AUDIO_MEMORY_PROFILE"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home",
+            project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_PROFILE": profile},
+        )
+
+
+@pytest.mark.parametrize("port", ["not-a-number", "0", "65536", "-1"])
+def test_runtime_config_rejects_invalid_port_before_creating_directories(
+    tmp_path: Path, port: str
+) -> None:
+    data_root = tmp_path / "data"
+
+    with pytest.raises(RuntimeConfigurationError, match="AUDIO_MEMORY_PORT"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home",
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_PORT": port,
+                "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            },
+        )
+
+    assert not data_root.exists()
+
+
+def test_runtime_config_rejects_blank_keychain_service_before_creating_directories(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+
+    with pytest.raises(RuntimeConfigurationError, match="AUDIO_MEMORY_KEYCHAIN_SERVICE"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home",
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+                "AUDIO_MEMORY_KEYCHAIN_SERVICE": "  \t",
+            },
+        )
+
+    assert not data_root.exists()
+
+
+def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "custom-data"
+    model_root = tmp_path / "custom-models"
+
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_MODEL_ROOT": str(model_root),
+            "AUDIO_MEMORY_KEYCHAIN_SERVICE": "  Audio Memory Test  ",
+            "AUDIO_MEMORY_PORT": "9012",
+        },
+    )
+
+    assert config.paths.root == data_root.resolve()
+    assert config.paths.models == model_root.resolve()
+    assert config.keychain_service == "Audio Memory Test"
+    assert config.port == 9012
+    assert not data_root.exists()
+    assert not model_root.exists()
 
 
 def test_app_paths_are_all_under_local_application_support(tmp_path: Path) -> None:
@@ -44,4 +152,3 @@ def test_platform_guard_accepts_macos_arm64(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("audio_memory.config.platform.machine", lambda: "arm64")
 
     assert_supported_platform()
-
