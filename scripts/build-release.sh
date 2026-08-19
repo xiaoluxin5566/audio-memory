@@ -6,6 +6,7 @@ VERSION="$(tr -d '[:space:]' < "$PROJECT_ROOT/VERSION")"
 PACKAGE_NAME="audio-memory-v${VERSION}-macos-arm64"
 ARCHIVE_ROOT="audio-memory-v${VERSION}"
 DIST_ROOT="${AUDIO_MEMORY_RELEASE_DIST:-$PROJECT_ROOT/dist}"
+FFMPEG_RUNTIME="${AUDIO_MEMORY_FFMPEG_RUNTIME:-$PROJECT_ROOT/vendor/ffmpeg-darwin-arm64}"
 
 if [ "${AUDIO_MEMORY_ALLOW_DIRTY_RELEASE:-0}" != "1" ] && [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
   printf '发布失败：候选工作树存在未提交改动。\n' >&2
@@ -19,6 +20,8 @@ fi
   printf '发布失败：缺少前端生产文件。\n' >&2
   exit 1
 }
+"$PROJECT_ROOT/backend/.venv/bin/python" \
+  "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$FFMPEG_RUNTIME"
 
 STAGING_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/audio-memory-release.XXXXXX")"
 STAGING="$STAGING_PARENT/$ARCHIVE_ROOT"
@@ -28,6 +31,7 @@ trap cleanup EXIT INT TERM
 mkdir -p \
   "$STAGING/backend" \
   "$STAGING/prototype/dist" \
+  "$STAGING/runtime" \
   "$STAGING/scripts"
 
 cp "$PROJECT_ROOT/VERSION" "$STAGING/VERSION"
@@ -42,6 +46,7 @@ cp -R "$PROJECT_ROOT/backend/migrations" "$STAGING/backend/migrations"
 find "$STAGING/backend" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGING/backend" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cp -R "$PROJECT_ROOT/prototype/dist/client" "$STAGING/prototype/dist/client"
+cp -R "$FFMPEG_RUNTIME" "$STAGING/runtime/ffmpeg"
 
 for script in \
   audio-memory \
@@ -55,9 +60,12 @@ for script in \
   start.sh; do
   cp "$PROJECT_ROOT/scripts/$script" "$STAGING/scripts/$script"
 done
+cp "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$STAGING/scripts/verify-ffmpeg-runtime.py"
 chmod +x "$STAGING/scripts/audio-memory" "$STAGING/scripts/backup_data.py" \
   "$STAGING/scripts/build-release.sh" "$STAGING/scripts/install-release.sh" \
-  "$STAGING/scripts/install.sh" "$STAGING/scripts/start.sh" "$STAGING/scripts/doctor.sh"
+  "$STAGING/scripts/install.sh" "$STAGING/scripts/start.sh" "$STAGING/scripts/doctor.sh" \
+  "$STAGING/scripts/verify-ffmpeg-runtime.py" "$STAGING/runtime/ffmpeg/bin/ffmpeg" \
+  "$STAGING/runtime/ffmpeg/bin/ffprobe"
 
 mkdir -p "$DIST_ROOT"
 ARCHIVE="$DIST_ROOT/$PACKAGE_NAME.tar.gz"

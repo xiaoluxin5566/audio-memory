@@ -24,9 +24,17 @@ for required in \
   scripts/backup_data.py \
   scripts/com.audio-memory.local.plist.template \
   scripts/doctor.sh \
-  scripts/start.sh; do
+  scripts/start.sh \
+  scripts/verify-ffmpeg-runtime.py \
+  runtime/ffmpeg/bin/ffmpeg \
+  runtime/ffmpeg/bin/ffprobe \
+  runtime/ffmpeg/manifest.json \
+  runtime/ffmpeg/LICENSE.md; do
   [ -f "$RELEASE_ROOT/$required" ] || fail "发布包缺少 $required"
 done
+
+/usr/bin/python3 "$RELEASE_ROOT/scripts/verify-ffmpeg-runtime.py" \
+  "$RELEASE_ROOT/runtime/ffmpeg"
 
 VERSION="$(tr -d '[:space:]' < "$RELEASE_ROOT/VERSION")"
 case "$VERSION" in
@@ -60,7 +68,10 @@ trap cleanup EXIT INT TERM
 if [ ! -d "$TARGET" ]; then
   mkdir -m 700 "$TEMPORARY"
   cp -R "$RELEASE_ROOT/." "$TEMPORARY/"
-  chmod +x "$TEMPORARY/scripts/audio-memory" "$TEMPORARY/scripts/install-release.sh" "$TEMPORARY/scripts/start.sh" "$TEMPORARY/scripts/doctor.sh"
+  chmod +x "$TEMPORARY/scripts/audio-memory" "$TEMPORARY/scripts/install-release.sh" \
+    "$TEMPORARY/scripts/start.sh" "$TEMPORARY/scripts/doctor.sh" \
+    "$TEMPORARY/scripts/verify-ffmpeg-runtime.py" \
+    "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe"
   if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ]; then
     AUDIO_MEMORY_PREBUILT=1 "$TEMPORARY/scripts/install.sh"
   fi
