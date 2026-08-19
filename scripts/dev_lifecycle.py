@@ -98,8 +98,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _server_argv(project_root: Path, port: int) -> tuple[str, ...]:
     backend_source = project_root / "backend" / "src"
+    virtualenv_python = project_root / "backend" / ".venv" / "bin" / "python"
     return (
-        str(Path(sys.executable).resolve()),
+        str(virtualenv_python),
         "-m",
         "uvicorn",
         "audio_memory.main:app",

@@ -20,7 +20,7 @@ RUNTIME_HELPER = REPOSITORY_ROOT / "scripts" / "runtime_config.py"
 DEV_START = REPOSITORY_ROOT / "scripts" / "dev-start.sh"
 DEV_STOP = REPOSITORY_ROOT / "scripts" / "dev-stop.sh"
 PYTHON = REPOSITORY_ROOT / "backend" / ".venv" / "bin" / "python"
-REAL_PYTHON = str(PYTHON.resolve())
+REAL_PYTHON = str(PYTHON)
 SCRIPTS_ROOT = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 import dev_lifecycle  # noqa: E402
@@ -105,6 +105,12 @@ def expected_server_argv(port: int = 8766) -> list[str]:
         "--port",
         str(port),
     ]
+
+
+def test_server_argv_preserves_virtualenv_python_path() -> None:
+    argv = dev_lifecycle._server_argv(REPOSITORY_ROOT, 8766)
+
+    assert argv[0] == str(PYTHON)
 
 
 def process_record(
