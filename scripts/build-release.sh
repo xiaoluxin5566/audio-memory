@@ -39,8 +39,6 @@ cp "$PROJECT_ROOT/backend/uv.lock" "$STAGING/backend/uv.lock"
 cp "$PROJECT_ROOT/backend/alembic.ini" "$STAGING/backend/alembic.ini"
 cp -R "$PROJECT_ROOT/backend/src" "$STAGING/backend/src"
 cp -R "$PROJECT_ROOT/backend/migrations" "$STAGING/backend/migrations"
-find "$STAGING/backend" -type d -name __pycache__ -prune -exec rm -rf {} +
-find "$STAGING/backend" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cp -R "$PROJECT_ROOT/prototype/dist/client" "$STAGING/prototype/dist/client"
 
 for script in \
@@ -56,6 +54,55 @@ for script in \
   start.sh; do
   cp "$PROJECT_ROOT/scripts/$script" "$STAGING/scripts/$script"
 done
+find "$STAGING" -type d \( \
+  -name .git -o \
+  -name .venv -o \
+  -name .runtime -o \
+  -name .uv-cache -o \
+  -name .pytest_cache -o \
+  -name .mypy_cache -o \
+  -name .ruff_cache -o \
+  -name '*.egg-info' -o \
+  -name node_modules -o \
+  -name tests -o \
+  -name outputs -o \
+  -name screenshots -o \
+  -name designs -o \
+  -name models -o \
+  -name audio -o \
+  -name build -o \
+  -name __pycache__ \
+\) -prune -exec rm -rf {} +
+find "$STAGING" -type f \( \
+  -iname '.env*' -o \
+  -iname '*.pyc' -o \
+  -iname '*.pyo' -o \
+  -iname '*.sqlite' -o \
+  -iname '*.sqlite3' -o \
+  -iname '*.sqlite-wal' -o \
+  -iname '*.sqlite-shm' -o \
+  -iname '*.sqlite-journal' -o \
+  -iname '*.sqlite3-wal' -o \
+  -iname '*.sqlite3-shm' -o \
+  -iname '*.sqlite3-journal' -o \
+  -iname '*.db' -o \
+  -iname '*.db-wal' -o \
+  -iname '*.db-shm' -o \
+  -iname '*.db-journal' -o \
+  -iname '*.mp3' -o \
+  -iname '*.aac' -o \
+  -iname '*.m4a' -o \
+  -iname '*.wav' -o \
+  -iname '*.flac' -o \
+  -iname '*.ogg' -o \
+  -iname '*.opus' -o \
+  -iname '*.wma' -o \
+  -iname '*.caf' -o \
+  -iname '*.aiff' -o \
+  -iname '*.log' -o \
+  -iname '*.log.*' \
+\) -delete
+find "$STAGING" -type l -delete
 chmod +x "$STAGING/scripts/audio-memory" "$STAGING/scripts/backup_data.py" \
   "$STAGING/scripts/build-release.sh" "$STAGING/scripts/install-release.sh" \
   "$STAGING/scripts/install.sh" "$STAGING/scripts/start.sh" "$STAGING/scripts/doctor.sh"

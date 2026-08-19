@@ -43,16 +43,24 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
     return root
 
 
-def run_installer(home: Path, data_root: Path, release_root: Path) -> subprocess.CompletedProcess[str]:
+def run_installer(
+    home: Path,
+    data_root: Path | None,
+    release_root: Path,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
+        "AUDIO_MEMORY_SKIP_RELEASE_SETUP": "1",
+    }
+    if data_root is None:
+        environment.pop("AUDIO_MEMORY_DATA_ROOT", None)
+    else:
+        environment["AUDIO_MEMORY_DATA_ROOT"] = str(data_root)
     return subprocess.run(
         ["bash", str(INSTALLER)],
-        env={
-            **os.environ,
-            "HOME": str(home),
-            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
-            "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
-            "AUDIO_MEMORY_SKIP_RELEASE_SETUP": "1",
-        },
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -114,6 +122,71 @@ def test_installer_rejects_a_release_without_doctor_runtime_config(tmp_path: Pat
 
     assert result.returncode != 0
     assert "scripts/runtime_config.py" in result.stderr
+
+
+def test_installer_rejects_a_release_without_doctor_checks(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release")
+    (release_root / "scripts" / "doctor_checks.py").unlink()
+    home.mkdir()
+
+    result = run_installer(home, data_root, release_root)
+
+    assert result.returncode != 0
+    assert "scripts/doctor_checks.py" in result.stderr
+
+
+def test_default_install_backs_up_exact_production_database_before_switching_current(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    data_root = home / "Library" / "Application Support" / "AudioMemory"
+    first_release = create_release(tmp_path / "first-release", "0.1.0-beta.1")
+    first = run_installer(home, None, first_release)
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    database = data_root / "audio-memory.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE reports (title TEXT)")
+        connection.execute("INSERT INTO reports VALUES ('历史报告')")
+
+    next_release = create_release(tmp_path / "next-release", "0.1.0-beta.2")
+    (next_release / "scripts" / "backup_data.py").write_text(
+        """from pathlib import Path
+import shutil
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+current = source.parent / "app" / "current"
+if current.resolve().name != "0.1.0-beta.1":
+    raise SystemExit(73)
+destination.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(source, destination)
+(destination.parent / "current-before-backup.txt").write_text(
+    str(current.resolve()), encoding="utf-8"
+)
+""",
+        encoding="utf-8",
+    )
+
+    second = run_installer(home, None, next_release)
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert database == (
+        home / "Library" / "Application Support" / "AudioMemory" / "audio-memory.sqlite3"
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT title FROM reports").fetchone() == ("历史报告",)
+    backup_directories = sorted((data_root / "backups").iterdir())
+    latest_backup = backup_directories[-1]
+    assert (latest_backup / "audio-memory.sqlite3").is_file()
+    assert (latest_backup / "current-before-backup.txt").read_text(
+        encoding="utf-8"
+    ).endswith("/0.1.0-beta.1")
+    assert (data_root / "app" / "current").resolve().name == "0.1.0-beta.2"
 
 
 def test_installed_doctor_can_resolve_its_packaged_runtime_config(tmp_path: Path) -> None:
