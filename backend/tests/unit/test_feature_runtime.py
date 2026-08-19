@@ -28,17 +28,17 @@ def test_runtime_plan_uses_controller_tools_and_feature_sources() -> None:
     )
 
     assert plan.backend_argv[0] == str(
-        (REPOSITORY_ROOT / "backend/.venv/bin/python").resolve()
+        (REPOSITORY_ROOT / "backend/.venv/bin/python").absolute()
     )
     assert plan.backend_argv[1:3] == (
         str(REPOSITORY_ROOT / "scripts/dev_lifecycle.py"),
         "start",
     )
     assert plan.backend_environment["AUDIO_MEMORY_DEV_PYTHON"] == str(
-        (REPOSITORY_ROOT / "backend/.venv/bin/python").resolve()
+        (REPOSITORY_ROOT / "backend/.venv/bin/python").absolute()
     )
     assert plan.frontend_argv == (
-        str((REPOSITORY_ROOT / "prototype/node_modules/.bin/vite").resolve()),
+        str((REPOSITORY_ROOT / "prototype/node_modules/.bin/vite").absolute()),
         "--host",
         "127.0.0.1",
         "--port",

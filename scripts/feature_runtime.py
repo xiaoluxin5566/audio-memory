@@ -22,13 +22,15 @@ class FeatureRuntimeError(RuntimeError):
 
 
 def _verified_executable(path: Path, label: str) -> Path:
+    candidate = path.absolute()
     try:
-        resolved = path.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
     except OSError as exc:
         raise FeatureRuntimeError(f"{label}不存在。") from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise FeatureRuntimeError(f"{label}不可执行。")
-    return resolved
+    # 保留虚拟环境入口路径；返回实际目标会丢失 venv 语义。
+    return candidate
 
 
 @dataclass(frozen=True, slots=True)
