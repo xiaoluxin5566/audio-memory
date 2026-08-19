@@ -34,4 +34,3 @@ def test_sqlite_backup_is_consistent_and_keeps_source_unchanged(tmp_path: Path) 
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert connection.execute("SELECT count(*) FROM reports").fetchone() == (2,)
     assert destination.stat().st_mode & 0o777 == 0o600
-

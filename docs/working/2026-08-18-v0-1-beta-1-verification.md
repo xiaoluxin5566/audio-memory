@@ -1,7 +1,7 @@
 # Audio Memory v0.1.0-beta.1 验证记录
 
-日期：2026-08-18  
-候选分支：`codex/release-v0-1-beta`  
+日期：2026-08-18
+候选分支：`codex/release-v0-1-beta`
 基线：`main` at `07835bc`
 
 ## 已通过
