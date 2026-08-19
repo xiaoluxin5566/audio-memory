@@ -480,7 +480,29 @@ def main(argv: list[str] | None = None) -> int:
                 "branch": status.record.branch,
                 "worktree": str(status.path),
                 "status": status.record.status,
-            }, ensure_ascii=False))
+            }, ensure_ascii=False), flush=True)
+            if os.environ.get("AUDIO_MEMORY_FEATURE_NO_RUNTIME") != "1":
+                controller_root = Path(__file__).resolve().parent.parent
+                runtime_script = controller_root / "scripts/feature_runtime.py"
+                os.execve(
+                    sys.executable,
+                    [
+                        sys.executable,
+                        str(runtime_script),
+                        "start",
+                        "--feature-id",
+                        status.record.feature_id,
+                        "--git-common-dir",
+                        str(service.repository.common_dir),
+                        "--controller-root",
+                        str(controller_root),
+                        "--feature-root",
+                        str(status.path),
+                        "--home",
+                        str(Path.home()),
+                    ],
+                    dict(os.environ),
+                )
         else:
             statuses = service.status(arguments.feature_id)
             print(json.dumps([

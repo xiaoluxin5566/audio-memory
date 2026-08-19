@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FEATURE_START = REPOSITORY_ROOT / "scripts" / "feature-start.sh"
 FEATURE_STATUS = REPOSITORY_ROOT / "scripts" / "feature-status.sh"
+FEATURE_STOP = REPOSITORY_ROOT / "scripts" / "feature-stop.sh"
 sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
 
 from feature_governance import (  # noqa: E402
@@ -256,9 +258,14 @@ def test_status_lists_tracks_from_shared_git_state(git_repository: Path) -> None
 def test_shell_entries_create_then_report_the_same_track(
     git_repository: Path,
 ) -> None:
+    environment = {
+        **os.environ,
+        "AUDIO_MEMORY_FEATURE_NO_RUNTIME": "1",
+    }
     started = subprocess.run(
         [str(FEATURE_START), "shell-track"],
         cwd=git_repository,
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -284,3 +291,18 @@ def test_shell_entries_create_then_report_the_same_track(
             "diagnostic": None,
         }
     ]
+
+
+def test_feature_stop_is_safe_when_no_runtime_is_recorded(
+    git_repository: Path,
+) -> None:
+    result = subprocess.run(
+        [str(FEATURE_STOP), "shell-track"],
+        cwd=git_repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "未运行" in result.stdout
