@@ -57,6 +57,12 @@ async function installJobApi(page) {
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/feed') {
       if (completed) completedFeedReads += 1
+      if (completedFeedReads === 1) {
+        return route.fulfill({
+          status: 503,
+          json: { detail: { code: 'feed_temporarily_unavailable', message: 'temporary refresh failure' } },
+        })
+      }
       return route.fulfill({ json: completed ? completedFeed : { days: [], todos: [] } })
     }
     if (pathname === '/api/history') return route.fulfill({ json: completed ? completedHistory : { days: [] } })
@@ -80,7 +86,7 @@ async function installJobApi(page) {
   return () => completedFeedReads
 }
 
-test('completed batch clears upload area and appears in feed and history', async ({ page }) => {
+test('completed batch retries a transient feed refresh before clearing the job', async ({ page }) => {
   const completedFeedReads = await installJobApi(page)
   await page.goto('/')
 
@@ -93,7 +99,7 @@ test('completed batch clears upload area and appears in feed and history', async
   await expect(page.getByText('上传完成')).toBeVisible()
 
   await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
-  await expect.poll(completedFeedReads).toBeGreaterThan(0)
+  await expect.poll(completedFeedReads).toBeGreaterThan(1)
   await expect(page.getByRole('heading', { name: '产品方案评审' })).toBeVisible()
   await expect(page.getByText('meeting.mp3')).toBeHidden()
 

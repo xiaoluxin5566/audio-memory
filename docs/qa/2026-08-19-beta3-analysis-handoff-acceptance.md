@@ -48,6 +48,7 @@ The log assertion also verifies that transcript text is not emitted.
 - Startup reconciliation preserves healthy pending/running work, retries expired leases, and marks orphan analyzing jobs as failed instead of leaving them stuck.
 - The doctor command reports orphan jobs, expired leases, stale pending work, job/version mismatches, WAL mode, and busy timeout without mutating the database.
 - The UI distinguishes `pending`, `running`, and missing durable queue states; it no longer claims DeepSeek is reading before a worker claim.
+- When the backend reports `completed`, the page refreshes Feed and history before clearing the active job. A transient Feed refresh failure keeps polling and retries until the published report is visible.
 
 ## Explicit boundary
 
