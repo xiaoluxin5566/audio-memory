@@ -699,8 +699,9 @@ async def test_startup_marks_paid_work_interrupted_without_auto_resume(tmp_path:
     async with database.session() as session:
         stages = list(await session.scalars(AnalysisJob.__table__.select().with_only_columns(AnalysisJob.stage)))
 
-    assert changed == 2
-    assert stages.count(JobStage.INTERRUPTED.value) == 2
+    assert changed == 1
+    assert stages.count(JobStage.INTERRUPTED.value) == 1
+    assert stages.count(JobStage.ANALYZING.value) == 1
     assert stages.count(JobStage.COMPLETED.value) == 1
     await database.dispose()
 

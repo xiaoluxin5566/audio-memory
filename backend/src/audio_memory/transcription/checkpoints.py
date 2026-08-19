@@ -92,11 +92,7 @@ class TranscriptionService:
         async with self.database.session() as session:
             result = await session.execute(
                 update(AnalysisJob)
-                .where(
-                    AnalysisJob.stage.in_(
-                        [JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value]
-                    )
-                )
+                .where(AnalysisJob.stage == JobStage.TRANSCRIBING.value)
                 .values(stage=JobStage.INTERRUPTED.value)
             )
             await session.commit()

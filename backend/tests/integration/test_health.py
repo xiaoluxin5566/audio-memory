@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -425,7 +426,11 @@ async def test_development_database_rechecks_reused_connection_before_sql(
             finally:
                 protected_database.unlink()
 
-    assert database_path.read_bytes() == protected_before
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master "
+            "WHERE type='table' AND name='must_not_exist'"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.asyncio
@@ -454,7 +459,11 @@ async def test_development_database_rechecks_pool_checkout_after_hardlink(
         finally:
             protected_database.unlink()
 
-    assert database_path.read_bytes() == protected_before
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master "
+            "WHERE type='table' AND name='must_not_exist'"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.asyncio

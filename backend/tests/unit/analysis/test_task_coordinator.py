@@ -212,6 +212,61 @@ async def test_restart_returns_linked_history_item_to_pending(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_startup_reconciles_only_orphan_analyzing_jobs(tmp_path, caplog) -> None:
+    database = Database(tmp_path / "orphan-analysis.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-orphan", "job-healthy")
+    async with database.session() as session:
+        session.add(
+            AnalysisVersion(
+                id="version-healthy",
+                source_job_id="job-healthy",
+                batch_id=None,
+                provider_id="kimi",
+                model_id="kimi-k2.5",
+                credential_generation=3,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                staged_results_json="{}",
+                status="pending",
+            )
+        )
+        await session.commit()
+    caplog.set_level("INFO", logger="uvicorn.error")
+
+    await AnalysisTaskCoordinator(database).initialize()
+
+    async with database.session() as session:
+        orphan = await session.get(AnalysisJob, "job-orphan")
+        healthy = await session.get(AnalysisJob, "job-healthy")
+        version = await session.get(AnalysisVersion, "version-healthy")
+    assert orphan is not None
+    assert (orphan.stage, orphan.error_code) == (
+        "failed",
+        "model_analysis_failed",
+    )
+    assert healthy is not None and healthy.stage == "analyzing"
+    assert version is not None and version.status == "pending"
+    payloads = []
+    for record in caplog.records:
+        try:
+            payloads.append(json.loads(record.message))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    assert payloads == [
+        {
+            "timestamp": payloads[0]["timestamp"],
+            "event": "analysis.recovery.reconciled",
+            "status": "reconciled",
+            "repair_type": "orphan_analyzing_to_failed",
+            "affected_count": 1,
+        }
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_new_upload_completion_releases_its_runtime_resources(
     tmp_path, monkeypatch
 ) -> None:
@@ -627,6 +682,12 @@ async def test_enqueue_and_claim_emit_ordered_structured_events(
             payloads.append(json.loads(record.message))
         except (TypeError, json.JSONDecodeError):
             continue
+    payloads = [
+        payload
+        for payload in payloads
+        if str(payload.get("event", "")).startswith("analysis.enqueue.")
+        or payload.get("event") == "analysis.worker.claimed"
+    ]
     events = [payload.get("event") for payload in payloads]
     assert events == [
         "analysis.enqueue.started",
