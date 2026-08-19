@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 
 const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const devPort = Number(process.env.AUDIO_MEMORY_DEV_PORT ?? "5173");
+const expectedProfileOverride = process.env.AUDIO_MEMORY_EXPECTED_PROFILE_OVERRIDE;
 const backend = new URL(
   process.env.AUDIO_MEMORY_BACKEND_URL ?? "http://127.0.0.1:8766",
 );
@@ -34,7 +35,7 @@ function protectAndRewriteMutation(req, res) {
 export default defineConfig(({ command }) => ({
   define: {
     "import.meta.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE": JSON.stringify(
-      command === "serve" ? "development" : "",
+      command === "serve" ? (expectedProfileOverride ?? "development") : "",
     ),
   },
   build: {

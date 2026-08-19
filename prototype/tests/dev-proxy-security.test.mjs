@@ -20,6 +20,15 @@ test('development Vite defaults to the isolated backend and declares its expecte
 })
 
 
+test('mocked browser acceptance explicitly disables the development profile gate', async () => {
+  const viteSource = await readFile(new URL('../vite.config.mjs', import.meta.url), 'utf8')
+  const playwrightSource = await readFile(new URL('../playwright.config.js', import.meta.url), 'utf8')
+
+  assert.match(viteSource, /AUDIO_MEMORY_EXPECTED_PROFILE_OVERRIDE/)
+  assert.match(playwrightSource, /AUDIO_MEMORY_EXPECTED_PROFILE_OVERRIDE:\s*''/)
+})
+
+
 async function listen(server) {
   await new Promise((resolve, reject) => {
     server.once('error', reject)
