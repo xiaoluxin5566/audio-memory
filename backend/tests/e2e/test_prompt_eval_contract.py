@@ -778,6 +778,91 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     assert invalid_model.returncode == 1
 
 
+def _write_doctor_fake(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/bash\nset -eu\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_profile_aware_doctor(
+    tmp_path: Path, *, profile: str, port: int, health: str
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    keychain_calls = tmp_path / "keychain-calls"
+    _write_doctor_fake(fake_bin / "curl", 'printf "%s\\n" "$FAKE_HEALTH"')
+    _write_doctor_fake(
+        fake_bin / "security",
+        'printf "security\\n" >> "$FAKE_KEYCHAIN_CALLS"',
+    )
+    _write_doctor_fake(
+        fake_bin / "launchctl",
+        'printf "launchctl %s\\n" "$*" >> "$FAKE_LAUNCHAGENT_CALLS"',
+    )
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    model_root = home / "Library" / "Application Support" / "AudioMemory" / "models"
+    data_root.mkdir()
+    model_root.mkdir(parents=True)
+    model_root.chmod(0o500)
+    try:
+        return subprocess.run(
+            ["bash", str(PROJECT_ROOT / "scripts" / "doctor.sh")],
+            cwd=PROJECT_ROOT,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_HEALTH": health,
+                "FAKE_KEYCHAIN_CALLS": str(keychain_calls),
+                "FAKE_LAUNCHAGENT_CALLS": str(tmp_path / "launchagent-calls"),
+                "AUDIO_MEMORY_PROFILE": profile,
+                "AUDIO_MEMORY_PORT": str(port),
+                "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        model_root.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("profile", "port", "data_classification"),
+    (("production", 8765, "production"), ("development", 8766, "development")),
+)
+def test_doctor_reports_the_resolved_runtime_profile(
+    tmp_path: Path, profile: str, port: int, data_classification: str
+) -> None:
+    result = _run_profile_aware_doctor(
+        tmp_path,
+        profile=profile,
+        port=port,
+        health=json.dumps({"status": "ok", "profile": profile}),
+    )
+
+    assert f"运行配置：profile={profile} port={port} data={data_classification}" in result.stdout
+    assert "✓ 本地服务健康" in result.stdout
+    if profile == "development":
+        assert not (tmp_path / "keychain-calls").exists()
+        assert not (tmp_path / "launchagent-calls").exists()
+    else:
+        assert (tmp_path / "launchagent-calls").read_text(encoding="utf-8") == (
+            f"launchctl print gui/{os.getuid()}/com.audio-memory.local\n"
+        )
+
+
+def test_doctor_rejects_a_healthy_response_from_another_profile(tmp_path: Path) -> None:
+    result = _run_profile_aware_doctor(
+        tmp_path,
+        profile="production",
+        port=9123,
+        health='{"status":"ok","profile":"development"}',
+    )
+
+    assert "✗ 本地服务健康" in result.stdout
+
+
 def test_doctor_accepts_huggingface_style_symlinked_whisper_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -825,6 +910,235 @@ def test_doctor_accepts_huggingface_style_symlinked_whisper_snapshot(
     )
 
     assert result.returncode == 0
+
+
+def test_doctor_reads_whisper_manifest_beside_the_validated_shared_model_root(
+    tmp_path: Path,
+) -> None:
+    development_data = tmp_path / "development-data"
+    model_root = tmp_path / "production-data/models"
+    snapshot = tmp_path / "hub/models--whisper/snapshots/revision"
+    snapshot.mkdir(parents=True)
+    config = snapshot / "config.json"
+    weights = snapshot / "weights.safetensors"
+    config.write_text(json.dumps({"model_type": "whisper"}), encoding="utf-8")
+    weights.write_bytes(b"isolated whisper weights")
+    manifest_root = model_root.parent
+    manifest_root.mkdir(parents=True)
+    manifest_root.joinpath("whisper-model-manifest.json").write_text(
+        json.dumps(
+            {
+                "model_id": "mlx-community/whisper-large-v3-turbo",
+                "snapshot": str(snapshot),
+                "files": [
+                    {
+                        "path": "config.json",
+                        "size": config.stat().st_size,
+                        "sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": "weights.safetensors",
+                        "size": weights.stat().st_size,
+                        "sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "doctor_checks.py"),
+            "whisper",
+            str(manifest_root),
+            str(model_root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not development_data.exists()
+
+
+def test_doctor_reads_diarization_manifest_beside_shared_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "isolated_doctor_checks",
+        PROJECT_ROOT / "scripts" / "doctor_checks.py",
+    )
+    assert spec is not None and spec.loader is not None
+    doctor_checks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor_checks)
+    development_data = tmp_path / "development-data"
+    model_root = tmp_path / "production-data/models"
+    manifest_root = model_root.parent
+    manifest_files: list[dict[str, object]] = []
+    trusted_hashes: dict[str, set[str]] = {}
+    trusted_sizes: dict[str, int] = {}
+    for relative in sorted(doctor_checks.DIARIZATION_PATHS):
+        relative_model = Path(relative).relative_to("models")
+        content = f"isolated fixture: {relative}\n".encode()
+        target = model_root / relative_model
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        trusted_hashes[relative] = {digest}
+        trusted_sizes[digest] = len(content)
+        manifest_files.append(
+            {
+                "path": relative,
+                "sha256": digest,
+                "expected_sha256": digest,
+                "size": len(content),
+                "expected_size": len(content),
+            }
+        )
+    manifest_root.joinpath("diarization-model-manifest.json").write_text(
+        json.dumps({"files": manifest_files}), encoding="utf-8"
+    )
+    monkeypatch.setattr(doctor_checks, "DIARIZATION_HASHES", trusted_hashes)
+    monkeypatch.setattr(doctor_checks, "DIARIZATION_SIZES", trusted_sizes)
+
+    assert doctor_checks.check_diarization(manifest_root, model_root) is True
+    assert not development_data.exists()
+
+
+def test_development_doctor_passes_with_isolated_shared_model_fixtures(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    development_data = tmp_path / "development-data"
+    development_data.mkdir()
+    model_root = home / "Library/Application Support/AudioMemory/models"
+    snapshot = tmp_path / "hub/models--whisper/snapshots/revision"
+    snapshot.mkdir(parents=True)
+    config = snapshot / "config.json"
+    weights = snapshot / "weights.safetensors"
+    config.write_text(json.dumps({"model_type": "whisper"}), encoding="utf-8")
+    weights.write_bytes(b"isolated doctor whisper weights")
+    manifest_root = model_root.parent
+    manifest_root.mkdir(parents=True)
+    manifest_root.joinpath("whisper-model-manifest.json").write_text(
+        json.dumps(
+            {
+                "model_id": "mlx-community/whisper-large-v3-turbo",
+                "snapshot": str(snapshot),
+                "files": [
+                    {
+                        "path": "config.json",
+                        "size": config.stat().st_size,
+                        "sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "path": "weights.safetensors",
+                        "size": weights.stat().st_size,
+                        "sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    diarization_files: list[dict[str, object]] = []
+    for relative in (
+        "models/diarization/silero_vad.onnx",
+        "models/diarization/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx",
+        "models/diarization/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+    ):
+        content = f"isolated doctor fixture: {relative}\n".encode()
+        target = manifest_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        diarization_files.append(
+            {
+                "path": relative,
+                "sha256": digest,
+                "expected_sha256": digest,
+                "size": len(content),
+                "expected_size": len(content),
+            }
+        )
+    manifest_root.joinpath("diarization-model-manifest.json").write_text(
+        json.dumps({"files": diarization_files}), encoding="utf-8"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    checker_calls = tmp_path / "checker-calls"
+    fixture_checker = tmp_path / "fixture-doctor-checks.py"
+    fixture_checker.write_text(
+        """from __future__ import annotations
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+checker_path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("fixture_doctor_checks", checker_path)
+assert spec is not None and spec.loader is not None
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+if sys.argv[2] == "diarization":
+    manifest = json.loads(
+        (Path(sys.argv[3]) / "diarization-model-manifest.json").read_text()
+    )
+    checker.DIARIZATION_HASHES = {
+        item["path"]: {item["expected_sha256"]} for item in manifest["files"]
+    }
+    checker.DIARIZATION_SIZES = {
+        item["expected_sha256"]: item["expected_size"]
+        for item in manifest["files"]
+    }
+sys.argv = sys.argv[1:]
+raise SystemExit(checker.main())
+""",
+        encoding="utf-8",
+    )
+    _write_doctor_fake(
+        fake_bin / "python3",
+        'printf "%s\\n" "$*" >> "$FAKE_CHECKER_CALLS"\n'
+        'if [ "${2:-}" = "diarization" ]; then '
+        'exec "$REAL_PYTHON" "$FIXTURE_CHECKER" "$@"; fi\n'
+        'exec "$REAL_PYTHON" "$@"',
+    )
+
+    result = subprocess.run(
+        ["bash", str(PROJECT_ROOT / "scripts" / "doctor.sh")],
+        cwd=PROJECT_ROOT,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "REAL_PYTHON": sys.executable,
+            "FIXTURE_CHECKER": str(fixture_checker),
+            "FAKE_CHECKER_CALLS": str(checker_calls),
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_DATA_ROOT": str(development_data),
+            "AUDIO_MEMORY_DOCTOR_CORE_ONLY": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "✓ Whisper 模型清单" in result.stdout
+    assert "✓ 说话人分段模型" in result.stdout
+    model_calls = [
+        line
+        for line in checker_calls.read_text(encoding="utf-8").splitlines()
+        if "doctor_checks.py whisper" in line
+        or "doctor_checks.py diarization" in line
+    ]
+    assert len(model_calls) == 2
+    assert all(str(manifest_root) in call for call in model_calls)
+    assert all(str(model_root) in call for call in model_calls)
+    assert all(str(development_data) not in call for call in model_calls)
 
 
 def test_doctor_rejects_tampered_migration_chain(tmp_path: Path) -> None:

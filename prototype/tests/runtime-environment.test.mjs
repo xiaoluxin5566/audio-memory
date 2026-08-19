@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { runtimeEnvironment } from '../src/api/client.js'
+
+test('development UI marks a development backend', () => {
+  assert.deepEqual(runtimeEnvironment('development', { profile: 'development' }), {
+    profile: 'development', blocked: false, label: '开发环境', message: '',
+  })
+})
+
+test('development UI blocks a production backend', () => {
+  const state = runtimeEnvironment('development', { profile: 'production' })
+
+  assert.equal(state.blocked, true)
+  assert.match(state.message, /正式环境/)
+})
+
+test('production UI has no environment label', () => {
+  assert.deepEqual(runtimeEnvironment('', { profile: 'production' }), {
+    profile: 'production', blocked: false, label: '', message: '',
+  })
+})
+
+test('an expected profile blocks a missing or invalid health profile', () => {
+  for (const payload of [null, {}, { profile: 'preview' }]) {
+    const state = runtimeEnvironment('development', payload)
+    assert.equal(state.blocked, true)
+    assert.match(state.message, /无法确认/)
+  }
+})

@@ -1,0 +1,132 @@
+#!/bin/bash
+set -euo pipefail
+
+APP_ROOT="${AUDIO_MEMORY_APP_ROOT:-$HOME/Library/Application Support/AudioMemory/app}"
+DATA_ROOT="${AUDIO_MEMORY_DATA_ROOT:-$HOME/Library/Application Support/AudioMemory}"
+CURRENT_ROOT="$APP_ROOT/current"
+PORT="${AUDIO_MEMORY_PORT:-8765}"
+URL="http://127.0.0.1:${PORT}/"
+HEALTH="http://127.0.0.1:${PORT}/api/health"
+LABEL="com.audio-memory.local"
+DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+LOG_FILE="$DATA_ROOT/runtime/audio-memory.log"
+USAGE="用法：audio-memory {start|stop|restart|status|doctor|logs|version}"
+
+require_install() {
+  if [ ! -f "$CURRENT_ROOT/VERSION" ]; then
+    printf 'Audio Memory 尚未安装或当前版本无效。\n' >&2
+    exit 1
+  fi
+}
+
+healthy() {
+  payload="$(curl --silent --fail --max-time 2 "$HEALTH")" || return 1
+  printf '%s' "$payload" | /usr/bin/python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if isinstance(payload, dict)
+    and payload.get("status") == "ok"
+    and payload.get("profile") == "production"
+    else 1
+)
+'
+}
+
+render_launch_agent() {
+  mkdir -p "$HOME/Library/LaunchAgents" "$DATA_ROOT/runtime"
+  chmod 700 "$DATA_ROOT" "$DATA_ROOT/runtime" 2>/dev/null || true
+  /usr/bin/python3 - "$CURRENT_ROOT/scripts/com.audio-memory.local.plist.template" "$PLIST" "$CURRENT_ROOT" "$DATA_ROOT" "$PORT" "$HOME" <<'PY'
+from pathlib import Path
+import sys
+
+template, destination, current_root, data_root, port, home = sys.argv[1:]
+content = Path(template).read_text(encoding="utf-8")
+content = content.replace("__CURRENT_ROOT__", current_root)
+content = content.replace("__DATA_ROOT__", data_root)
+content = content.replace("__PORT__", port)
+content = content.replace("__HOME__", home)
+target = Path(destination)
+temporary = target.with_suffix(".tmp")
+temporary.write_text(content, encoding="utf-8")
+temporary.chmod(0o600)
+temporary.replace(target)
+PY
+}
+
+start_service() {
+  require_install
+  if healthy; then
+    printf 'Audio Memory 已在运行：%s\n' "$URL"
+    [ "${AUDIO_MEMORY_NO_OPEN:-0}" = "1" ] || open "$URL"
+    return
+  fi
+  render_launch_agent
+  launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  for _ in $(seq 1 60); do
+    if healthy; then
+      printf 'Audio Memory 已启动：%s\n' "$URL"
+      [ "${AUDIO_MEMORY_NO_OPEN:-0}" = "1" ] || open "$URL"
+      return
+    fi
+    sleep 0.5
+  done
+  printf '启动失败，请运行 audio-memory logs 或 audio-memory doctor。\n' >&2
+  exit 1
+}
+
+stop_service() {
+  if launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    printf 'Audio Memory 已停止。\n'
+  else
+    printf 'Audio Memory 当前未运行。\n'
+  fi
+}
+
+case "${1:-}" in
+  start)
+    start_service
+    ;;
+  stop)
+    stop_service
+    ;;
+  restart)
+    stop_service
+    start_service
+    ;;
+  status)
+    require_install
+    if healthy; then
+      printf 'Audio Memory 正在运行：%s\n' "$URL"
+      exit 0
+    fi
+    printf 'Audio Memory 未运行。\n'
+    exit 1
+    ;;
+  doctor)
+    require_install
+    exec "$CURRENT_ROOT/scripts/doctor.sh"
+    ;;
+  logs)
+    mkdir -p "$DATA_ROOT/runtime"
+    touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
+    exec tail -n 200 -f "$LOG_FILE"
+    ;;
+  version)
+    require_install
+    printf 'Audio Memory %s\n' "$(tr -d '[:space:]' < "$CURRENT_ROOT/VERSION")"
+    ;;
+  *)
+    printf '%s\n' "$USAGE" >&2
+    exit 2
+    ;;
+esac

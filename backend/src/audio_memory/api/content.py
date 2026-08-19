@@ -1,13 +1,46 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from audio_memory.content.clear import HistoryBusyError
+from audio_memory.content.service import OpenedEvidenceAudio
 
 
 router = APIRouter(prefix="/api", tags=["content"])
+
+
+class DescriptorFileResponse(FileResponse):
+    """Keep an already validated descriptor pinned through response streaming."""
+
+    def __init__(
+        self, opened: OpenedEvidenceAudio, *, media_type: str
+    ) -> None:
+        self._descriptor = opened.descriptor
+        try:
+            super().__init__(
+                f"/dev/fd/{opened.descriptor}",
+                media_type=media_type,
+                stat_result=opened.stat_result,
+            )
+        except BaseException:
+            os.close(self._descriptor)
+            raise
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            os.close(self._descriptor)
+
+    async def _handle_simple(
+        self, send, send_header_only: bool, _send_pathsend: bool
+    ) -> None:
+        await super()._handle_simple(send, send_header_only, False)
 
 
 class TodoUpdate(BaseModel):
@@ -78,13 +111,16 @@ async def ask_card(card_id: str, payload: QuestionInput, request: Request):
 @router.get("/cards/{card_id}/evidence/{segment_id}/audio")
 async def play_card_evidence(card_id: str, segment_id: str, request: Request):
     try:
-        path = await request.app.state.content_service.evidence_audio(
+        audio = await request.app.state.content_service.evidence_audio(
             card_id, segment_id
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    media_type = "audio/aac" if path.suffix.lower() == ".aac" else "audio/mpeg"
-    return FileResponse(path, media_type=media_type)
+    name = audio.name
+    media_type = "audio/aac" if Path(name).suffix.lower() == ".aac" else "audio/mpeg"
+    if isinstance(audio, OpenedEvidenceAudio):
+        return DescriptorFileResponse(audio, media_type=media_type)
+    return FileResponse(audio, media_type=media_type)
 
 
 @router.post("/cards/{card_id}/feedback", status_code=201)

@@ -5,6 +5,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from audio_memory.db import Database
+from audio_memory.config import PinnedDevelopmentRoot
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, TempFileManifest
 
@@ -21,12 +22,25 @@ def assert_staging_path(path: Path, staging_root: Path) -> Path:
     return resolved
 
 
-def remove_staged_file(path: Path, staging_root: Path) -> None:
+def remove_staged_file(
+    path: Path,
+    staging_root: Path,
+    *,
+    write_boundary: PinnedDevelopmentRoot | None = None,
+) -> None:
     safe_path = assert_staging_path(path, staging_root)
-    safe_path.unlink(missing_ok=True)
+    if write_boundary is None:
+        safe_path.unlink(missing_ok=True)
+    else:
+        write_boundary.unlink_file(path, missing_ok=True)
 
 
-async def cleanup_abandoned_uploads(database: Database, staging_root: Path) -> int:
+async def cleanup_abandoned_uploads(
+    database: Database,
+    staging_root: Path,
+    *,
+    write_boundary: PinnedDevelopmentRoot | None = None,
+) -> int:
     cleaned = 0
     async with database.session() as session:
         records = list(
@@ -39,7 +53,11 @@ async def cleanup_abandoned_uploads(database: Database, staging_root: Path) -> i
         abandoned_jobs: set[str] = set()
         for record in records:
             try:
-                remove_staged_file(Path(record.file_path), staging_root)
+                remove_staged_file(
+                    Path(record.file_path),
+                    staging_root,
+                    write_boundary=write_boundary,
+                )
             except UnsafeCleanupPathError:
                 record.cleanup_status = "unsafe_path"
                 continue

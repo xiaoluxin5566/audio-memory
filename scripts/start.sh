@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON="$PROJECT_ROOT/backend/.venv/bin/python"
 PORT="${AUDIO_MEMORY_PORT:-8765}"
 URL="http://127.0.0.1:${PORT}/"
 HEALTH="http://127.0.0.1:${PORT}/api/health"
@@ -17,8 +18,13 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ ! -x "$PYTHON" ]; then
+  printf '启动失败：运行环境不存在，请重新运行安装程序。\n' >&2
+  exit 1
+fi
+
 cd "$PROJECT_ROOT/backend"
-env PYTHONPATH="$PROJECT_ROOT/backend/src" UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync uvicorn audio_memory.main:app \
+env PYTHONPATH="$PROJECT_ROOT/backend/src" "$PYTHON" -m uvicorn audio_memory.main:app \
   --host 127.0.0.1 --port "$PORT" &
 SERVER_PID=$!
 cleanup() { kill "$SERVER_PID" >/dev/null 2>&1 || true; }

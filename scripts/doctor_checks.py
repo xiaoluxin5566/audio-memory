@@ -60,7 +60,7 @@ def _valid_file(path: Path, item: dict[str, Any]) -> bool:
     return hasher.hexdigest() == digest
 
 
-def check_whisper(app_data: Path) -> bool:
+def check_whisper(app_data: Path, _model_root: Path | None = None) -> bool:
     try:
         manifest = _json(app_data / "whisper-model-manifest.json")
         snapshot = Path(manifest["snapshot"]).resolve()
@@ -100,7 +100,7 @@ def check_whisper(app_data: Path) -> bool:
         return False
 
 
-def check_diarization(app_data: Path) -> bool:
+def check_diarization(app_data: Path, model_root: Path | None = None) -> bool:
     try:
         files = _json(app_data / "diarization-model-manifest.json")["files"]
         if not isinstance(files, list):
@@ -110,10 +110,17 @@ def check_diarization(app_data: Path) -> bool:
             return False
         for relative, item in indexed.items():
             digest = item.get("expected_sha256")
+            relative_model_path = Path(relative)
+            if model_root is not None:
+                relative_model_path = relative_model_path.relative_to("models")
             if (
                 digest != item.get("sha256")
                 or digest not in DIARIZATION_HASHES[relative]
-                or not _valid_file(app_data / relative, item)
+                or not _valid_file(
+                    (model_root if model_root is not None else app_data)
+                    / relative_model_path,
+                    item,
+                )
             ):
                 return False
             trusted_size = DIARIZATION_SIZES.get(digest)
@@ -212,8 +219,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("check", choices=("whisper", "diarization", "migrations", "database", "recovery"))
     parser.add_argument("path", type=Path)
+    parser.add_argument("model_root", type=Path, nargs="?")
     args = parser.parse_args()
     check = {"whisper": check_whisper, "diarization": check_diarization, "migrations": check_migrations, "database": check_database, "recovery": check_recovery}[args.check]
+    if args.model_root is not None and args.check not in {"whisper", "diarization"}:
+        parser.error("model root is only valid for model checks")
+    if args.model_root is not None:
+        return 0 if check(args.path, args.model_root) else 1
     return 0 if check(args.path) else 1
 
 

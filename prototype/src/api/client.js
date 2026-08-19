@@ -1,6 +1,62 @@
 const API_BASE = '/api'
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 let localSessionPromise = null
+let runtimeEnvironmentPromise = null
+const expectedRuntimeProfile = import.meta.env?.VITE_AUDIO_MEMORY_EXPECTED_PROFILE
+  ?? (typeof process === 'undefined' ? '' : process.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE ?? '')
+
+
+export function runtimeEnvironment(expectedProfile, healthPayload) {
+  const profile = ['production', 'development'].includes(healthPayload?.profile)
+    ? healthPayload.profile
+    : 'unknown'
+  const blocked = Boolean(expectedProfile) && profile !== expectedProfile
+  const label = expectedProfile === 'development' ? '开发环境' : ''
+  const message = !blocked
+    ? ''
+    : profile === 'production'
+      ? '当前开发界面连接到了正式环境，已阻止所有写入操作。'
+      : '无法确认本地服务环境，已阻止所有写入操作。'
+  return { profile, blocked, label, message }
+}
+
+
+async function fetchHealth() {
+  const response = await fetch(`${API_BASE}/health`, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error('无法确认本地服务环境，已阻止所有写入操作。')
+  return response.json()
+}
+
+
+export async function loadRuntimeEnvironment() {
+  if (runtimeEnvironmentPromise === null) {
+    runtimeEnvironmentPromise = fetchHealth()
+      .then((payload) => runtimeEnvironment(
+        expectedRuntimeProfile,
+        payload?.status === 'ok' ? payload : null,
+      ))
+      .catch(() => runtimeEnvironment(expectedRuntimeProfile, null))
+  }
+  return runtimeEnvironmentPromise
+}
+
+
+export async function requireWritableRuntime() {
+  if (!expectedRuntimeProfile) return
+  const health = await fetchHealth().catch(() => null)
+  const environment = runtimeEnvironment(
+    expectedRuntimeProfile,
+    health?.status === 'ok' ? health : null,
+  )
+  if (!environment.blocked) return
+  const error = new Error(environment.message)
+  error.code = 'runtime_environment_blocked'
+  throw error
+}
 
 
 async function fetchLocalSession() {
@@ -21,6 +77,7 @@ async function fetchLocalSession() {
 
 
 export async function getLocalSessionHeaders(idempotencyKey = crypto.randomUUID()) {
+  await requireWritableRuntime()
   if (localSessionPromise === null) {
     localSessionPromise = fetchLocalSession().catch((error) => {
       localSessionPromise = null
@@ -55,7 +112,9 @@ export async function apiRequest(path, options = {}) {
   let localHeaders = isMutation
     ? await getLocalSessionHeaders(actionKey)
     : {}
-  const send = () => fetch(`${API_BASE}${path}`, {
+  const send = async () => {
+    if (isMutation) await requireWritableRuntime()
+    return fetch(`${API_BASE}${path}`, {
     ...fetchOptions,
     headers: {
       Accept: 'application/json',
@@ -64,6 +123,7 @@ export async function apiRequest(path, options = {}) {
       ...localHeaders,
     },
   })
+  }
   let response
   let payload = null
   let responseText = ''
@@ -125,6 +185,8 @@ function isInvalidSession(response, payload) {
 }
 
 export const api = {
+  health: () => fetchHealth(),
+  runtimeEnvironment: () => loadRuntimeEnvironment(),
   providers: () => apiRequest('/providers'),
   validateConfiguredProviders: () => apiRequest('/providers/validate-configured', { method: 'POST' }),
   validateProvider: (id) => apiRequest(`/providers/${id}/validate`, { method: 'POST' }),

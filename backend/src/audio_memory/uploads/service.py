@@ -11,7 +11,7 @@ from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from audio_memory.config import AppPaths
+from audio_memory.config import AppPaths, PinnedDevelopmentRoot
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, TempFileManifest, Transcript
@@ -71,11 +71,13 @@ class UploadService:
         paths: AppPaths,
         events: JobEventBroker | None = None,
         eta_tracker: TranscriptionEtaTracker | None = None,
+        write_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         self.database = database
         self.paths = paths
         self.events = events
         self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
+        self.write_boundary = write_boundary
 
     async def create_job(self) -> AnalysisJob:
         job = AnalysisJob(id=str(uuid4()), stage=JobStage.UPLOADING.value)
@@ -83,7 +85,16 @@ class UploadService:
             session.add(job)
             await session.commit()
             await session.refresh(job)
-        (self.paths.staging / job.id).mkdir(mode=0o700, parents=True, exist_ok=True)
+        job_folder = self.paths.staging / job.id
+        if self.write_boundary is None:
+            job_folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            folder_fd = self.write_boundary.open_directory(job_folder, create=True)
+            assert folder_fd is not None
+            try:
+                os.fchmod(folder_fd, 0o700)
+            finally:
+                os.close(folder_fd)
         await self._emit(job.id, "job.created", {"stage": job.stage})
         return job
 
@@ -197,7 +208,16 @@ class UploadService:
         digest = hashlib.sha256()
         size = 0
         try:
-            with target.open("xb") as output:
+            if self.write_boundary is None:
+                output_context = target.open("xb")
+            else:
+                output_fd = self.write_boundary.open_regular_file(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    create_parents=False,
+                )
+                output_context = os.fdopen(output_fd, "wb")
+            with output_context as output:
                 while chunk := await upload.read(1024 * 1024):
                     output.write(chunk)
                     digest.update(chunk)
@@ -288,7 +308,11 @@ class UploadService:
                         TempFileManifest.file_path == str(path)
                     )
                 )
-                remove_staged_file(path, self.paths.staging)
+                remove_staged_file(
+                    path,
+                    self.paths.staging,
+                    write_boundary=self.write_boundary,
+                )
                 if manifest is not None:
                     await session.delete(manifest)
         await self._emit(job_id, "upload.removed", {"file_id": file_id})
@@ -331,7 +355,11 @@ class UploadService:
                     )
                 )
                 for file in files:
-                    remove_staged_file(Path(file.temporary_path), self.paths.staging)
+                    remove_staged_file(
+                        Path(file.temporary_path),
+                        self.paths.staging,
+                        write_boundary=self.write_boundary,
+                    )
                 manifests = list(
                     await session.scalars(
                         select(TempFileManifest).where(
@@ -341,7 +369,11 @@ class UploadService:
                 )
                 for manifest in manifests:
                     path = Path(manifest.file_path)
-                    remove_staged_file(path, self.paths.staging)
+                    remove_staged_file(
+                        path,
+                        self.paths.staging,
+                        write_boundary=self.write_boundary,
+                    )
                     await session.delete(manifest)
                 await session.delete(job)
         await self._emit(job_id, "job.cancelled", {})
@@ -374,7 +406,11 @@ class UploadService:
             await session.commit()
 
     async def _remove_manifest_and_file(self, manifest_id: str, target: Path) -> None:
-        remove_staged_file(target, self.paths.staging)
+        remove_staged_file(
+            target,
+            self.paths.staging,
+            write_boundary=self.write_boundary,
+        )
         async with self.database.session() as session:
             manifest = await session.get(TempFileManifest, manifest_id)
             if manifest is not None:

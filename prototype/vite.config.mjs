@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react";
 const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const devPort = Number(process.env.AUDIO_MEMORY_DEV_PORT ?? "5173");
 const backend = new URL(
-  process.env.AUDIO_MEMORY_BACKEND_URL ?? "http://127.0.0.1:8765",
+  process.env.AUDIO_MEMORY_BACKEND_URL ?? "http://127.0.0.1:8766",
 );
 const loopbackNames = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -31,7 +31,12 @@ function protectAndRewriteMutation(req, res) {
   req.headers.origin = backend.origin;
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  define: {
+    "import.meta.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE": JSON.stringify(
+      command === "serve" ? "development" : "",
+    ),
+  },
   build: {
     outDir: "dist/client",
   },
@@ -55,4 +60,4 @@ export default defineConfig({
     },
   },
   plugins: [react()],
-});
+}));

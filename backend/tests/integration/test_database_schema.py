@@ -5,10 +5,12 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.analysis.versions import AnalysisSnapshot, require_card_version
 from audio_memory.db import Database, run_migrations
+from audio_memory.config import PinnedDevelopmentRoot, RuntimeConfig
 from audio_memory.models import (
     AnalysisJob,
     AnalysisVersion,
@@ -74,6 +76,36 @@ def test_initial_migration_creates_all_phase_one_tables(tmp_path: Path) -> None:
         "temp_file_manifest",
         "feedback_index",
     }.issubset(tables)
+
+
+@pytest.mark.asyncio
+async def test_development_sqlite_guard_supports_unicode_and_spaces(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "音 频 development"
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+        },
+    )
+    boundary = PinnedDevelopmentRoot.open(config, create=True)
+    assert boundary is not None
+    try:
+        boundary.ensure_directories()
+        run_migrations(config.paths.database, write_boundary=boundary)
+        database = Database(config.paths.database, write_boundary=boundary)
+        try:
+            async with database.session() as session:
+                assert await session.scalar(text("SELECT 1")) == 1
+        finally:
+            await database.dispose()
+    finally:
+        boundary.close()
+
+    assert config.paths.database.is_file()
 
 
 def test_report_pipeline_state_migration_adds_checkpoint_columns(

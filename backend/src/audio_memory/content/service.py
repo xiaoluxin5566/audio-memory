@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -11,7 +13,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from audio_memory.config import AppPaths
+from audio_memory.config import AppPaths, PinnedDevelopmentRoot
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisVersion,
@@ -33,6 +35,13 @@ class QuestionAnswerer(Protocol):
     async def answer(self, **kwargs) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class OpenedEvidenceAudio:
+    descriptor: int
+    name: str
+    stat_result: os.stat_result
+
+
 def is_overdue(*, due_at: str | None, completed: bool, now: datetime) -> bool:
     if completed or not due_at:
         return False
@@ -47,11 +56,17 @@ def is_overdue(*, due_at: str | None, completed: bool, now: datetime) -> bool:
 
 class ContentService:
     def __init__(
-        self, database: Database, paths: AppPaths, answerer: QuestionAnswerer
+        self,
+        database: Database,
+        paths: AppPaths,
+        answerer: QuestionAnswerer,
+        *,
+        read_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         self.database = database
         self.paths = paths
         self.answerer = answerer
+        self.read_boundary = read_boundary
 
     async def feed(self) -> dict[str, object]:
         now = datetime.now(UTC)
@@ -182,7 +197,9 @@ class ContentService:
                 found.extend(cls._collect_external_source_ids(nested))
         return list(dict.fromkeys(found))
 
-    async def evidence_audio(self, card_id: str, segment_id: str) -> Path:
+    async def evidence_audio(
+        self, card_id: str, segment_id: str
+    ) -> Path | OpenedEvidenceAudio:
         match = re.fullmatch(r"seg_(\d+)_(\d+)", segment_id)
         if match is None:
             raise LookupError("Unknown card evidence")
@@ -225,11 +242,35 @@ class ContentService:
         if audio_row is None:
             raise LookupError("Unknown card evidence")
         source_file, _ = audio_row
-        audio_root = self.paths.audio.resolve()
-        audio_path = Path(source_file.temporary_path).resolve()
-        if not audio_path.is_relative_to(audio_root) or not audio_path.is_file():
+        if self.read_boundary is None:
+            audio_root = self.paths.audio.resolve()
+            audio_path = Path(source_file.temporary_path).resolve()
+            if not audio_path.is_relative_to(audio_root) or not audio_path.is_file():
+                raise LookupError("Unknown card evidence")
+            return audio_path
+
+        audio_root = Path(os.path.abspath(os.fspath(self.paths.audio)))
+        audio_path = Path(
+            os.path.abspath(os.fspath(Path(source_file.temporary_path)))
+        )
+        if not audio_path.is_relative_to(audio_root):
             raise LookupError("Unknown card evidence")
-        return audio_path
+        try:
+            descriptor = self.read_boundary.open_regular_file(
+                audio_path, os.O_RDONLY
+            )
+        except OSError as exc:
+            raise LookupError("Unknown card evidence") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            return OpenedEvidenceAudio(
+                descriptor=descriptor,
+                name=audio_path.name,
+                stat_result=metadata,
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     async def _evidence_view(
         self,
