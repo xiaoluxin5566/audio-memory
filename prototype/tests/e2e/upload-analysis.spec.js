@@ -23,8 +23,12 @@ const completedFeed = {
       scene_id: 'meeting',
       uploaded_at: '2026-08-05T10:05:00Z',
       payload: {
-        card: { title: '产品方案评审', summary: '团队确认了第一阶段的核心体验。' },
-        detail_sections: [{ kind: 'text', title: '核心结论', text: '先完成端到端体验验证。' }],
+        scene_id: 'meeting',
+        cards: [{
+          card: { title: '产品方案评审', summary: '团队确认了第一阶段的核心体验。' },
+          detail: {},
+          external_source_ids: [],
+        }],
       },
       qa: [],
     }],
@@ -45,12 +49,16 @@ const completedHistory = {
 
 async function installJobApi(page) {
   let completed = false
+  let completedFeedReads = 0
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
-    if (pathname === '/api/feed') return route.fulfill({ json: completed ? completedFeed : { days: [], todos: [] } })
+    if (pathname === '/api/feed') {
+      if (completed) completedFeedReads += 1
+      return route.fulfill({ json: completed ? completedFeed : { days: [], todos: [] } })
+    }
     if (pathname === '/api/history') return route.fulfill({ json: completed ? completedHistory : { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
     if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
@@ -69,10 +77,11 @@ async function installJobApi(page) {
     }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
+  return () => completedFeedReads
 }
 
 test('completed batch clears upload area and appears in feed and history', async ({ page }) => {
-  await installJobApi(page)
+  const completedFeedReads = await installJobApi(page)
   await page.goto('/')
 
   await page.locator('input[type=file]').setInputFiles({
@@ -84,6 +93,7 @@ test('completed batch clears upload area and appears in feed and history', async
   await expect(page.getByText('上传完成')).toBeVisible()
 
   await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
+  await expect.poll(completedFeedReads).toBeGreaterThan(0)
   await expect(page.getByRole('heading', { name: '产品方案评审' })).toBeVisible()
   await expect(page.getByText('meeting.mp3')).toBeHidden()
 
