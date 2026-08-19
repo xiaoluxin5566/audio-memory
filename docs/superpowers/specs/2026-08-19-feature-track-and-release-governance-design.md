@@ -1,32 +1,34 @@
-# Feature Track and Release Governance Design
+# 功能开发轨道与发版治理设计
 
-## 1. Goal
+## 1. 目标
 
-Audio Memory must enforce a repeatable release workflow without relying on a user repeatedly saying “create a branch” or “use the development environment.” The installed user version remains immutable at `v0.1.0-beta.2`; new work starts from `main`, runs on isolated feature tracks, merges to `main` only after approval and gates, and is released as `v0.1.0-beta.3` only after a separate release approval.
+Audio Memory 需要通过仓库内的可执行规则，强制执行可重复的发版流程，不再依赖用户每次强调“新建分支”或“使用开发环境”。
 
-The unit of continuity is a feature track, not a Codex conversation. One feature may span several conversations, while a release-integration conversation may merge several completed feature tracks.
+用户已安装版本固定为 `v0.1.0-beta.2`；新功能从 `main` 出发，在隔离的功能轨道中开发，只有在通过验收门禁且获得用户确认后才能合并到 `main`；只有在另一次发布确认后，才能发布为 `v0.1.0-beta.3`。
 
-## 2. Non-goals
+功能轨道是开发连续性的基本单位，对话窗口不是。一个功能可以跨多个 Codex 对话继续开发；一个版本集成对话也可以逐个合并多条已完成的功能轨道。
 
-- Do not merge the current branch to `main` as part of implementing this governance.
-- Do not publish, install, or replace the user-facing beta.2 release.
-- Do not delete feature branches or worktrees automatically.
-- Do not make GitHub availability a prerequisite for local development.
-- Do not store transcripts, report content, credentials, or other user data in feature metadata.
+## 2. 本次不做的事
 
-## 3. Feature-track identity
+- 不将当前分支合并到 `main`。
+- 不发布、安装或替换用户正在使用的 beta.2。
+- 不自动删除功能分支或 worktree。
+- 不将 GitHub 可用性设为本地开发的必要前提。
+- 不在功能状态中保存转写、报告、密钥或其他用户数据。
 
-Each independently releasable feature has one stable `feature_id`. It owns:
+## 3. 功能轨道身份
 
-- branch `codex/<feature_id>`;
-- one isolated worktree;
-- one metadata file `.codex/features/<feature_id>.json`;
-- zero or more Codex conversations;
-- one final merge decision.
+每个可独立发布的功能都有一个稳定的 `feature_id`，并对应：
 
-Starting an existing `feature_id` resumes its recorded branch and worktree. It must not create a second branch. Starting a new feature from a dirty or non-`main` source checkout is rejected unless the caller explicitly chooses a clean `main` checkout.
+- 一个 `codex/<feature_id>` 分支；
+- 一个隔离的 worktree；
+- 一个 `.codex/features/<feature_id>.json` 状态文件；
+- 零个或多个 Codex 对话；
+- 一次最终合并决策。
 
-Feature metadata contains only repository workflow state:
+启动已存在的 `feature_id` 时，必须恢复其记录的分支和 worktree，不得重复创建分支。新功能必须从干净的 `main` 检出创建；如果源检出存在未提交修改或不在 `main`，则拒绝创建。
+
+状态文件只保存仓库流程信息：
 
 ```json
 {
@@ -37,143 +39,145 @@ Feature metadata contains only repository workflow state:
   "target_version": "v0.1.0-beta.3",
   "status": "in_progress",
   "worktree": ".worktrees/report-progress",
-  "head_commit": "<git commit>",
-  "current_step": "real development acceptance",
+  "head_commit": "<Git 提交>",
+  "current_step": "真实开发环境验收",
   "required_checks": ["backend", "frontend", "browser", "runtime_isolation"],
   "passed_checks": [],
   "merge_approved": false
 }
 ```
 
-Valid states are `in_progress`, `ready_to_merge`, `merged`, `deferred`, and `released`. A failed integration gate moves the feature back to `in_progress`; it never silently remains ready.
+合法状态为 `in_progress`、`ready_to_merge`、`merged`、`deferred` 和 `released`。集成门禁失败后，功能必须回退为 `in_progress`。
 
-Each feature uses its own file. There is no shared mutable feature index, which avoids merge conflicts when several branches are developed concurrently. Listing active features scans the per-feature files and verifies them against Git.
+每个功能使用独立状态文件，不建立一个由多个分支共同修改的索引，以避免并行开发时产生额外冲突。列出功能时，扫描所有独立状态文件，并与 Git 真实状态交叉验证。
 
-## 4. Runtime isolation
+## 4. 运行环境隔离
 
-Feature development always uses:
+功能开发固定使用：
 
-- browser page `http://127.0.0.1:5173`;
-- development backend `http://127.0.0.1:8766`;
-- profile `development`;
-- data root `<feature-worktree>/.runtime/dev`;
-- development Keychain service `Audio Memory Dev`;
-- shared read-only model assets when configured.
+- 浏览器页面：`http://127.0.0.1:5173`；
+- 开发后端：`http://127.0.0.1:8766`；
+- 运行身份：`development`；
+- 数据根目录：`<feature-worktree>/.runtime/dev`；
+- 开发密钥服务：`Audio Memory Dev`；
+- 配置后可共享只读模型文件。
 
-The browser-facing address is 5173. Port 8766 is an internal development API endpoint, not the page users are instructed to open.
+用户打开的开发页面地址是 5173。8766 是前端内部连接的开发接口，不是用户页面。
 
-The development frontend must reject a backend whose health identity is not `development`. Development startup must reject production data roots, aliases, symlinks, or other resolved paths that overlap the installed user version. The installed beta.2 runtime continues to use its own installation code, data, log, port 8765, and Keychain identity.
+开发前端如果发现后端健康身份不是 `development`，必须阻止写操作。开发启动器必须拒绝正式数据根目录，以及解析后与正式目录重叠的别名、符号链接或其他路径。已安装的 beta.2 继续使用自身安装目录、数据、日志、8765 端口和独立密钥身份。
 
-## 5. Commands and responsibilities
+## 5. 统一命令
 
 ### `feature-start <feature_id>`
 
-For a new feature, the command:
+新功能流程：
 
-1. validates the identifier;
-2. verifies a clean `main` source;
-3. creates `codex/<feature_id>` and an isolated worktree;
-4. writes the feature metadata atomically;
-5. starts the development backend on 8766 and frontend on 5173;
-6. verifies both runtime identities;
-7. prints the 5173 browser address.
+1. 验证功能标识符；
+2. 验证干净的 `main` 源检出；
+3. 创建 `codex/<feature_id>` 和隔离 worktree；
+4. 原子写入状态文件；
+5. 启动 8766 后端和 5173 前端；
+6. 验证前后端身份；
+7. 输出 5173 开发页面地址。
 
-For an existing feature, it verifies and resumes the recorded branch and worktree. A metadata/Git mismatch is a hard error with recovery instructions; the command must not guess or overwrite state.
+功能已存在时，验证并恢复已记录的分支和 worktree。状态文件与 Git 不一致时，立即停止并给出恢复说明，不得猜测或覆盖。
 
 ### `feature-status [feature_id]`
 
-With an identifier, it reports the feature's verified branch, worktree, status, current step, commit, and check results. Without an identifier, it scans and lists every feature track. This is the recovery entry point for a new conversation.
+指定功能时，报告经验证的分支、worktree、状态、当前步骤、提交和检查结果。不指定时，列出所有功能轨道。这是新对话恢复开发上下文的统一入口。
 
 ### `feature-finish <feature_id>`
 
-The command verifies that it is operating in the recorded feature worktree and that the worktree is clean. It runs the required backend, frontend, browser, and runtime-isolation gates. Only an all-green result updates the metadata atomically to `ready_to_merge` and records the tested commit. Any later commit invalidates the recorded result and returns the feature to `in_progress`.
+验证当前操作位于已记录的功能 worktree，且工作区干净。然后运行后端、前端、浏览器和运行环境隔离门禁。只有全部通过时，才能原子地将状态更新为 `ready_to_merge`，并记录已测试的确切提交。
+
+在此之后出现任何新提交，已记录的测试证据立即失效，功能恢复为 `in_progress`。
 
 ### `release-prepare <version>`
 
-This command runs from a clean `main`. It scans `ready_to_merge` tracks and produces a release candidate manifest but performs no merge. The manifest records the target version, selected feature IDs, exact tested commits, proposed merge order, and current `main` commit.
+只能从干净的 `main` 运行。它扫描 `ready_to_merge` 功能并生成发布候选清单，但不执行合并。清单记录目标版本、选中功能、已测试提交、建议合并顺序和当前 `main` 提交。
 
 ### `release-integrate <manifest>`
 
-This command requires explicit user approval of the manifest. It integrates one feature at a time. Before each merge it verifies that the feature is still `ready_to_merge` at the recorded commit. After each merge it runs bounded integration checks; after the final merge it runs the complete suite.
+用户明确批准候选清单后，一次合并一个功能。每次合并前，验证功能仍处于 `ready_to_merge` 且提交与清单一致。每合并一项后执行集成检查；全部合并后执行全量测试。
 
-If a conflict or test failure occurs, integration stops immediately. No later feature is merged and no release is produced.
+发生冲突或测试失败时，集成立即停止；不继续合并后续功能，也不产生发布版本。
 
 ### `release-build <version>`
 
-This command requires a second explicit approval after integration succeeds. It runs only from a clean `main`, validates the version and candidate manifest, runs final release checks, creates the immutable version tag, and delegates packaging to the existing release builder. It never deletes feature branches or worktrees.
+集成验收后还需要第二次明确批准。命令只能从干净的 `main` 运行，验证版本号和候选清单，执行最终检查，创建不可变标签，并调用已有发布构建器。它不删除任何分支或 worktree。
 
-## 6. Integration failure policy
+## 6. 集成失败处理
 
-`main` is an integration branch and must remain runnable. Feature corrections are not authored directly on `main`.
+`main` 必须保持可运行，功能修正不直接写入 `main`。
 
-When feature 3 fails before merge:
+如果功能 3 在合并前失败：
 
-1. stop integration;
-2. mark feature 3 `in_progress`;
-3. switch to its recorded branch/worktree;
-4. fix and retest there, in the same conversation or another conversation;
-5. run `feature-finish` again;
-6. regenerate or refresh the release candidate before continuing.
+1. 停止集成；
+2. 将功能 3 标记为 `in_progress`；
+3. 切换到其记录的分支和 worktree；
+4. 在该轨道修复并重新测试，可以使用当前对话或新对话；
+5. 重新运行 `feature-finish`；
+6. 重新生成或刷新候选清单后，才能继续集成。
 
-Small conflict adaptations may be coordinated from the integration conversation, but the commit still belongs to the feature branch. Larger requirement changes should move to a dedicated continuation conversation.
+小型冲突适配可以在版本集成对话中协调，但修复提交仍必须属于对应功能分支。较大的需求变更应转到专门的功能继续对话。
 
-When a problem is discovered only after merge but before release, create a dedicated `codex/<feature_id>-integration-fix` track from the current `main`, test it independently, and integrate it through the same gate. Do not rewrite unrelated merged history.
+如果功能已合并但尚未发布时才发现问题，则从当前 `main` 创建 `codex/<feature_id>-integration-fix` 轨道，独立测试后按同样的门禁集成，不改写其他已合并功能的历史。
 
-## 7. Conversation protocol
+## 7. 对话协作规则
 
-Repository state, not conversation memory, is authoritative.
+仓库状态是权威信息源，对话记忆不是。
 
-Typical user requests are:
+- `开发功能：<feature_id>`：创建新功能轨道。
+- `继续功能：<feature_id>`：验证并恢复已有轨道。
+- `列出进行中的功能`：扫描功能文件并校验 Git 状态。
+- `准备 beta.3 集成，先生成候选清单`：只报告候选功能，不合并。
+- `确认按清单逐个合并`：只授权集成。
+- `确认发布 beta.3`：只在集成验收后授权创建标签和发布包。
 
-- `开发功能：<feature_id>` — create a new feature track.
-- `继续功能：<feature_id>` — verify and resume an existing track.
-- `列出进行中的功能` — scan feature metadata and Git state.
-- `准备 beta.3 集成，先生成候选清单` — report candidates without merging.
-- `确认按清单逐个合并` — authorize integration only.
-- `确认发布 beta.3` — authorize tagging and packaging only after integration acceptance.
+更换对话不会创建新分支。新对话在修改已有功能前，必须先运行 `feature-status`。如果是另一个可独立发布的新功能，则创建另一条功能轨道。
 
-Changing conversation does not create a branch. A new conversation must run `feature-status` before changing a continuing feature. A request for a different independently releasable feature creates a different feature track.
+## 8. 仓库与 GitHub 约束
 
-## 8. Repository and GitHub enforcement
+根目录 `AGENTS.md` 定义所有编码代理必须遵守的规则：
 
-The root `AGENTS.md` defines the mandatory workflow for coding agents:
+- 不得直接在 `main` 实施功能或缺陷修复；
+- 开发过程不得写入已记录的开发运行根之外；
+- 没有用户明确批准，不得合并、发布、删除分支或删除 worktree；
+- 继续功能时，必须先恢复并验证已记录状态；
+- 只有记录的门禁全部通过，才能宣称功能完成。
 
-- no feature or defect implementation directly on `main`;
-- no development writes outside the recorded development runtime;
-- no merge, release, branch deletion, or worktree deletion without explicit user approval;
-- feature continuation must restore recorded state before editing;
-- completion claims require the recorded gates.
+本地 pre-commit 和 pre-push 钩子用于快速反馈，但不是唯一保护，因为钩子可被绕过。CI 是托管合并资格的权威门禁。GitHub `main` 分支保护应要求通过 PR 和同名检查后才允许合并。本地集成仍然可用，但必须使用同一门禁执行器并记录等价证据。
 
-Local pre-commit/pre-push hooks provide fast feedback but are not the only protection because hooks can be bypassed. CI is authoritative for merge eligibility. GitHub branch protection should require pull requests and the same named checks before `main` accepts a hosted merge. Local integration remains supported, but it must use the same gate runner and record equivalent evidence.
+## 9. 安全性与原子性
 
-## 9. Safety and atomicity
+- 状态文件通过同目录临时文件、文件同步和原子替换写入。
+- 执行写操作前，解析并验证仓库路径和开发根路径边界。
+- 任何变更命令执行前，分支、worktree、状态文件和当前 HEAD 必须一致。
+- 命令默认先检查，一旦存在歧义立即停止。
+- 破坏性清理是未来的独立操作，必须先显示确切目标，再获得用户明确批准。
+- 发布清单只包含仓库标识符和提交，不包含运行数据或用户内容。
 
-- Metadata writes use a temporary sibling, file synchronization, and atomic replacement.
-- Paths are resolved and verified against the repository and development-root boundaries before writes.
-- Branch, worktree, metadata, and current HEAD must agree before any mutating command.
-- Commands default to inspection and stop on ambiguity.
-- Destructive cleanup is a separate future operation and always requires a displayed target list plus explicit approval.
-- Release manifests contain repository identifiers and commits only; no runtime or user content.
+## 10. 测试与验收
 
-## 10. Testing and acceptance
+自动化测试必须证明：
 
-Automated tests must prove:
+- 新功能创建正确的分支、worktree 和状态文件；
+- 已有功能直接恢复，不创建重复分支；
+- 非干净 `main`、非法标识符、分支不匹配和 worktree 不匹配都安全失败；
+- 开发启动器对外显示 5173，且只连接 development 身份的 8766；
+- 正式目录别名与运行根重叠会被拒绝；
+- 新对话只依赖仓库文件就能重建功能状态；
+- 新提交会使 `ready_to_merge` 证据失效；
+- 集成按顺序逐个处理功能，并在首个冲突或失败处停止；
+- 功能修正提交到功能轨道，不直接提交到 `main`；
+- 没有集成验收和第二次发布批准时，无法构建发布版本；
+- 所有测试都不修改 beta.2 已安装运行时和用户数据；
+- 任何命令都不删除分支或 worktree。
 
-- a new feature creates the correct branch, worktree, and metadata;
-- an existing feature resumes without creating another branch;
-- dirty `main`, invalid identifiers, branch mismatches, and worktree mismatches fail safely;
-- development startup exposes 5173 and connects only to development 8766;
-- production-root aliases and runtime overlap are rejected;
-- a new conversation can reconstruct feature state using only repository artifacts;
-- a new commit invalidates `ready_to_merge` evidence;
-- integration processes features sequentially and stops at the first conflict or failed check;
-- corrections are committed to the feature track, not directly to `main`;
-- release building is impossible before integration acceptance and a second approval;
-- beta.2 installed runtime and data remain unchanged throughout all fixtures;
-- no command deletes a branch or worktree.
+手工验收必须演示：两个功能并行开发；在新对话上下文中继续其中一个功能；在临时测试仓库中顺序集成；故意让第二个功能失败；在其功能分支成功修复；最后生成 beta.3 候选清单，但不发布。
 
-Manual acceptance must demonstrate two concurrently developed features, continuation of one feature from a fresh conversation context, sequential integration into a temporary fixture repository, a deliberate failure on the second feature, successful recovery on its feature branch, and final beta.3 candidate generation without publishing.
+## 11. 引入方式
 
-## 11. Rollout
+本治理机制先在 `codex/beta3-stability` 实施和测试，不追溯改写已有分支历史。已有且仍有价值的功能轨道，只能先执行只读审计，再在用户确认分支映射后建立状态文件。
 
-The governance is introduced on `codex/beta3-stability` and tested there. It does not retroactively rewrite existing branch histories. Existing valuable tracks can be enrolled by an explicit read-only audit followed by metadata creation after the user confirms the mapping. After the governance itself passes review, it may be merged to `main` through the current manual process. Only subsequent feature tracks are required to use the new automated workflow.
+本治理功能通过评审后，可使用当前人工流程合并到 `main`。只有后续新建的功能轨道才强制使用新的自动化流程。
