@@ -7,6 +7,7 @@ from audio_memory.config import (
     AppProfile,
     RuntimeConfig,
     RuntimeConfigurationError,
+    UnsafeDevelopmentPathError,
     UnsupportedPlatformError,
     assert_supported_platform,
 )
@@ -51,6 +52,7 @@ def test_runtime_config_uses_isolated_development_defaults(tmp_path: Path) -> No
     assert config.paths.models == (
         tmp_path / "home/Library/Application Support/AudioMemory/models"
     ).resolve()
+    assert config.paths.models_writable is False
     assert config.port == 8766
     assert config.keychain_service == "Audio Memory Dev"
 
@@ -110,7 +112,7 @@ def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "custom-data"
-    model_root = tmp_path / "custom-models"
+    model_root = data_root / "custom-models"
 
     config = RuntimeConfig.from_environment(
         home=tmp_path / "home",
@@ -126,6 +128,7 @@ def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
 
     assert config.paths.root == data_root.resolve()
     assert config.paths.models == model_root.resolve()
+    assert config.paths.models_writable is True
     assert config.keychain_service == "Audio Memory Test"
     assert config.port == 9012
     assert not data_root.exists()
@@ -152,6 +155,110 @@ def test_ensure_directories_creates_private_local_directories(tmp_path: Path) ->
     for directory in paths.required_directories:
         assert directory.is_dir()
         assert directory.stat().st_mode & 0o777 == 0o700
+
+
+def test_development_directory_setup_never_mutates_shared_models(tmp_path: Path) -> None:
+    shared = tmp_path / "production/models"
+    paths = AppPaths.from_roots(
+        tmp_path / "repo/.runtime/dev", shared, models_writable=False
+    )
+
+    paths.ensure_directories()
+
+    assert paths.root.is_dir()
+    assert not shared.exists()
+    assert shared not in paths.required_directories
+
+
+def test_development_writable_paths_stay_under_its_data_root(tmp_path: Path) -> None:
+    data_root = tmp_path / "repo/.runtime/dev"
+    paths = AppPaths.from_roots(
+        data_root, tmp_path / "production/models", models_writable=False
+    )
+
+    writable_paths = (
+        paths.database,
+        paths.runtime,
+        paths.lock,
+        paths.feedback,
+        paths.staging,
+        paths.audio,
+        paths.prompts,
+        paths.local_session,
+    )
+
+    assert all(path.is_relative_to(data_root) for path in writable_paths)
+
+
+@pytest.mark.parametrize("development_root", ["exact", "child"])
+def test_development_config_rejects_data_roots_in_production(
+    tmp_path: Path, development_root: str
+) -> None:
+    home = tmp_path / "home"
+    production_root = home / "Library/Application Support/AudioMemory"
+    requested_root = (
+        production_root
+        if development_root == "exact"
+        else production_root / "staging/development"
+    )
+
+    with pytest.raises(UnsafeDevelopmentPathError):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(requested_root),
+            },
+        )
+
+    assert not requested_root.exists()
+
+
+def test_development_config_rejects_symlinked_data_root_in_production(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    production_root = home / "Library/Application Support/AudioMemory"
+    production_root.mkdir(parents=True)
+    symlink = tmp_path / "development-link"
+    symlink.symlink_to(production_root, target_is_directory=True)
+    requested_root = symlink / "development"
+
+    with pytest.raises(UnsafeDevelopmentPathError):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(requested_root),
+            },
+        )
+
+    assert not requested_root.exists()
+    assert not (production_root / "development").exists()
+
+
+@pytest.mark.parametrize("model_subpath", ["models", "audio"])
+def test_development_config_rejects_explicit_production_model_roots(
+    tmp_path: Path, model_subpath: str
+) -> None:
+    home = tmp_path / "home"
+    production_root = home / "Library/Application Support/AudioMemory"
+    requested_data_root = tmp_path / "repo/.runtime/dev"
+
+    with pytest.raises(UnsafeDevelopmentPathError):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(requested_data_root),
+                "AUDIO_MEMORY_MODEL_ROOT": str(production_root / model_subpath),
+            },
+        )
+
+    assert not requested_data_root.exists()
 
 
 def test_platform_guard_rejects_non_arm64(monkeypatch: pytest.MonkeyPatch) -> None:

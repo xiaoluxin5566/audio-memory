@@ -3,7 +3,7 @@ from __future__ import annotations
 import platform
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -24,6 +24,10 @@ class RuntimeConfigurationError(ValueError):
     """Raised when runtime configuration cannot be resolved safely."""
 
 
+class UnsafeDevelopmentPathError(RuntimeConfigurationError):
+    """Raised when development configuration could touch production data."""
+
+
 class AppProfile(StrEnum):
     PRODUCTION = "production"
     DEVELOPMENT = "development"
@@ -40,6 +44,7 @@ class AppPaths:
     audio: Path
     models: Path
     prompts: Path
+    models_writable: bool = True
 
     @classmethod
     def from_home(cls, home: Path) -> "AppPaths":
@@ -51,6 +56,8 @@ class AppPaths:
         cls,
         data_root: Path,
         model_root: Path | None = None,
+        *,
+        models_writable: bool = True,
     ) -> "AppPaths":
         root = data_root
         runtime = root / "runtime"
@@ -64,19 +71,24 @@ class AppPaths:
             audio=root / "audio",
             models=model_root if model_root is not None else root / "models",
             prompts=root / "prompts",
+            models_writable=models_writable,
         )
 
     @property
     def required_directories(self) -> tuple[Path, ...]:
-        return (
+        directories = (
             self.root,
             self.runtime,
             self.feedback,
             self.staging,
             self.audio,
-            self.models,
             self.prompts,
         )
+        return directories + ((self.models,) if self.models_writable else ())
+
+    @property
+    def local_session(self) -> Path:
+        return self.runtime / "local-web-security.sqlite3"
 
     @property
     def diarization_segmentation_model(self) -> Path:
@@ -102,6 +114,7 @@ class RuntimeConfig:
     profile: AppProfile
     port: int
     keychain_service: str
+    production_data_root: Path | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_environment(
@@ -144,6 +157,7 @@ class RuntimeConfig:
             if profile is AppProfile.DEVELOPMENT
             else data_root / "models"
         )
+        model_root_is_explicit = "AUDIO_MEMORY_MODEL_ROOT" in values
         model_root = cls._path_value(
             values, "AUDIO_MEMORY_MODEL_ROOT", default_model_root
         )
@@ -171,12 +185,43 @@ class RuntimeConfig:
                     "AUDIO_MEMORY_PORT must be an integer between 1 and 65535"
                 )
 
-        return cls(
-            paths=AppPaths.from_roots(data_root, model_root),
+        config = cls(
+            paths=AppPaths.from_roots(
+                data_root,
+                model_root,
+                models_writable=(
+                    profile is AppProfile.PRODUCTION or model_root_is_explicit
+                ),
+            ),
             profile=profile,
             port=port,
             keychain_service=service_value,
+            production_data_root=production_root,
         )
+        config.validate_development_isolation()
+        return config
+
+    def validate_development_isolation(self) -> None:
+        if self.profile is not AppProfile.DEVELOPMENT:
+            return
+
+        production_root = self.production_data_root
+        if production_root is None:
+            return
+
+        resolved_production_root = production_root.expanduser().resolve()
+        resolved_data_root = self.paths.root.expanduser().resolve()
+        if resolved_data_root.is_relative_to(resolved_production_root):
+            raise UnsafeDevelopmentPathError(
+                "开发数据目录不能位于正式数据目录中。"
+            )
+
+        if self.paths.models_writable:
+            resolved_model_root = self.paths.models.expanduser().resolve()
+            if not resolved_model_root.is_relative_to(resolved_data_root):
+                raise UnsafeDevelopmentPathError(
+                    "开发模型目录必须位于开发数据目录中。"
+                )
 
     @staticmethod
     def _path_value(
