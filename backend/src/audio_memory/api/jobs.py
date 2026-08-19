@@ -181,6 +181,7 @@ async def run_pipeline(
                 durable_version_id = await session.scalar(
                     select(AnalysisVersion.id).where(
                         AnalysisVersion.source_job_id == job_id,
+                        AnalysisVersion.reanalysis_batch_id.is_(None),
                         AnalysisVersion.status.in_(("pending", "running")),
                     )
                 )

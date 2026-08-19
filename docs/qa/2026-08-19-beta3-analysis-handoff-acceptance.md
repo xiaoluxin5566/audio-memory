@@ -10,7 +10,7 @@ No real provider, API key, Keychain entry, production data root, or production s
 
 ## Results
 
-- Backend: `1091 passed, 28 skipped`.
+- Backend: `1092 passed, 28 skipped`.
 - Frontend Node tests: `96 passed`.
 - Browser acceptance: `26 passed`.
 - Production frontend build: succeeded.

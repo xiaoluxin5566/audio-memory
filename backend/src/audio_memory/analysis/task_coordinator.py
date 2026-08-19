@@ -140,6 +140,7 @@ class AnalysisTaskCoordinator:
                     select(AnalysisVersion.id)
                     .where(
                         AnalysisVersion.source_job_id == AnalysisJob.id,
+                        AnalysisVersion.reanalysis_batch_id.is_(None),
                         AnalysisVersion.status.in_(("pending", "running")),
                     )
                     .correlate(AnalysisJob)

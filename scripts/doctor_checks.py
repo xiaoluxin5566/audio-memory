@@ -224,6 +224,7 @@ def check_queue(database: Path) -> bool:
              WHERE job.stage = 'analyzing' AND NOT EXISTS (
                  SELECT 1 FROM analysis_versions version
                  WHERE version.source_job_id = job.id
+                   AND version.reanalysis_batch_id IS NULL
                    AND version.status IN ('pending', 'running')
              )""",
         """SELECT count(*) FROM analysis_versions
@@ -235,8 +236,9 @@ def check_queue(database: Path) -> bool:
              WHERE status = 'pending' AND created_at < ?""",
         """SELECT count(*) FROM analysis_jobs job
              JOIN analysis_versions version ON version.source_job_id = job.id
-             WHERE (job.stage = 'failed' AND version.status IN ('pending', 'running'))
-                OR (job.stage = 'analyzing' AND version.status = 'failed')""",
+             WHERE job.stage = 'failed'
+               AND version.reanalysis_batch_id IS NULL
+               AND version.status IN ('pending', 'running')""",
     )
     try:
         with _connect(database) as connection:
