@@ -467,3 +467,45 @@ def test_integration_aborts_conflict_and_keeps_prior_success(
     assert (git_repository / "README.md").read_text(encoding="utf-8") == "from one\n"
     assert git(git_repository, "status", "--porcelain") == ""
     assert service.store.load("two").status == "in_progress"
+
+
+def integrated_candidate(
+    git_repository: Path,
+) -> tuple[ReleaseService, object, Path]:
+    (git_repository / "VERSION").write_text("0.1.0-beta.3\n", encoding="utf-8")
+    git(git_repository, "add", "VERSION")
+    git(git_repository, "commit", "-m", "set beta 3 version")
+    ready_feature(git_repository, "one")
+    release = ReleaseService(GitRepository(git_repository))
+    manifest, path = release.prepare("v0.1.0-beta.3", ["one"])
+    result = release.integrate(path, manifest.digest(), lambda *_: True)
+    assert result.failed is None
+    return release, manifest, path
+
+
+def test_release_build_authorization_requires_separate_exact_confirmation(
+    git_repository: Path,
+) -> None:
+    release, manifest, path = integrated_candidate(git_repository)
+
+    with pytest.raises(GovernanceError, match="发布确认"):
+        release.authorize_build(path, None)
+
+    authorized = release.authorize_build(path, manifest.digest())
+    assert authorized == manifest
+
+
+@pytest.mark.parametrize("fault", ["dirty", "wrong_version", "tag_exists"])
+def test_release_build_refuses_mutable_or_existing_version(
+    git_repository: Path, fault: str
+) -> None:
+    release, manifest, path = integrated_candidate(git_repository)
+    if fault == "dirty":
+        (git_repository / "dirty.txt").write_text("dirty", encoding="utf-8")
+    elif fault == "wrong_version":
+        (git_repository / "VERSION").write_text("0.1.0-beta.2\n", encoding="utf-8")
+    else:
+        git(git_repository, "tag", "v0.1.0-beta.3")
+
+    with pytest.raises(GovernanceError):
+        release.authorize_build(path, manifest.digest())

@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from typing import Callable, ClassVar
 
@@ -327,6 +328,12 @@ class GitRepository:
             raise GovernanceError("Git 分支检查失败。")
         return result.returncode == 0
 
+    def tag_exists(self, tag: str) -> bool:
+        result = self._run("show-ref", "--verify", "--quiet", f"refs/tags/{tag}")
+        if result.returncode not in {0, 1}:
+            raise GovernanceError("Git 标签检查失败。")
+        return result.returncode == 0
+
     def worktree_root_is_ignored(self) -> bool:
         result = self._run(
             "check-ignore", "--quiet", ".worktrees/governance-probe"
@@ -622,6 +629,30 @@ class ReleaseStore:
         })
         return path
 
+    def load_receipt(self, version: str) -> dict[str, object]:
+        path = self.releases / f"{version}-integrated.json"
+        FeatureStore._validate_regular_file(path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise GovernanceError("集成回执无法读取。") from exc
+        expected = {
+            "schema_version", "target_version", "candidate_digest",
+            "main_commit", "features",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or payload["schema_version"] != 1
+            or payload["target_version"] != version
+            or not isinstance(payload["candidate_digest"], str)
+            or not isinstance(payload["main_commit"], str)
+            or not FeatureRecord._SHA.fullmatch(payload["main_commit"])
+            or not isinstance(payload["features"], list)
+        ):
+            raise GovernanceError("集成回执内容无效。")
+        return payload
+
     def _atomic_json(self, path: Path, payload: object) -> None:
         FeatureStore._validate_directory(self.root, create=True)
         FeatureStore._validate_directory(self.releases, create=True)
@@ -732,6 +763,32 @@ class ReleaseService:
             merge_approved=False,
         ))
 
+    def authorize_build(
+        self, manifest_path: Path, approval_token: str | None
+    ) -> ReleaseManifest:
+        manifest = self.store.load_manifest(manifest_path)
+        if approval_token is None or approval_token != manifest.digest():
+            raise GovernanceError("候选版本未获得独立的发布确认。")
+        if self.repository.current_branch != "main" or not self.repository.is_clean:
+            raise GovernanceError("发布必须从干净的 main 执行。")
+        receipt = self.store.load_receipt(manifest.target_version)
+        if (
+            receipt["candidate_digest"] != manifest.digest()
+            or receipt["main_commit"] != self.repository.head_commit
+            or receipt["features"] != [item.feature_id for item in manifest.features]
+        ):
+            raise GovernanceError("候选清单与已验收集成结果不一致。")
+        version_file = self.repository.top_level / "VERSION"
+        try:
+            repository_version = version_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise GovernanceError("无法读取发布版本号。") from exc
+        if f"v{repository_version}" != manifest.target_version:
+            raise GovernanceError("VERSION 与候选版本不一致。")
+        if self.repository.tag_exists(manifest.target_version):
+            raise GovernanceError("发布版本标签已存在，不可覆盖。")
+        return manifest
+
 
 def _repository_from_current_directory() -> GitRepository:
     return GitRepository(Path.cwd())
@@ -755,6 +812,9 @@ def main(argv: list[str] | None = None) -> int:
     integrate_parser = subparsers.add_parser("release-integrate")
     integrate_parser.add_argument("manifest", type=Path)
     integrate_parser.add_argument("--approve", required=True)
+    build_parser = subparsers.add_parser("release-build")
+    build_parser.add_argument("version")
+    build_parser.add_argument("--approve", required=True)
     arguments = parser.parse_args(argv)
     try:
         service = FeatureService(_repository_from_current_directory())
@@ -841,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
                 "main_commit": manifest.main_commit,
                 "features": [item.to_dict() for item in manifest.features],
             }, ensure_ascii=False))
-        else:
+        elif arguments.command == "release-integrate":
             controller_root = Path(__file__).resolve().parent.parent
             gate = controller_root / "scripts/quality-gate.sh"
 
@@ -859,6 +919,66 @@ def main(argv: list[str] | None = None) -> int:
                 "merged": list(result.merged),
                 "failed": result.failed,
                 "main_commit": result.main_commit,
+            }, ensure_ascii=False))
+        else:
+            controller_root = Path(__file__).resolve().parent.parent
+            release = ReleaseService(service.repository)
+            manifest_path = release.store.manifest_path(arguments.version)
+            manifest = release.authorize_build(manifest_path, arguments.approve)
+            environment = dict(os.environ)
+            environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
+            gate_result = subprocess.run(
+                [str(controller_root / "scripts/quality-gate.sh")],
+                cwd=service.repository.top_level,
+                env=environment,
+                check=False,
+            )
+            if gate_result.returncode != 0:
+                raise GovernanceError("发布前全量验收失败。")
+            build_result = subprocess.run(
+                [str(service.repository.top_level / "scripts/build-release.sh")],
+                cwd=service.repository.top_level,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if build_result.returncode != 0:
+                diagnostic = (build_result.stderr or build_result.stdout).strip()
+                raise GovernanceError(f"发布包构建失败：{diagnostic}")
+            output_lines = [line for line in build_result.stdout.splitlines() if line]
+            if not output_lines:
+                raise GovernanceError("发布构建未返回安装包路径。")
+            archive = Path(output_lines[-1]).resolve()
+            checksum = archive.with_suffix(archive.suffix + ".sha256")
+            if not archive.is_file() or not checksum.is_file():
+                raise GovernanceError("发布包或校验文件缺失。")
+            expected_hash = checksum.read_text(encoding="utf-8").split()[0]
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != expected_hash:
+                raise GovernanceError("发布包校验失败。")
+            with tarfile.open(archive) as bundle:
+                forbidden = {"audio-memory-governance", ".worktrees", ".runtime"}
+                if any(
+                    forbidden.intersection(Path(member.name).parts)
+                    for member in bundle.getmembers()
+                ):
+                    raise GovernanceError("发布包携带了开发治理或运行数据。")
+            service.repository._git(
+                "tag", "-a", manifest.target_version,
+                "-m", f"Release {manifest.target_version}",
+            )
+            for item in manifest.features:
+                record = release.features.store.load(item.feature_id)
+                release.features.store.save(replace(
+                    record,
+                    status="released",
+                    current_step=f"已发布 {manifest.target_version}",
+                ))
+            print(json.dumps({
+                "version": manifest.target_version,
+                "tag": manifest.target_version,
+                "archive": str(archive),
+                "checksum": str(checksum),
             }, ensure_ascii=False))
         return 0
     except GovernanceError as exc:

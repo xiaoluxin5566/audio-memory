@@ -78,6 +78,8 @@ done
 cp "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$STAGING/scripts/verify-ffmpeg-runtime.py"
 find "$STAGING" -type d \( \
   -iname .git -o \
+  -iname .worktrees -o \
+  -iname audio-memory-governance -o \
   -iname .venv -o \
   -iname .runtime -o \
   -iname .uv-cache -o \
