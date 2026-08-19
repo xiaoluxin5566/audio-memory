@@ -40,7 +40,6 @@ class AppPaths:
     audio: Path
     models: Path
     prompts: Path
-    models_writable: bool = True
 
     @classmethod
     def from_home(cls, home: Path) -> "AppPaths":
@@ -52,8 +51,6 @@ class AppPaths:
         cls,
         data_root: Path,
         model_root: Path | None = None,
-        *,
-        models_writable: bool = True,
     ) -> "AppPaths":
         root = data_root
         runtime = root / "runtime"
@@ -67,22 +64,19 @@ class AppPaths:
             audio=root / "audio",
             models=model_root if model_root is not None else root / "models",
             prompts=root / "prompts",
-            models_writable=models_writable,
         )
 
     @property
     def required_directories(self) -> tuple[Path, ...]:
-        directories = (
+        return (
             self.root,
             self.runtime,
             self.feedback,
             self.staging,
             self.audio,
+            self.models,
             self.prompts,
         )
-        if self.models_writable:
-            return directories + (self.models,)
-        return directories
 
     @property
     def diarization_segmentation_model(self) -> Path:
@@ -137,7 +131,6 @@ class RuntimeConfig:
             if profile is AppProfile.DEVELOPMENT
             else production_root
         )
-        default_model_root = production_root / "models"
         default_port = 8766 if profile is AppProfile.DEVELOPMENT else 8765
         default_keychain_service = (
             "Audio Memory Dev" if profile is AppProfile.DEVELOPMENT else "Audio Memory"
@@ -145,6 +138,11 @@ class RuntimeConfig:
 
         data_root = cls._path_value(
             values, "AUDIO_MEMORY_DATA_ROOT", default_data_root
+        )
+        default_model_root = (
+            production_root / "models"
+            if profile is AppProfile.DEVELOPMENT
+            else data_root / "models"
         )
         model_root = cls._path_value(
             values, "AUDIO_MEMORY_MODEL_ROOT", default_model_root
@@ -174,14 +172,7 @@ class RuntimeConfig:
                 )
 
         return cls(
-            paths=AppPaths.from_roots(
-                data_root,
-                model_root,
-                models_writable=(
-                    profile is AppProfile.PRODUCTION
-                    or "AUDIO_MEMORY_MODEL_ROOT" in values
-                ),
-            ),
+            paths=AppPaths.from_roots(data_root, model_root),
             profile=profile,
             port=port,
             keychain_service=service_value,

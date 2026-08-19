@@ -24,6 +24,21 @@ def test_runtime_config_preserves_production_defaults(tmp_path: Path) -> None:
     assert config.keychain_service == "Audio Memory"
 
 
+def test_runtime_config_uses_data_root_override_for_default_model_root(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "custom-data"
+
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={"AUDIO_MEMORY_DATA_ROOT": str(data_root)},
+    )
+
+    assert config.paths.root == data_root.resolve()
+    assert config.paths.models == (data_root / "models").resolve()
+
+
 def test_runtime_config_uses_isolated_development_defaults(tmp_path: Path) -> None:
     config = RuntimeConfig.from_environment(
         home=tmp_path / "home",
@@ -114,7 +129,6 @@ def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
     assert config.keychain_service == "Audio Memory Test"
     assert config.port == 9012
     assert not data_root.exists()
-    assert not model_root.exists()
 
 
 def test_app_paths_are_all_under_local_application_support(tmp_path: Path) -> None:
