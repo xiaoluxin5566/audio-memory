@@ -39,6 +39,7 @@ function prettySize(bytes = 0) {
 
 export function App() {
   const [state, setState] = useState(() => createInitialState());
+  const [environment, setEnvironment] = useState(null);
   const providerState = useProviders();
   const [route, setRoute] = useState(ROUTES[window.location.pathname] ?? 'feed');
   const [providerOpen, setProviderOpen] = useState(false);
@@ -73,6 +74,14 @@ export function App() {
       activeProvider: providerState.activeProvider,
     }));
   }, [providerState.providers, providerState.activeProvider]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.runtimeEnvironment().then((next) => {
+      if (!cancelled) setEnvironment(next);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     refreshContent().catch(() => setToast('无法读取本地历史，请确认服务已启动'));
@@ -284,7 +293,8 @@ export function App() {
   const currentProvider = state.providers[state.activeProvider];
   return (
     <div className="app-shell">
-      <Topbar route={route} onNavigate={navigate} reanalysis={reanalysisView} onReanalyze={openReanalysis} onClear={() => setClearOpen(true)} />
+      <Topbar route={route} onNavigate={navigate} reanalysis={reanalysisView} onReanalyze={openReanalysis} onClear={() => setClearOpen(true)} environment={environment} />
+      {environment?.blocked ? <main className="runtime-environment-block" role="alert" aria-live="assertive"><p className="runtime-environment-kicker">已停止本地写入</p><h1>开发界面未连接到开发服务</h1><p>{environment.message}</p><span>请检查本地开发服务后刷新页面。</span></main> : <>
       {route === 'feed' && (
         <div className="home-layout">
           <aside className="control-rail">
@@ -328,6 +338,7 @@ export function App() {
       {sleepPromptOpen && <SleepPreventionPrompt onEnable={enableSleepPreventionAndStart} onContinue={async () => { setSleepPromptOpen(false); await executeStartAnalysis(); }} onClose={() => setSleepPromptOpen(false)} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
       {toast && <div className="toast" role="status">{toast}</div>}
+      </>}
     </div>
   );
 }
@@ -336,8 +347,8 @@ function SleepPreventionPrompt({ onEnable, onContinue, onClose }) {
   return <div className="modal-backdrop"><section className="modal sleep-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="sleep-prompt-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><div className="sleep-mark">☾</div><h1 id="sleep-prompt-title">分析期间保持电脑唤醒？</h1><p>电脑进入休眠后，转写和报告生成会暂停。开启后，即使锁屏或长时间不操作，分析仍会继续；屏幕仍可正常关闭。</p><div className="modal-actions"><button className="secondary" onClick={onContinue}>暂不开启</button><button className="primary" onClick={onEnable}>开启并继续</button></div></section></div>;
 }
 
-function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear }) {
-  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div></div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
+function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear, environment }) {
+  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div>{environment?.label && <span className="runtime-environment-badge">{environment.label}</span>}</div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
 }
 
 function UploadFile({ file, onRemove }) {

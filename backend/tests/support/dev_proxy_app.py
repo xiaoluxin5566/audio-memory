@@ -19,6 +19,14 @@ app.add_middleware(
 )
 
 
+@app.get("/api/health")
+async def health() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "profile": os.environ.get("AUDIO_MEMORY_TEST_BACKEND_PROFILE", "development"),
+    }
+
+
 @app.post("/api/effect", status_code=201)
 async def effect() -> dict[str, int]:
     global calls
