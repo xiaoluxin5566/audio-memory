@@ -140,6 +140,72 @@ async def test_extension_and_content_must_both_be_supported(job_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version_status", ["pending", "running"])
+async def test_job_api_projects_analysis_phase_from_durable_version(
+    job_client, version_status
+):
+    client, _, database = job_client
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(
+            AnalysisJob(
+                id=job_id,
+                stage=JobStage.ANALYZING.value,
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+            )
+        )
+        session.add(
+            AnalysisVersion(
+                id=str(uuid4()),
+                source_job_id=job_id,
+                batch_id=None,
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash="f" * 64,
+                staged_results_json="{}",
+                status=version_status,
+                worker_owner_id="worker-1" if version_status == "running" else None,
+                lease_expires_at=(
+                    "2099-01-01T00:00:00+00:00"
+                    if version_status == "running"
+                    else None
+                ),
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["analysis_phase"] == version_status
+
+
+@pytest.mark.asyncio
+async def test_job_api_never_claims_model_running_without_a_version(job_client):
+    client, _, database = job_client
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(
+            AnalysisJob(
+                id=job_id,
+                stage=JobStage.ANALYZING.value,
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["analysis_phase"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_missing_audio_runtime_is_not_reported_as_unsupported_format(
     job_client, monkeypatch
 ):

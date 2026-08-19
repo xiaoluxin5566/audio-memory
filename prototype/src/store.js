@@ -49,6 +49,28 @@ export function jobModelDisplayName(job) {
   return modelId || job?.provider_id || '模型';
 }
 
+export function analysisProgressCopy(job) {
+  if (job?.analysis_phase === 'pending') {
+    return {
+      title: '等待分析线程开始',
+      detail: '转写已安全保存，任务正在队列中等待领取。',
+      failed: false,
+    };
+  }
+  if (job?.analysis_phase === 'running') {
+    return {
+      title: `${jobModelDisplayName(job)} 正在阅读全文并生成报告`,
+      detail: '报告正在安全发布，完成前请保持应用运行。',
+      failed: false,
+    };
+  }
+  return {
+    title: '分析未开始，可重试',
+    detail: '完整转写已保留，重试不会再次执行 Whisper。',
+    failed: true,
+  };
+}
+
 export function getFeedbackFormState(rating, comment = '') {
   const showDetails = rating === 'inaccurate';
   return {

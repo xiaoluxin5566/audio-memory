@@ -54,6 +54,7 @@ class JobView(BaseModel):
     batch_current: int = 0
     batch_total: int = 0
     sleep_prevention_status: str | None = None
+    analysis_phase: str | None = None
 
 
 def service_from(request: Request) -> UploadService:
@@ -99,6 +100,23 @@ async def protect_job_if_enabled(request: Request, job_id: str) -> str:
 
 async def job_view_with_sleep_status(request: Request, job) -> JobView:
     view = JobView.model_validate(job, from_attributes=True)
+    if job.stage in {JobStage.ANALYZING.value, JobStage.FAILED.value}:
+        async with service_from(request).database.session() as session:
+            version_status = await session.scalar(
+                select(AnalysisVersion.status)
+                .where(
+                    AnalysisVersion.source_job_id == job.id,
+                    AnalysisVersion.reanalysis_batch_id.is_(None),
+                )
+                .order_by(AnalysisVersion.created_at.desc())
+                .limit(1)
+            )
+        if job.stage == JobStage.FAILED.value:
+            view.analysis_phase = "failed"
+        elif version_status in {"pending", "running"}:
+            view.analysis_phase = version_status
+        else:
+            view.analysis_phase = "failed"
     if job.stage in {JobStage.TRANSCRIBING.value, JobStage.ANALYZING.value}:
         enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
         view.sleep_prevention_status = (
