@@ -190,6 +190,52 @@ def test_development_writable_paths_stay_under_its_data_root(tmp_path: Path) -> 
     assert all(path.is_relative_to(data_root) for path in writable_paths)
 
 
+def test_development_config_rejects_data_root_ancestor_of_production(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    requested_root = home / "Library/Application Support"
+    production_root = requested_root / "AudioMemory"
+
+    with pytest.raises(UnsafeDevelopmentPathError):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(requested_root),
+            },
+        )
+
+    assert not requested_root.exists()
+    assert not production_root.exists()
+
+
+def test_development_config_rejects_symlinked_data_root_ancestor_of_production(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    resolved_root = home / "Library/Application Support"
+    resolved_root.mkdir(parents=True, mode=0o755)
+    symlink = tmp_path / "development-link"
+    symlink.symlink_to(resolved_root, target_is_directory=True)
+    production_root = resolved_root / "AudioMemory"
+
+    with pytest.raises(UnsafeDevelopmentPathError):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(symlink),
+            },
+        )
+
+    assert symlink.is_symlink()
+    assert resolved_root.stat().st_mode & 0o777 == 0o755
+    assert not production_root.exists()
+
+
 @pytest.mark.parametrize("development_root", ["exact", "child"])
 def test_development_config_rejects_data_roots_in_production(
     tmp_path: Path, development_root: str

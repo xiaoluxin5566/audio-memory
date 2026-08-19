@@ -211,9 +211,12 @@ class RuntimeConfig:
 
         resolved_production_root = production_root.expanduser().resolve()
         resolved_data_root = self.paths.root.expanduser().resolve()
-        if resolved_data_root.is_relative_to(resolved_production_root):
+        if (
+            resolved_data_root.is_relative_to(resolved_production_root)
+            or resolved_production_root.is_relative_to(resolved_data_root)
+        ):
             raise UnsafeDevelopmentPathError(
-                "开发数据目录不能位于正式数据目录中。"
+                "开发数据目录不能与正式数据目录重叠。"
             )
 
         if self.paths.models_writable:
