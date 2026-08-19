@@ -52,6 +52,7 @@ for script in \
   doctor_checks.py \
   install-release.sh \
   install.sh \
+  runtime_config.py \
   start.sh; do
   cp "$PROJECT_ROOT/scripts/$script" "$STAGING/scripts/$script"
 done

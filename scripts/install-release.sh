@@ -24,6 +24,7 @@ for required in \
   scripts/backup_data.py \
   scripts/com.audio-memory.local.plist.template \
   scripts/doctor.sh \
+  scripts/runtime_config.py \
   scripts/start.sh; do
   [ -f "$RELEASE_ROOT/$required" ] || fail "发布包缺少 $required"
 done

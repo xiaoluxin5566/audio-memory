@@ -42,6 +42,7 @@ def test_release_archive_uses_runtime_whitelist(tmp_path: Path) -> None:
         f"{prefix}/prototype/dist/client/index.html",
         f"{prefix}/scripts/audio-memory",
         f"{prefix}/scripts/install-release.sh",
+        f"{prefix}/scripts/runtime_config.py",
     }
     assert required <= names
     forbidden_parts = {

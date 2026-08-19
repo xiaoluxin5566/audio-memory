@@ -13,6 +13,16 @@ INSTALLER = PROJECT_ROOT / "scripts" / "install-release.sh"
 
 def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
     (root / "backend").mkdir(parents=True)
+    runtime_package = root / "backend" / "src" / "audio_memory"
+    runtime_package.mkdir(parents=True)
+    shutil.copy2(
+        PROJECT_ROOT / "backend" / "src" / "audio_memory" / "__init__.py",
+        runtime_package / "__init__.py",
+    )
+    shutil.copy2(
+        PROJECT_ROOT / "backend" / "src" / "audio_memory" / "config.py",
+        runtime_package / "config.py",
+    )
     (root / "prototype" / "dist" / "client").mkdir(parents=True)
     (root / "scripts").mkdir()
     (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
@@ -24,7 +34,9 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
         "backup_data.py",
         "com.audio-memory.local.plist.template",
         "doctor.sh",
+        "doctor_checks.py",
         "install-release.sh",
+        "runtime_config.py",
         "start.sh",
     ):
         shutil.copy2(PROJECT_ROOT / "scripts" / name, root / "scripts" / name)
@@ -89,3 +101,52 @@ def test_invalid_release_does_not_replace_current_version(tmp_path: Path) -> Non
 
     assert result.returncode != 0
     assert (data_root / "app" / "current").resolve() == existing
+
+
+def test_installer_rejects_a_release_without_doctor_runtime_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release")
+    (release_root / "scripts" / "runtime_config.py").unlink()
+    home.mkdir()
+
+    result = run_installer(home, data_root, release_root)
+
+    assert result.returncode != 0
+    assert "scripts/runtime_config.py" in result.stderr
+
+
+def test_installed_doctor_can_resolve_its_packaged_runtime_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release")
+    home.mkdir()
+
+    installation = run_installer(home, data_root, release_root)
+    doctor = data_root / "app" / "current" / "scripts" / "doctor.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").write_text(
+        "#!/bin/bash\nexec \"$TEST_RUNTIME_PYTHON\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "python3").chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(doctor)],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "TEST_RUNTIME_PYTHON": str(
+                PROJECT_ROOT / "backend" / ".venv" / "bin" / "python"
+            ),
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_DOCTOR_CORE_ONLY": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert installation.returncode == 0, installation.stdout + installation.stderr
+    assert "运行配置：profile=production port=8765 data=production" in result.stdout
