@@ -3,7 +3,7 @@ set -u
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND_ROOT="$PROJECT_ROOT/backend"
-PYTHON_BIN="${BACKEND_ROOT}/.venv/bin/python"
+PYTHON_BIN="${AUDIO_MEMORY_DOCTOR_PYTHON:-${BACKEND_ROOT}/.venv/bin/python}"
 FFMPEG_RUNTIME="$PROJECT_ROOT/runtime/ffmpeg"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="python3"
 CONFIG_VALUES="$("$PYTHON_BIN" "$PROJECT_ROOT/scripts/runtime_config.py" doctor-values --project-root "$PROJECT_ROOT" --home "${HOME:?HOME is required}")" || exit $?

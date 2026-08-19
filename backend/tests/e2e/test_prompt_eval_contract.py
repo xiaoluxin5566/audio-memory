@@ -1117,6 +1117,7 @@ raise SystemExit(checker.main())
             "REAL_PYTHON": sys.executable,
             "FIXTURE_CHECKER": str(fixture_checker),
             "FAKE_CHECKER_CALLS": str(checker_calls),
+            "AUDIO_MEMORY_DOCTOR_PYTHON": str(fake_bin / "python3"),
             "AUDIO_MEMORY_PROFILE": "development",
             "AUDIO_MEMORY_DATA_ROOT": str(development_data),
             "AUDIO_MEMORY_DOCTOR_CORE_ONLY": "1",
