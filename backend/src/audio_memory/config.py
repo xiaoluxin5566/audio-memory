@@ -219,6 +219,25 @@ class RuntimeConfig:
                 "开发数据目录不能与正式数据目录重叠。"
             )
 
+        writable_paths = (
+            self.paths.root,
+            self.paths.database,
+            self.paths.runtime,
+            self.paths.lock,
+            self.paths.feedback,
+            self.paths.staging,
+            self.paths.audio,
+            self.paths.prompts,
+            self.paths.local_session,
+        )
+        if any(
+            not path.expanduser().resolve().is_relative_to(resolved_data_root)
+            for path in writable_paths
+        ):
+            raise UnsafeDevelopmentPathError(
+                "开发环境的派生可写路径必须位于开发数据目录中。"
+            )
+
         if self.paths.models_writable:
             resolved_model_root = self.paths.models.expanduser().resolve()
             if not resolved_model_root.is_relative_to(resolved_data_root):

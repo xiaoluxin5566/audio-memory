@@ -285,6 +285,27 @@ def test_development_config_rejects_symlinked_data_root_in_production(
     assert not (production_root / "development").exists()
 
 
+def test_development_config_rejects_nested_runtime_symlink_outside_data_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "repo/.runtime/dev"
+    outside = tmp_path / "outside-runtime"
+    data_root.mkdir(parents=True)
+    outside.mkdir()
+    (data_root / "runtime").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="派生可写路径"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_PROFILE": "development"},
+        )
+
+    assert not (outside / "audio-memory.lock").exists()
+    assert not (outside / "local-web-security.sqlite3").exists()
+
+
 @pytest.mark.parametrize("model_subpath", ["models", "audio"])
 def test_development_config_rejects_explicit_production_model_roots(
     tmp_path: Path, model_subpath: str

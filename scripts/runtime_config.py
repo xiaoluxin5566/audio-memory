@@ -21,14 +21,20 @@ def _shell_assignment(name: str, value: str) -> str:
     return f"{name}={shlex.quote(value)}"
 
 
-def _development_assignments(*, project_root: Path, home: Path) -> tuple[str, ...]:
-    environment = dict(os.environ)
+def development_config(
+    *, project_root: Path, home: Path, environ: dict[str, str] | None = None
+) -> RuntimeConfig:
+    environment = dict(os.environ if environ is None else environ)
     environment["AUDIO_MEMORY_PROFILE"] = "development"
-    config = RuntimeConfig.from_environment(
+    return RuntimeConfig.from_environment(
         home=home,
         project_root=project_root,
         environ=environment,
     )
+
+
+def _development_assignments(*, project_root: Path, home: Path) -> tuple[str, ...]:
+    config = development_config(project_root=project_root, home=home)
     runtime = config.paths.runtime
     values = (
         ("AUDIO_MEMORY_PROFILE", config.profile.value),

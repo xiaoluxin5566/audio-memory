@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import shlex
 import shutil
@@ -14,6 +16,7 @@ RUNTIME_HELPER = REPOSITORY_ROOT / "scripts" / "runtime_config.py"
 DEV_START = REPOSITORY_ROOT / "scripts" / "dev-start.sh"
 DEV_STOP = REPOSITORY_ROOT / "scripts" / "dev-stop.sh"
 PYTHON = REPOSITORY_ROOT / "backend" / ".venv" / "bin" / "python"
+REAL_PYTHON = str(PYTHON.resolve())
 
 
 def isolated_environment(home: Path, **overrides: str) -> dict[str, str]:
@@ -81,25 +84,87 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def expected_server_argv(port: int = 8766) -> list[str]:
+    backend_source = REPOSITORY_ROOT / "backend" / "src"
+    return [
+        REAL_PYTHON,
+        "-m",
+        "uvicorn",
+        "audio_memory.main:app",
+        "--app-dir",
+        str(backend_source),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+
+
+def process_record(
+    *,
+    pid: int = 4242,
+    started_at: str = "Tue Aug 19 11:00:00 2026",
+    argv: list[str] | None = None,
+    command: str | None = None,
+) -> dict[str, object]:
+    resolved_argv = argv or expected_server_argv()
+    return {
+        "version": 1,
+        "pid": pid,
+        "started_at": started_at,
+        "argv": resolved_argv,
+        "command": command or " ".join(resolved_argv),
+        "port": 8766,
+    }
+
+
+def write_process_record(data_root: Path, record: dict[str, object]) -> Path:
+    runtime = data_root / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    pid_file = runtime / "audio-memory-dev.pid"
+    pid_file.write_text(json.dumps(record), encoding="utf-8")
+    return pid_file
+
+
 def lifecycle_fakes(tmp_path: Path) -> tuple[Path, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     calls = tmp_path / "calls"
     write_executable(
         fake_bin / "ps",
+        'printf "ps %s\\n" "$*" >> "$FAKE_CALLS"\n'
         '[ "${FAKE_PS_STATUS:-0}" = "0" ] || exit "$FAKE_PS_STATUS"\n'
-        'printf "%s\\n" "${FAKE_PS_COMMAND:-}"',
+        'case "$*" in\n'
+        '  *lstart=*)\n'
+        '    count_file="$FAKE_PS_START_COUNT"\n'
+        '    count=0; [ ! -f "$count_file" ] || count="$(sed -n 1p "$count_file")"\n'
+        '    count=$((count + 1)); printf "%s\\n" "$count" > "$count_file"\n'
+        '    if [ "$count" -gt 1 ] && [ -n "${FAKE_PS_START_SECOND:-}" ]; then\n'
+        '      printf "%s\\n" "$FAKE_PS_START_SECOND"\n'
+        '    else\n'
+        '      printf "%s\\n" "$FAKE_PS_START"\n'
+        '    fi ;;\n'
+        '  *) printf "%s\\n" "$FAKE_PS_COMMAND" ;;\n'
+        'esac',
     )
     write_executable(
         fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_CALLS"\n'
         '[ "${FAKE_CURL_STATUS:-0}" = "0" ] || exit "$FAKE_CURL_STATUS"\n'
         'printf "%s\\n" "${FAKE_HEALTH:-}"',
+    )
+    write_executable(
+        fake_bin / "lsof",
+        'printf "lsof %s\\n" "$*" >> "$FAKE_CALLS"\n'
+        '[ "${FAKE_LSOF_STATUS:-0}" = "0" ] || exit "$FAKE_LSOF_STATUS"\n'
+        'printf "%s\\n" "${FAKE_LSOF_OUTPUT:-}"',
     )
     write_executable(
         fake_bin / "kill", 'printf "kill %s\\n" "$*" >> "$FAKE_CALLS"'
     )
     write_executable(
-        fake_bin / "lsof", 'printf "lsof %s\\n" "$*" >> "$FAKE_CALLS"; exit 1'
+        fake_bin / "env",
+        'printf "spawned\\n" >> "$FAKE_CALLS"\nprintf "redirected\\n"',
     )
     write_executable(
         fake_bin / "launchctl",
@@ -108,14 +173,42 @@ def lifecycle_fakes(tmp_path: Path) -> tuple[Path, Path]:
     return fake_bin, calls
 
 
+def run_start(
+    *, home: Path, data_root: Path, fake_bin: Path, calls: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", str(DEV_START)],
+        cwd=REPOSITORY_ROOT,
+        env=isolated_environment(
+            home,
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+            FAKE_CALLS=str(calls),
+            FAKE_PS_START_COUNT=str(home.parent / "ps-start-count"),
+            FAKE_PS_START="Tue Aug 19 11:00:00 2026",
+            FAKE_PS_COMMAND=" ".join(expected_server_argv()),
+            FAKE_CURL_STATUS="1",
+            FAKE_LSOF_STATUS="1",
+            AUDIO_MEMORY_DATA_ROOT=str(data_root),
+            AUDIO_MEMORY_NO_OPEN="1",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def run_stop(
     *,
     home: Path,
     data_root: Path,
     fake_bin: Path,
     calls: Path,
-    ps_command: str = "",
+    ps_command: str | None = None,
     ps_status: int = 0,
+    start_identity: str = "Tue Aug 19 11:00:00 2026",
+    second_start_identity: str = "",
+    listener_pid: str = "4242",
+    lsof_status: int = 0,
     health: str = '{"status":"ok","profile":"development"}',
     curl_status: int = 0,
 ) -> subprocess.CompletedProcess[str]:
@@ -126,8 +219,13 @@ def run_stop(
             home,
             PATH=f"{fake_bin}:{os.environ['PATH']}",
             FAKE_CALLS=str(calls),
-            FAKE_PS_COMMAND=ps_command,
             FAKE_PS_STATUS=str(ps_status),
+            FAKE_PS_COMMAND=ps_command or " ".join(expected_server_argv()),
+            FAKE_PS_START=start_identity,
+            FAKE_PS_START_SECOND=second_start_identity,
+            FAKE_PS_START_COUNT=str(home.parent / "ps-start-count"),
+            FAKE_LSOF_STATUS=str(lsof_status),
+            FAKE_LSOF_OUTPUT=listener_pid,
             FAKE_HEALTH=health,
             FAKE_CURL_STATUS=str(curl_status),
             AUDIO_MEMORY_DATA_ROOT=str(data_root),
@@ -138,12 +236,15 @@ def run_stop(
     )
 
 
+def recorded_calls(calls: Path) -> list[str]:
+    return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+
 def test_development_env_resolves_validated_defaults_without_writes(
     tmp_path: Path,
 ) -> None:
     project_root = copied_project(tmp_path)
     home = tmp_path / "home"
-
     result = run_helper(project_root=project_root, home=home)
 
     assert result.returncode == 0, result.stderr
@@ -162,12 +263,6 @@ def test_development_env_resolves_validated_defaults_without_writes(
     assert assignments["AUDIO_MEMORY_RUNTIME_DIR"] == str(
         (project_root / ".runtime" / "dev" / "runtime").resolve()
     )
-    assert assignments["AUDIO_MEMORY_PID_FILE"].endswith(
-        "/runtime/audio-memory-dev.pid"
-    )
-    assert assignments["AUDIO_MEMORY_LOG_FILE"].endswith(
-        "/runtime/audio-memory-dev.log"
-    )
     assert not (project_root / ".runtime").exists()
     assert not production_root.exists()
 
@@ -180,7 +275,6 @@ def test_development_env_rejects_production_root_and_child_before_writes(
     home = tmp_path / "home"
     production_root = home / "Library" / "Application Support" / "AudioMemory"
     requested_root = (production_root / relative_data_root).resolve()
-
     result = run_helper(
         project_root=project_root,
         home=home,
@@ -201,7 +295,6 @@ def test_development_env_rejects_symlink_escape_before_writes(tmp_path: Path) ->
     link = tmp_path / "development-link"
     link.symlink_to(production_root, target_is_directory=True)
     requested_root = link / "escaped"
-
     result = run_helper(
         project_root=project_root,
         home=home,
@@ -214,109 +307,120 @@ def test_development_env_rejects_symlink_escape_before_writes(tmp_path: Path) ->
     assert_no_runtime_artifacts(requested_root)
 
 
-def test_dev_start_refuses_an_occupied_port_without_creating_pid_or_log(
+def test_development_env_rejects_nested_runtime_symlink(tmp_path: Path) -> None:
+    project_root = copied_project(tmp_path)
+    home = tmp_path / "home"
+    data_root = project_root / ".runtime/dev"
+    outside = tmp_path / "outside"
+    data_root.mkdir(parents=True)
+    outside.mkdir()
+    (data_root / "runtime").symlink_to(outside, target_is_directory=True)
+
+    result = run_helper(project_root=project_root, home=home)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "派生可写路径" in result.stderr
+    assert not any(outside.iterdir())
+
+
+def test_dev_start_refuses_an_occupied_port_without_runtime_writes(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    calls = tmp_path / "calls"
-    write_executable(fake_bin / "curl", "exit 1")
-    write_executable(fake_bin / "lsof", 'printf "%s\\n" "$*" >> "$FAKE_CALLS"')
+    fake_bin, calls = lifecycle_fakes(tmp_path)
     write_executable(
-        fake_bin / "launchctl", 'printf "launchctl %s\\n" "$*" >> "$FAKE_CALLS"; exit 99'
+        fake_bin / "lsof",
+        'printf "lsof %s\\n" "$*" >> "$FAKE_CALLS"\nexit 0',
     )
-
-    result = subprocess.run(
-        ["/bin/bash", str(DEV_START)],
-        cwd=REPOSITORY_ROOT,
-        env=isolated_environment(
-            home,
-            PATH=f"{fake_bin}:{os.environ['PATH']}",
-            FAKE_CALLS=str(calls),
-            AUDIO_MEMORY_DATA_ROOT=str(data_root),
-            AUDIO_MEMORY_NO_OPEN="1",
-        ),
-        capture_output=True,
-        text=True,
-        check=False,
+    result = run_start(
+        home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
     )
 
     assert result.returncode != 0
     assert "端口 8766 已被其他程序占用" in result.stderr
-    assert "launchctl" not in (calls.read_text() if calls.exists() else "")
-    assert not (data_root / "runtime" / "audio-memory-dev.pid").exists()
-    assert not (data_root / "runtime" / "audio-memory-dev.log").exists()
+    assert_no_runtime_artifacts(data_root)
+    assert all("launchctl" not in call for call in recorded_calls(calls))
 
 
-def test_dev_start_preserves_default_shared_models_as_implicit_read_only_input(
-    tmp_path: Path,
-) -> None:
+def test_dev_start_refuses_log_symlink_without_following_it(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    calls = tmp_path / "calls"
-    curl_state = tmp_path / "curl-state"
-    write_executable(
-        fake_bin / "curl",
-        'if [ ! -f "$FAKE_CURL_STATE" ]; then : > "$FAKE_CURL_STATE"; exit 1; fi\n'
-        "printf '%s\\n' '{\"status\":\"ok\",\"profile\":\"development\"}'",
-    )
-    write_executable(fake_bin / "lsof", "exit 1")
-    write_executable(
-        fake_bin / "env",
-        'if [ "${AUDIO_MEMORY_MODEL_ROOT+x}" = "x" ]; then\n'
-        '  printf "model-root=SET\\n" >> "$FAKE_CALLS"\n'
-        "else\n"
-        '  printf "model-root=UNSET\\n" >> "$FAKE_CALLS"\n'
-        "fi",
-    )
-    write_executable(
-        fake_bin / "launchctl", 'printf "launchctl\\n" >> "$FAKE_CALLS"; exit 99'
+    runtime = data_root / "runtime"
+    runtime.mkdir(parents=True)
+    target = tmp_path / "outside-log"
+    target.write_text("keep\n", encoding="utf-8")
+    (runtime / "audio-memory-dev.log").symlink_to(target)
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_start(
+        home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
     )
 
-    result = subprocess.run(
-        ["/bin/bash", str(DEV_START)],
-        cwd=REPOSITORY_ROOT,
-        env=isolated_environment(
-            home,
-            PATH=f"{fake_bin}:{os.environ['PATH']}",
-            FAKE_CALLS=str(calls),
-            FAKE_CURL_STATE=str(curl_state),
-            AUDIO_MEMORY_DATA_ROOT=str(data_root),
-            AUDIO_MEMORY_NO_OPEN="1",
-        ),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [
-        "model-root=UNSET"
-    ]
+    assert result.returncode != 0
+    assert "符号链接" in result.stderr
+    assert target.read_text(encoding="utf-8") == "keep\n"
+    assert not (runtime / "audio-memory-dev.pid").exists()
+    assert "spawned" not in recorded_calls(calls)
 
 
-@pytest.mark.parametrize(
-    ("ps_status", "ps_command"),
-    [
-        (1, ""),
-        (0, "/usr/bin/python unrelated_service.py --port 8766"),
-    ],
-)
-def test_dev_stop_removes_stale_or_unrelated_pid_without_signalling(
-    tmp_path: Path, ps_status: int, ps_command: str
+def test_dev_start_refuses_when_another_start_holds_the_guard(
+    tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
     runtime = data_root / "runtime"
     runtime.mkdir(parents=True)
-    pid_file = runtime / "audio-memory-dev.pid"
-    pid_file.write_text("4242\n", encoding="utf-8")
+    guard = runtime / "audio-memory-dev.start.lock"
+    guard_fd = os.open(guard, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     fake_bin, calls = lifecycle_fakes(tmp_path)
+    try:
+        result = run_start(
+            home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
+        )
+    finally:
+        os.close(guard_fd)
 
+    assert result.returncode != 0
+    assert "另一个开发启动正在进行" in result.stderr
+    assert "spawned" not in recorded_calls(calls)
+    assert not (runtime / "audio-memory-dev.pid").exists()
+
+
+def test_dev_stop_rejects_pid_symlink_without_following_target(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    runtime = data_root / "runtime"
+    runtime.mkdir(parents=True)
+    target = tmp_path / "outside-pid"
+    target.write_text("4242\n", encoding="utf-8")
+    pid_file = runtime / "audio-memory-dev.pid"
+    pid_file.symlink_to(target)
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
+    )
+
+    assert result.returncode != 0
+    assert target.read_text(encoding="utf-8") == "4242\n"
+    assert not pid_file.exists()
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+@pytest.mark.parametrize(
+    ("ps_status", "ps_command"),
+    [(1, None), (0, "/usr/bin/python unrelated_service.py --port 8766")],
+)
+def test_dev_stop_removes_dead_or_command_mismatched_record_without_term(
+    tmp_path: Path, ps_status: int, ps_command: str | None
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = write_process_record(data_root, process_record())
+    fake_bin, calls = lifecycle_fakes(tmp_path)
     result = run_stop(
         home=home,
         data_root=data_root,
@@ -328,89 +432,124 @@ def test_dev_stop_removes_stale_or_unrelated_pid_without_signalling(
 
     assert result.returncode != 0
     assert not pid_file.exists()
-    recorded = calls.read_text() if calls.exists() else ""
-    assert "kill -TERM" not in recorded
-    assert "launchctl" not in recorded
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
 
-def test_dev_stop_rejects_non_numeric_pid_without_running_process_tools(
+def test_dev_stop_preserves_valid_record_when_health_is_unavailable(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
-    runtime = data_root / "runtime"
-    runtime.mkdir(parents=True)
-    pid_file = runtime / "audio-memory-dev.pid"
-    pid_file.write_text("42; launchctl bootout\n", encoding="utf-8")
+    pid_file = write_process_record(data_root, process_record())
+    original = pid_file.read_bytes()
     fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home,
+        data_root=data_root,
+        fake_bin=fake_bin,
+        calls=calls,
+        curl_status=1,
+    )
 
+    assert result.returncode != 0
+    assert "健康检查暂时不可用" in result.stderr
+    assert pid_file.read_bytes() == original
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+def test_dev_stop_requires_pid_to_own_expected_listener(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = write_process_record(data_root, process_record())
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home,
+        data_root=data_root,
+        fake_bin=fake_bin,
+        calls=calls,
+        listener_pid="9999",
+    )
+
+    assert result.returncode != 0
+    assert not pid_file.exists()
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+def test_dev_stop_revalidates_start_identity_after_health_before_term(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = write_process_record(data_root, process_record())
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home,
+        data_root=data_root,
+        fake_bin=fake_bin,
+        calls=calls,
+        second_start_identity="Tue Aug 19 11:01:00 2026",
+    )
+
+    assert result.returncode != 0
+    assert not pid_file.exists()
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+def test_dev_stop_rejects_non_exact_recorded_argv(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    argv = expected_server_argv() + ["--reload"]
+    pid_file = write_process_record(data_root, process_record(argv=argv))
+    fake_bin, calls = lifecycle_fakes(tmp_path)
     result = run_stop(
         home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
     )
 
     assert result.returncode != 0
     assert not pid_file.exists()
-    assert not calls.exists()
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
 
-def test_dev_stop_requires_development_health_identity_before_term(
+def test_dev_stop_rejects_recorded_command_that_is_not_exact_expected(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
-    runtime = data_root / "runtime"
-    runtime.mkdir(parents=True)
-    pid_file = runtime / "audio-memory-dev.pid"
-    pid_file.write_text("4242\n", encoding="utf-8")
-    fake_bin, calls = lifecycle_fakes(tmp_path)
-    expected_command = (
-        f"{PYTHON} -m uvicorn audio_memory.main:app "
-        f"--app-dir {REPOSITORY_ROOT / 'backend' / 'src'} "
-        "--host 127.0.0.1 --port 8766"
+    spoofed_command = " ".join(expected_server_argv()) + " --reload"
+    pid_file = write_process_record(
+        data_root, process_record(command=spoofed_command)
     )
-
+    fake_bin, calls = lifecycle_fakes(tmp_path)
     result = run_stop(
         home=home,
         data_root=data_root,
         fake_bin=fake_bin,
         calls=calls,
-        ps_command=expected_command,
-        health='{"status":"ok","profile":"production"}',
+        ps_command=spoofed_command,
     )
 
     assert result.returncode != 0
     assert not pid_file.exists()
-    recorded = calls.read_text() if calls.exists() else ""
-    assert "kill -TERM" not in recorded
-    assert "launchctl" not in recorded
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
 
-def test_dev_stop_sends_term_only_for_matching_worktree_and_health(
+def test_dev_stop_sends_term_only_after_two_complete_identity_checks(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
-    runtime = data_root / "runtime"
-    runtime.mkdir(parents=True)
-    pid_file = runtime / "audio-memory-dev.pid"
-    pid_file.write_text("4242\n", encoding="utf-8")
+    pid_file = write_process_record(data_root, process_record())
     fake_bin, calls = lifecycle_fakes(tmp_path)
-    expected_command = (
-        f"{PYTHON} -m uvicorn audio_memory.main:app "
-        f"--app-dir {REPOSITORY_ROOT / 'backend' / 'src'} "
-        "--host 127.0.0.1 --port 8766"
-    )
-
     result = run_stop(
-        home=home,
-        data_root=data_root,
-        fake_bin=fake_bin,
-        calls=calls,
-        ps_command=expected_command,
+        home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
     )
 
     assert result.returncode == 0, result.stderr
     assert not pid_file.exists()
-    assert calls.read_text(encoding="utf-8").splitlines() == [
+    calls_log = recorded_calls(calls)
+    assert [call for call in calls_log if call.startswith("kill ")] == [
         "kill -TERM -- 4242"
     ]
+    assert len([call for call in calls_log if "lstart=" in call]) == 2
+    assert len([call for call in calls_log if call.startswith("lsof ")]) == 2
+    assert all("launchctl" not in call for call in calls_log)
