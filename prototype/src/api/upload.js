@@ -1,4 +1,4 @@
-import { getLocalSessionHeaders, refreshLocalSessionHeaders } from './client.js'
+import { getLocalSessionHeaders, refreshLocalSessionHeaders, requireWritableRuntime } from './client.js'
 
 
 export async function uploadFile(
@@ -24,7 +24,13 @@ export async function uploadFile(
       reject(error)
     }
 
-    function send() {
+    async function send() {
+      try {
+        await requireWritableRuntime()
+      } catch (error) {
+        reject(error)
+        return
+      }
       const request = new XMLHttpRequest()
       request.open('POST', `/api/jobs/${encodeURIComponent(jobId)}/files`)
       request.timeout = 120_000

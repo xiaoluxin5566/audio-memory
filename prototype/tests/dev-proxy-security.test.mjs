@@ -225,6 +225,53 @@ test('development client establishes its health and session boundary before a mu
 })
 
 
+test('development client rechecks health after a backend is replaced before reusing a session', async () => {
+  const reservedBackendPortServer = createHttpServer()
+  const backendPort = await listen(reservedBackendPortServer)
+  await close(reservedBackendPortServer)
+  const backendOrigin = `http://127.0.0.1:${backendPort}`
+  const testRoot = await mkdtemp(join(tmpdir(), 'audio-memory-dev-replacement-'))
+  const backendRoot = fileURLToPath(new URL('../../backend/', import.meta.url))
+  const backend = spawn(fileURLToPath(new URL('../../backend/.venv/bin/python', import.meta.url)), [
+    '-m', 'uvicorn', 'dev_proxy_app:app', '--app-dir', join(backendRoot, 'tests/support'),
+    '--host', '127.0.0.1', '--port', String(backendPort), '--log-level', 'error',
+  ], { cwd: backendRoot, env: {
+    ...process.env,
+    AUDIO_MEMORY_TEST_SECURITY_DB: join(testRoot, 'security.sqlite3'),
+    AUDIO_MEMORY_TEST_BACKEND_PORT: String(backendPort),
+    AUDIO_MEMORY_TEST_BACKEND_PROFILE: 'development',
+  }, stdio: 'ignore' })
+  await waitForBackend(`${backendOrigin}/api/count`, backend)
+
+  const previousExpectedProfile = process.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE
+  const originalFetch = globalThis.fetch
+  process.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE = 'development'
+  globalThis.fetch = (input, options = {}) => originalFetch(
+    typeof input === 'string' && input.startsWith('/') ? `${backendOrigin}${input}` : input,
+    options.method === 'POST' ? { ...options, headers: { ...options.headers, Origin: backendOrigin } } : options,
+  )
+  try {
+    const client = await import(`../src/api/client.js?replacement=${Date.now()}`)
+    await client.apiRequest('/effect', { method: 'POST', idempotencyKey: 'before-replacement' })
+    const switched = await originalFetch(`${backendOrigin}/api/test-profile/production`)
+    assert.equal(switched.status, 200)
+
+    await assert.rejects(
+      client.apiRequest('/effect', { method: 'POST', idempotencyKey: 'after-replacement' }),
+      { code: 'runtime_environment_blocked', message: /正式环境/ },
+    )
+    const count = await originalFetch(`${backendOrigin}/api/count`)
+    assert.deepEqual(await count.json(), { calls: 1 })
+  } finally {
+    globalThis.fetch = originalFetch
+    if (backend.exitCode === null) { backend.kill('SIGTERM'); await once(backend, 'exit') }
+    await rm(testRoot, { recursive: true, force: true })
+    if (previousExpectedProfile === undefined) delete process.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE
+    else process.env.VITE_AUDIO_MEMORY_EXPECTED_PROFILE = previousExpectedProfile
+  }
+})
+
+
 test('development UI blocks a production backend before it creates a session or mutates', { concurrency: false }, async () => {
   const reservedBackendPortServer = createHttpServer()
   const backendPort = await listen(reservedBackendPortServer)

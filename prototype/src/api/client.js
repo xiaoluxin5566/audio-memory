@@ -45,9 +45,13 @@ export async function loadRuntimeEnvironment() {
 }
 
 
-async function requireWritableRuntime() {
+export async function requireWritableRuntime() {
   if (!expectedRuntimeProfile) return
-  const environment = await loadRuntimeEnvironment()
+  const health = await fetchHealth().catch(() => null)
+  const environment = runtimeEnvironment(
+    expectedRuntimeProfile,
+    health?.status === 'ok' ? health : null,
+  )
   if (!environment.blocked) return
   const error = new Error(environment.message)
   error.code = 'runtime_environment_blocked'
@@ -108,7 +112,9 @@ export async function apiRequest(path, options = {}) {
   let localHeaders = isMutation
     ? await getLocalSessionHeaders(actionKey)
     : {}
-  const send = () => fetch(`${API_BASE}${path}`, {
+  const send = async () => {
+    if (isMutation) await requireWritableRuntime()
+    return fetch(`${API_BASE}${path}`, {
     ...fetchOptions,
     headers: {
       Accept: 'application/json',
@@ -117,6 +123,7 @@ export async function apiRequest(path, options = {}) {
       ...localHeaders,
     },
   })
+  }
   let response
   let payload = null
   let responseText = ''

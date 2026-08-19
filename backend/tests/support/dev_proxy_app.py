@@ -11,6 +11,7 @@ from audio_memory.security.middleware import LocalWebSecurityMiddleware
 
 app = FastAPI()
 calls = 0
+profile = os.environ.get("AUDIO_MEMORY_TEST_BACKEND_PROFILE", "development")
 security = LocalSessionSecurity(Path(os.environ["AUDIO_MEMORY_TEST_SECURITY_DB"]))
 app.add_middleware(
     LocalWebSecurityMiddleware,
@@ -23,8 +24,15 @@ app.add_middleware(
 async def health() -> dict[str, str]:
     return {
         "status": "ok",
-        "profile": os.environ.get("AUDIO_MEMORY_TEST_BACKEND_PROFILE", "development"),
+        "profile": profile,
     }
+
+
+@app.get("/api/test-profile/{next_profile}")
+async def set_profile(next_profile: str) -> dict[str, str]:
+    global profile
+    profile = next_profile
+    return {"profile": profile}
 
 
 @app.post("/api/effect", status_code=201)
