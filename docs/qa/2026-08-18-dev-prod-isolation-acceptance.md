@@ -264,9 +264,12 @@ TDD 证据：连接池与 lifecycle 首次组合为 `3 failed in 1.22s`；转录
 ```text
 第 4 轮精确安全/兼容性回归：9 passed in 1.69s
 受影响模块组合：188 passed in 20.35s
-后端非监听全量：1055 passed, 28 skipped, 1 deselected in 43.21s
+提交后后端全量（含 localhost 双进程验收）：1056 passed, 28 skipped in 60.32s
+提交后前端全量（含 localhost 代理边界）：91 passed, 0 failed, 0 skipped in 2.43s
+提交后 Vite 生产构建：39 modules，416ms
+提交后 Shell 语法与 git diff --check：通过
 ```
 
-单独尝试未纳入上述全量的 localhost 双进程验收时，在随机 `127.0.0.1` 端口的 `socket.bind` 阶段被当前沙箱以 `PermissionError: Operation not permitted` 拒绝，未进入应用逻辑，不冒充通过。Shell 语法、Python 编译和 `git diff --check` 的最终结果在本轮交付前重新执行。
+授权恢复后，localhost 双进程验收与前端代理安全用例均在随机 `127.0.0.1` 端口通过，并已纳入上述提交后全量结果。
 
-全部新回归只使用 pytest 临时目录、假 Security client 与本地 ffmpeg。未读取或修改真实正式数据、Keychain、provider、LaunchAgent、真实模型缓存、远程 Git、tag 或 Release，本轮变更按要求保持 unstaged/uncommitted。
+全部新回归只使用 pytest 临时目录、假 Security client 与本地 ffmpeg。未读取或修改真实正式数据、Keychain、provider、LaunchAgent、真实模型缓存、远程 Git、tag 或 Release。最终修复与回归测试已提交到本地功能分支，未合并、推送、打 tag 或发布。
