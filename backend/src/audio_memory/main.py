@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_memory import __version__
-from audio_memory.config import AppPaths, assert_supported_platform
+from audio_memory.config import AppPaths, RuntimeConfig, assert_supported_platform
 from audio_memory.db import Database, run_migrations
 from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
@@ -56,16 +55,17 @@ from audio_memory.reanalysis.worker import ReanalysisWorker
 
 def create_app(
     *,
+    runtime_config: RuntimeConfig | None = None,
     paths: AppPaths | None = None,
     frontend_dir: Path | None = None,
     local_port: int | None = None,
 ) -> FastAPI:
-    resolved_paths = paths or AppPaths.from_home(Path.home())
-    resolved_port = (
-        local_port
-        if local_port is not None
-        else int(os.environ.get("AUDIO_MEMORY_PORT", "8765"))
+    resolved_runtime_config = runtime_config or RuntimeConfig.from_environment(
+        home=Path.home(),
+        project_root=Path(__file__).resolve().parents[3],
     )
+    resolved_paths = paths or resolved_runtime_config.paths
+    resolved_port = local_port if local_port is not None else resolved_runtime_config.port
     if not 1 <= resolved_port <= 65535:
         raise ValueError("local_port must be between 1 and 65535")
     resolved_frontend = frontend_dir or (
@@ -124,7 +124,9 @@ def create_app(
                 "glm": GLMAdapter(PROVIDER_CONFIGS["glm"]),
             }
             validators = {}
-            keychain_repository = KeychainRepository(MacSecurityClient())
+            keychain_repository = KeychainRepository(
+                MacSecurityClient(), service=resolved_runtime_config.keychain_service
+            )
             for provider_id, config in PROVIDER_CONFIGS.items():
                 client = httpx.AsyncClient(timeout=15.0)
                 provider_clients.append(client)
@@ -219,9 +221,8 @@ def create_app(
             instance_lock.release()
 
     app = FastAPI(title="Audio Memory", version=__version__, lifespan=lifespan)
-    local_security = LocalSessionSecurity(
-        resolved_paths.runtime / "local-web-security.sqlite3"
-    )
+    app.state.runtime_config = resolved_runtime_config
+    local_security = LocalSessionSecurity(resolved_paths.local_session)
     app.state.local_web_security = local_security
     app.add_middleware(
         LocalWebSecurityMiddleware,
@@ -243,6 +244,7 @@ def create_app(
             "version": __version__,
             "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
             "architecture": platform.machine(),
+            "profile": resolved_runtime_config.profile.value,
         }
 
     if resolved_frontend.is_dir() and (resolved_frontend / "index.html").is_file():

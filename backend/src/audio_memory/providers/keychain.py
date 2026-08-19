@@ -44,12 +44,13 @@ class KeychainRepository:
         "glm": "provider:glm",
     }
 
-    def __init__(self, client: SecurityClient) -> None:
+    def __init__(self, client: SecurityClient, service: str = SERVICE) -> None:
         self._client = client
+        self._service = service
 
     def read(self, provider_id: str) -> KeychainReadResult:
         account = self._account(provider_id)
-        status, secret = self._client.read(self.SERVICE, account)
+        status, secret = self._client.read(self._service, account)
         if status == ERR_SEC_SUCCESS and secret:
             return KeychainReadResult(KeychainStatus.CONFIGURED, secret)
         if status == ERR_SEC_ITEM_NOT_FOUND:
@@ -58,17 +59,17 @@ class KeychainRepository:
 
     def replace(self, provider_id: str, candidate: bytes) -> None:
         account = self._account(provider_id)
-        status = self._client.update(self.SERVICE, account, candidate)
+        status = self._client.update(self._service, account, candidate)
         if status == ERR_SEC_SUCCESS:
             return
         if status != ERR_SEC_ITEM_NOT_FOUND:
             raise KeychainAccessError("Unable to update the system Keychain")
 
-        status = self._client.add(self.SERVICE, account, candidate)
+        status = self._client.add(self._service, account, candidate)
         if status == ERR_SEC_SUCCESS:
             return
         if status == ERR_SEC_DUPLICATE_ITEM:
-            status = self._client.update(self.SERVICE, account, candidate)
+            status = self._client.update(self._service, account, candidate)
             if status == ERR_SEC_SUCCESS:
                 return
         raise KeychainAccessError("Unable to save the API Key in the system Keychain")
