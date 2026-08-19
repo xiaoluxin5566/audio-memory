@@ -103,7 +103,7 @@ class Database:
             )
         else:
             self._verify_development_database = None
-        event.listen(self.engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
+        event.listen(self.engine.sync_engine, "connect", configure_sqlite_connection)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def create_schema(self) -> None:
@@ -121,10 +121,34 @@ class Database:
         await self.engine.dispose()
 
 
-def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+def _configure_sqlite_pragmas(dbapi_connection) -> None:
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        journal_mode = cursor.fetchone()
+        if journal_mode is None or str(journal_mode[0]).lower() != "wal":
+            raise RuntimeError("SQLite WAL mode is required")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
+def configure_sqlite_connection(dbapi_connection, _connection_record=None) -> None:
+    _configure_sqlite_pragmas(dbapi_connection)
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def configure_sqlite_migration_connection(
+    dbapi_connection, _connection_record=None
+) -> None:
+    # Alembic's SQLite batch migrations replace tables. Enabling foreign keys
+    # here can cascade-delete rows while an old table is being replaced.
+    _configure_sqlite_pragmas(dbapi_connection)
 
 
 def run_migrations(
