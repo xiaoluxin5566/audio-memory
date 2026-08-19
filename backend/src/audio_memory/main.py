@@ -12,7 +12,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_memory import __version__
-from audio_memory.config import AppPaths, RuntimeConfig, assert_supported_platform
+from audio_memory.config import (
+    AppPaths,
+    RuntimeConfig,
+    assert_supported_platform,
+)
 from audio_memory.db import Database, run_migrations
 from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
@@ -60,14 +64,16 @@ def create_app(
     frontend_dir: Path | None = None,
     local_port: int | None = None,
 ) -> FastAPI:
-    resolved_runtime_config = runtime_config or RuntimeConfig.from_environment(
+    base_runtime_config = runtime_config or RuntimeConfig.from_environment(
         home=Path.home(),
         project_root=Path(__file__).resolve().parents[3],
     )
-    resolved_paths = paths or resolved_runtime_config.paths
-    resolved_port = local_port if local_port is not None else resolved_runtime_config.port
-    if not 1 <= resolved_port <= 65535:
-        raise ValueError("local_port must be between 1 and 65535")
+    resolved_runtime_config = base_runtime_config.with_overrides(
+        paths=paths,
+        port=local_port,
+    )
+    resolved_paths = resolved_runtime_config.paths
+    resolved_port = resolved_runtime_config.port
     resolved_frontend = frontend_dir or (
         Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
     )
@@ -75,6 +81,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         assert_supported_platform()
+        resolved_runtime_config.validate()
         resolved_paths.ensure_directories()
         instance_lock = InstanceLock(resolved_paths.lock)
         instance_lock.acquire()
@@ -103,7 +110,10 @@ def create_app(
                 database, resolved_paths, job_events, eta_tracker=eta_tracker
             )
             whisper_engine = MLXWhisperEngine(
-                database, resolved_paths, eta_tracker=eta_tracker
+                database,
+                resolved_paths,
+                runtime_profile=resolved_runtime_config.profile,
+                eta_tracker=eta_tracker,
             )
             app.state.whisper_engine = whisper_engine
             transcription_service = TranscriptionService(

@@ -182,3 +182,35 @@ exit 0
 ```
 
 28 项 skip 全部来自既有 legacy Event Map compatibility-only 标记，本 Task 没有新增 skip。
+
+## 最终审查修正轮（2026-08-19）
+
+本轮逐项核对了最终审查的 7 条意见；结论均为可复现缺陷或缺失验收，不需要技术反驳。修正边界如下：
+
+| 审查项 | 技术处理与直接证据 |
+|---|---|
+| macOS 同目录别名 | 路径关系改为“已有祖先的 `st_dev/st_ino` 身份 + 未创建尾部的 Unicode/casefold 组件”比较；覆盖大小写变体及 `/Users` 与 `/System/Volumes/Data/Users` firmlink，拒绝后目标目录不存在。应用 lifespan 在首次目录写入前再次验证，符号链接在配置解析后被替换时仍 fail closed。 |
+| Keychain 跨环境 service | `development` 拒绝 `Audio Memory`，`production` 拒绝 `Audio Memory Dev`；其他非空自定义 service 仍允许。环境解析和注入配置都在 Keychain client 构造/访问及目录创建前失败。 |
+| 只读 Whisper 共享模型 | `models_writable=False` 时只从模型根旁的受控清单解析已安装本地 snapshot；清单缺失、身份不符、文件缺失或越界均失败，不把 repo ID 交给 `snapshot_download`。显式可写 development 模型根调用下载时固定 `cache_dir=<development model root>`。 |
+| `create_app` 身份分裂 | `paths` 与 `local_port` 覆盖先合成为一个不可变的 effective `RuntimeConfig`，再统一验证、保存到 `app.state` 并供 health、Keychain、数据库和本地安全边界使用；development 注入正式路径或缺少正式边界均在零产品产物状态下拒绝。 |
+| Doctor 模型位置 | `doctor-values` 现在输出经同一 resolver 派生的 manifest root；Whisper 与 diarization 都从共享模型根旁的 manifest 检查。隔离 development fixture 实际执行 Whisper 校验、带隔离信任集合的 diarization 语义校验、迁移/import/Prompt/可写性检查，Doctor 退出码为 0。 |
+| `MODELS_WRITABLE` 输出 | 选择删除误导性的 `AUDIO_MEMORY_MODELS_WRITABLE` shell 输出；可写状态仍是 `RuntimeConfig.paths.models_writable` 的内部类型化状态，下载边界直接消费该状态，不再尝试从未解析的环境变量 round-trip。 |
+| LaunchAgent 身份 | 非 core 的 production Doctor 精确检查 `launchctl print gui/<uid>/com.audio-memory.local`；development 同一测试证明既不调用 `launchctl`，也不调用 Keychain 可访问性检查。 |
+
+TDD RED 记录：路径别名 `2 failed`；跨环境 Keychain `2 failed`；effective runtime 三项 `3 failed`；写前复验 `1 failed`；缺少正式边界 `1 failed`；Whisper 初始三项 `3 failed`，只读自定义 repo fallback `1 failed`；Doctor 路径与 LaunchAgent 组合 `2 failed`。每组失败原因均为待实现行为缺失，随后对应聚焦测试转绿。
+
+最终证据（下列结果取代本文件前一节的旧计数）：
+
+```text
+聚焦审查回归：74 passed, 29 deselected in 16.88s
+临时双环境/边界验收：2 passed in 4.07s
+
+后端全量：1032 passed, 28 skipped in 47.13s
+前端全量：91 passed, 0 failed, 0 skipped in 2.46s
+前端生产构建：39 modules transformed; built in 446ms
+Shell 语法：exit 0
+```
+
+首次在受限沙箱中运行回环监听测试时，后端与前端分别出现 `PermissionError/EPERM`；获准仅使用随机 `127.0.0.1` 临时端口后，后端隔离验收和前端代理测试全部通过。该差异来自沙箱禁止监听，不是产品失败。
+
+本轮仍只使用临时目录、假 Security client、fail-closed provider 和隔离模型文件；没有读取或改写真实正式数据库、真实 Keychain、真实模型缓存、LaunchAgent 或运行服务，没有 provider 外联，也没有访问远端 Git、标签或 Release。

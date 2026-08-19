@@ -108,6 +108,54 @@ def test_runtime_config_rejects_blank_keychain_service_before_creating_directori
     assert not data_root.exists()
 
 
+@pytest.mark.parametrize(
+    ("profile", "opposite_service"),
+    (
+        ("development", "Audio Memory"),
+        ("production", "Audio Memory Dev"),
+    ),
+)
+def test_runtime_config_rejects_the_opposite_protected_keychain_namespace_before_writes(
+    tmp_path: Path, profile: str, opposite_service: str
+) -> None:
+    data_root = tmp_path / "data"
+
+    with pytest.raises(RuntimeConfigurationError, match="Keychain service"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home",
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": profile,
+                "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+                "AUDIO_MEMORY_KEYCHAIN_SERVICE": opposite_service,
+            },
+        )
+
+    assert not data_root.exists()
+
+
+@pytest.mark.parametrize("profile", ["production", "development"])
+def test_runtime_config_allows_a_safe_custom_keychain_namespace(
+    tmp_path: Path, profile: str
+) -> None:
+    data_root = tmp_path / profile
+    model_root = data_root / "models"
+
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={
+            "AUDIO_MEMORY_PROFILE": profile,
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_MODEL_ROOT": str(model_root),
+            "AUDIO_MEMORY_KEYCHAIN_SERVICE": "Audio Memory Test Fixture",
+        },
+    )
+
+    assert config.keychain_service == "Audio Memory Test Fixture"
+    assert not data_root.exists()
+
+
 def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
     tmp_path: Path,
 ) -> None:
@@ -283,6 +331,55 @@ def test_development_config_rejects_symlinked_data_root_in_production(
 
     assert not requested_root.exists()
     assert not (production_root / "development").exists()
+
+
+def test_development_config_rejects_case_variant_of_production_before_writes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    production_root = home / "Library/Application Support/AudioMemory"
+    requested_root = home / "Library/Application Support/audiomemory/development"
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="正式数据目录重叠"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(requested_root),
+            },
+        )
+
+    assert not production_root.exists()
+    assert not requested_root.exists()
+
+
+def test_development_config_rejects_macos_users_firmlink_alias_before_writes() -> None:
+    users = Path("/Users")
+    data_users = Path("/System/Volumes/Data/Users")
+    if not users.exists() or not data_users.exists() or not users.samefile(data_users):
+        pytest.skip("requires the macOS /Users data-volume firmlink")
+
+    sentinel = "__audio_memory_isolation_test_path_that_must_not_exist__"
+    home = users / sentinel
+    aliased_production_root = (
+        data_users / sentinel / "Library/Application Support/AudioMemory"
+    )
+    assert not home.exists()
+    assert not aliased_production_root.exists()
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="正式数据目录重叠"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=users / sentinel / "project",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_DATA_ROOT": str(aliased_production_root),
+            },
+        )
+
+    assert not home.exists()
+    assert not aliased_production_root.exists()
 
 
 def test_development_config_rejects_nested_runtime_symlink_outside_data_root(

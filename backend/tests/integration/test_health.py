@@ -3,7 +3,13 @@ from pathlib import Path
 import httpx
 import pytest
 
-from audio_memory.config import AppPaths, RuntimeConfig
+from audio_memory.config import (
+    AppPaths,
+    AppProfile,
+    RuntimeConfig,
+    RuntimeConfigurationError,
+    UnsafeDevelopmentPathError,
+)
 from audio_memory.main import create_app
 from audio_memory.providers.keychain import ERR_SEC_ITEM_NOT_FOUND
 
@@ -92,6 +98,125 @@ async def test_health_exposes_development_profile_without_runtime_details(
         ("Audio Memory Dev", "provider:openai"),
         ("Audio Memory Dev", "provider:glm"),
     ]
+
+
+def test_create_app_rejects_development_identity_with_production_paths_before_access(
+    tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
+) -> None:
+    runtime_config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+    assert runtime_config.production_data_root is not None
+    production_paths = AppPaths.from_roots(runtime_config.production_data_root)
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="正式数据目录重叠"):
+        create_app(runtime_config=runtime_config, paths=production_paths)
+
+    assert fake_mac_security_client == []
+    assert not runtime_config.production_data_root.exists()
+    assert not runtime_config.paths.root.exists()
+
+
+def test_create_app_rejects_injected_opposite_keychain_namespace_before_access(
+    tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
+) -> None:
+    paths = AppPaths.from_roots(
+        tmp_path / "project/.runtime/dev",
+        tmp_path / "home/Library/Application Support/AudioMemory/models",
+        models_writable=False,
+    )
+    runtime_config = RuntimeConfig(
+        paths=paths,
+        profile=AppProfile.DEVELOPMENT,
+        port=8766,
+        keychain_service="Audio Memory",
+        production_data_root=(
+            tmp_path / "home/Library/Application Support/AudioMemory"
+        ),
+    )
+
+    with pytest.raises(RuntimeConfigurationError, match="Keychain service"):
+        create_app(runtime_config=runtime_config)
+
+    assert fake_mac_security_client == []
+    assert not paths.root.exists()
+
+
+def test_create_app_rejects_development_identity_without_a_production_boundary(
+    tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
+) -> None:
+    paths = AppPaths.from_roots(
+        tmp_path / "project/.runtime/dev",
+        tmp_path / "shared/models",
+        models_writable=False,
+    )
+    runtime_config = RuntimeConfig(
+        paths=paths,
+        profile=AppProfile.DEVELOPMENT,
+        port=8766,
+        keychain_service="Audio Memory Dev",
+    )
+
+    with pytest.raises(RuntimeConfigurationError, match="正式数据目录边界"):
+        create_app(runtime_config=runtime_config)
+
+    assert fake_mac_security_client == []
+    assert not paths.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_create_app_uses_one_validated_effective_runtime_for_overrides(
+    tmp_path: Path,
+) -> None:
+    runtime_config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+    override_paths = AppPaths.from_roots(
+        tmp_path / "override-data",
+        runtime_config.paths.models,
+        models_writable=False,
+    )
+
+    app = create_app(
+        runtime_config=runtime_config,
+        paths=override_paths,
+        local_port=9123,
+    )
+
+    assert app.state.runtime_config.paths is override_paths
+    assert app.state.runtime_config.port == 9123
+    assert app.state.runtime_config.profile is AppProfile.DEVELOPMENT
+    async with app.router.lifespan_context(app):
+        assert app.state.paths is override_paths
+        assert override_paths.database.is_file()
+    assert not runtime_config.paths.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_development_lifespan_revalidates_paths_immediately_before_writes(
+    tmp_path: Path,
+) -> None:
+    runtime_config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+    app = create_app(runtime_config=runtime_config)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    runtime_config.paths.root.mkdir(parents=True)
+    runtime_config.paths.runtime.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="派生可写路径"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert not runtime_config.paths.database.exists()
+    assert not any(outside.iterdir())
 
 
 @pytest.mark.asyncio

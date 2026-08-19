@@ -18,7 +18,12 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from audio_memory.config import AppPaths, WHISPER_MODEL_ID
+from audio_memory.config import (
+    AppPaths,
+    AppProfile,
+    RuntimeConfigurationError,
+    WHISPER_MODEL_ID,
+)
 from audio_memory.db import Database
 from audio_memory.diarization.alignment import (
     AlignedTranscriptSegment,
@@ -636,12 +641,25 @@ def _transcribe_worker(
     model_id: str,
     word_timestamps: bool = False,
     language: str | None = None,
+    model_cache_root: str | None = None,
 ) -> WhisperBatchResult:
     import mlx_whisper
 
+    model_reference = model_id
+    if model_cache_root is not None:
+        from huggingface_hub import snapshot_download
+
+        model_reference = str(
+            Path(
+                snapshot_download(
+                    repo_id=model_id,
+                    cache_dir=model_cache_root,
+                )
+            ).resolve()
+        )
     result = mlx_whisper.transcribe(
         audio_path,
-        path_or_hf_repo=model_id,
+        path_or_hf_repo=model_reference,
         word_timestamps=word_timestamps,
         condition_on_previous_text=False,
         temperature=0,
@@ -1064,6 +1082,7 @@ class MLXWhisperEngine:
         paths: AppPaths,
         *,
         model_id: str = WHISPER_MODEL_ID,
+        runtime_profile: AppProfile = AppProfile.PRODUCTION,
         eta_tracker: TranscriptionEtaTracker | None = None,
         diarization_engine=None,
         voice_activity_detector=None,
@@ -1074,6 +1093,12 @@ class MLXWhisperEngine:
         self.database = database
         self.paths = paths
         self.model_id = model_id
+        self.runtime_profile = runtime_profile
+        self.model_cache_root = (
+            paths.models
+            if runtime_profile is AppProfile.DEVELOPMENT and paths.models_writable
+            else None
+        )
         self.eta_tracker = eta_tracker or TranscriptionEtaTracker()
         # Speaker separation is intentionally disabled. Audio is transcribed for
         # information fidelity; the analysis model reasons from linguistic context.
@@ -1087,7 +1112,66 @@ class MLXWhisperEngine:
         self._executor: ProcessPoolExecutor | None = None
         self.metrics_by_job: dict[str, dict[str, object]] = {}
 
+    def resolve_model_reference(self) -> str:
+        if self.paths.models_writable:
+            return self.model_id
+
+        manifest_path = self.paths.whisper_manifest
+        try:
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise RuntimeConfigurationError(
+                    "Whisper 只读模型清单缺失或不安全。"
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise RuntimeConfigurationError("Whisper 只读模型清单格式无效。")
+            if manifest.get("model_id") != self.model_id:
+                raise RuntimeConfigurationError("Whisper 只读模型身份不匹配。")
+            snapshot_value = manifest.get("snapshot")
+            files = manifest.get("files")
+            if (
+                not isinstance(snapshot_value, str)
+                or not snapshot_value.strip()
+                or not isinstance(files, list)
+                or not files
+            ):
+                raise RuntimeConfigurationError("Whisper 只读模型清单格式无效。")
+            snapshot = Path(snapshot_value).expanduser().resolve(strict=True)
+            if not snapshot.is_dir():
+                raise RuntimeConfigurationError("Whisper 只读模型快照缺失。")
+            indexed: dict[str, Path] = {}
+            blob_root = snapshot.parent.parent / "blobs"
+            for item in files:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise RuntimeConfigurationError("Whisper 只读模型清单格式无效。")
+                relative = Path(item["path"])
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise RuntimeConfigurationError("Whisper 只读模型清单路径无效。")
+                candidate = snapshot / relative
+                resolved = candidate.resolve(strict=True)
+                if not candidate.is_file() or not (
+                    resolved.is_relative_to(snapshot)
+                    or resolved.is_relative_to(blob_root)
+                ):
+                    raise RuntimeConfigurationError("Whisper 只读模型文件缺失或越界。")
+                indexed[relative.as_posix()] = candidate
+            if "config.json" not in indexed or not any(
+                name.endswith(".safetensors") for name in indexed
+            ):
+                raise RuntimeConfigurationError("Whisper 只读模型文件不完整。")
+            config = json.loads(indexed["config.json"].read_text(encoding="utf-8"))
+            if not isinstance(config, dict) or config.get("model_type") != "whisper":
+                raise RuntimeConfigurationError("Whisper 只读模型配置无效。")
+            return str(snapshot)
+        except RuntimeConfigurationError:
+            raise
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeConfigurationError(
+                "Whisper 只读模型快照不可用，开发环境不会自动下载。"
+            ) from exc
+
     async def transcribe_file(self, file: JobFile, resume_from: int):
+        model_reference = self.resolve_model_reference()
         source = Path(file.temporary_path)
         local_started = time.monotonic()
         metrics = LocalFastMetrics()
@@ -1271,13 +1355,18 @@ class MLXWhisperEngine:
                                     part_index + 1, len(physical_chunks),
                                     part_audio_seconds,
                                 )
+                                worker_arguments: list[object] = [
+                                    str(physical_chunk),
+                                    model_reference,
+                                    parameters.word_timestamps,
+                                    language_lock,
+                                ]
+                                if self.model_cache_root is not None:
+                                    worker_arguments.append(str(self.model_cache_root))
                                 part_result = await loop.run_in_executor(
                                     self._executor,
                                     _transcribe_worker,
-                                    str(physical_chunk),
-                                    self.model_id,
-                                    parameters.word_timestamps,
-                                    language_lock,
+                                    *worker_arguments,
                                 )
                                 part_elapsed = time.monotonic() - part_started
                                 logger.info(

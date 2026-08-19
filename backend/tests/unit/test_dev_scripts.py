@@ -389,7 +389,7 @@ def test_development_env_resolves_validated_defaults_without_writes(
     assert assignments["AUDIO_MEMORY_MODEL_ROOT"] == str(
         (production_root / "models").resolve()
     )
-    assert assignments["AUDIO_MEMORY_MODELS_WRITABLE"] == "0"
+    assert "AUDIO_MEMORY_MODELS_WRITABLE" not in assignments
     assert assignments["AUDIO_MEMORY_KEYCHAIN_SERVICE"] == "Audio Memory Dev"
     assert assignments["AUDIO_MEMORY_PORT"] == "8766"
     assert assignments["AUDIO_MEMORY_RUNTIME_DIR"] == str(

@@ -40,10 +40,6 @@ def _development_assignments(*, project_root: Path, home: Path) -> tuple[str, ..
         ("AUDIO_MEMORY_PROFILE", config.profile.value),
         ("AUDIO_MEMORY_DATA_ROOT", str(config.paths.root)),
         ("AUDIO_MEMORY_MODEL_ROOT", str(config.paths.models)),
-        (
-            "AUDIO_MEMORY_MODELS_WRITABLE",
-            "1" if config.paths.models_writable else "0",
-        ),
         ("AUDIO_MEMORY_KEYCHAIN_SERVICE", config.keychain_service),
         ("AUDIO_MEMORY_PORT", str(config.port)),
         ("AUDIO_MEMORY_RUNTIME_DIR", str(runtime)),
@@ -59,7 +55,7 @@ def _doctor_values(*, project_root: Path, home: Path) -> str:
         ("profile", config.profile.value),
         ("data root", str(config.paths.root)),
         ("model root", str(config.paths.models)),
-        ("models writable", "1" if config.paths.models_writable else "0"),
+        ("model manifest root", str(config.paths.whisper_manifest.parent)),
         ("port", str(config.port)),
     )
     for name, value in values:
