@@ -56,9 +56,9 @@ if [ "${AUDIO_MEMORY_DOCTOR_CORE_ONLY:-0}" != "1" ]; then
   check 'ffmpeg/ffprobe 音频组件' check_audio_runtime
   check '前端生产文件' test -f "$PROJECT_ROOT/prototype/dist/client/index.html"
 fi
-check 'Whisper 模型清单' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" whisper "$MODEL_MANIFEST_ROOT" "$MODEL_ROOT"
-check '说话人分段模型' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" diarization "$MODEL_MANIFEST_ROOT" "$MODEL_ROOT"
-check '分析迁移链' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" migrations "$BACKEND_ROOT/migrations/versions"
+check 'Whisper 模型清单' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" whisper "$MODEL_MANIFEST_ROOT" "$MODEL_ROOT"
+check '说话人分段模型' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" diarization "$MODEL_MANIFEST_ROOT" "$MODEL_ROOT"
+check '分析迁移链' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" migrations "$BACKEND_ROOT/migrations/versions"
 check '历史重分析恢复' sh -c 'cd "$1" && PYTHONPATH=src "$2" -c "from audio_memory.reanalysis.worker import ReanalysisWorker"' _ "$BACKEND_ROOT" "$PYTHON_BIN"
 check '本地会话安全' sh -c 'cd "$1" && PYTHONPATH=src "$2" -c "from audio_memory.security.local_session import LocalSessionSecurity"' _ "$BACKEND_ROOT" "$PYTHON_BIN"
 check '固定 Prompt 资源' sh -c '
@@ -75,8 +75,8 @@ if [ "${AUDIO_MEMORY_DOCTOR_CORE_ONLY:-0}" != "1" ]; then
 fi
 
 if [ -f "$APP_DATA/audio-memory.sqlite3" ]; then
-  check '本地数据库已迁移至 0014' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
-  check '历史重分析状态已恢复' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" recovery "$APP_DATA/audio-memory.sqlite3"
+  check '本地数据库已迁移至 0014' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
+  check '历史重分析状态已恢复' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" recovery "$APP_DATA/audio-memory.sqlite3"
   if command -v sqlite3 >/dev/null 2>&1; then
     LAST_ERROR="$(sqlite3 -readonly "$APP_DATA/audio-memory.sqlite3" "select coalesce(last_validation_error_message,'') from provider_metadata where last_validation_error_message is not null order by last_validated_at desc limit 1;" 2>/dev/null || true)"
     if [ -n "$LAST_ERROR" ]; then printf '最近一次模型错误：%s\n' "$LAST_ERROR"; fi
