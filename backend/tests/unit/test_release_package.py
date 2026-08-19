@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -13,6 +14,7 @@ RELEASE_SCRIPTS = (
     "audio-memory",
     "backup_data.py",
     "build-release.sh",
+    "build-ffmpeg-runtime.sh",
     "com.audio-memory.local.plist.template",
     "doctor.sh",
     "doctor_checks.py",
@@ -20,14 +22,37 @@ RELEASE_SCRIPTS = (
     "install.sh",
     "runtime_config.py",
     "start.sh",
+    "verify-ffmpeg-runtime.py",
 )
+
+
+def create_runtime(root: Path) -> Path:
+    (root / "bin").mkdir(parents=True)
+    binaries = {}
+    for name in ("ffmpeg", "ffprobe"):
+        path = root / "bin" / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        binaries[name] = {
+            "path": f"bin/{name}",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    (root / "LICENSE.md").write_text("fixture license\n", encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "ffmpeg_version": "fixture",
+        "platform": "darwin-arm64", "source_url": "https://ffmpeg.org/fixture",
+        "source_sha256": "a" * 64,
+        "configure_flags": ["--disable-gpl", "--disable-nonfree"],
+        "binaries": binaries,
+    }), encoding="utf-8")
+    return root
 
 
 def make_isolated_release_checkout(tmp_path: Path) -> Path:
     """Create every release input in tmp_path, including a synthetic frontend build."""
     checkout = tmp_path / "clean-checkout"
     checkout.mkdir()
-    for name in ("VERSION", "README.md", "CHANGELOG.md", "PRIVACY.md"):
+    for name in ("VERSION", "README.md", "CHANGELOG.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(PROJECT_ROOT / name, checkout / name)
     for relative in (
         Path("backend/pyproject.toml"),
@@ -108,7 +133,10 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
         dependency_target,
         target_is_directory=True,
     )
-
+    runtime = create_runtime(tmp_path / "ffmpeg-runtime")
+    uv_binary = tmp_path / "uv"
+    uv_binary.write_text("#!/bin/sh\nprintf 'uv fixture\\n'\n", encoding="utf-8")
+    uv_binary.chmod(0o755)
     result = subprocess.run(
         ["bash", str(checkout / "scripts/build-release.sh")],
         cwd=checkout,
@@ -117,6 +145,10 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
             "AUDIO_MEMORY_RELEASE_DIST": str(tmp_path / "release-output"),
             "AUDIO_MEMORY_ALLOW_DIRTY_RELEASE": "1",
             "AUDIO_MEMORY_SKIP_RELEASE_BUILD": "1",
+            "AUDIO_MEMORY_FFMPEG_RUNTIME": str(runtime),
+            "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+            "AUDIO_MEMORY_UV_BINARY": str(uv_binary),
+            "AUDIO_MEMORY_BUILD_PYTHON": os.environ.get("PYTHON", "python3"),
         },
         capture_output=True,
         text=True,
@@ -137,6 +169,7 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
     prefix = f"audio-memory-v{version}"
     required = {
         f"{prefix}/VERSION",
+        f"{prefix}/THIRD_PARTY_NOTICES.md",
         f"{prefix}/backend/pyproject.toml",
         f"{prefix}/backend/src/audio_memory/main.py",
         f"{prefix}/backend/migrations/versions/0014_app_settings.py",
@@ -150,6 +183,12 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
         f"{prefix}/scripts/install.sh",
         f"{prefix}/scripts/runtime_config.py",
         f"{prefix}/scripts/start.sh",
+        f"{prefix}/scripts/verify-ffmpeg-runtime.py",
+        f"{prefix}/runtime/ffmpeg/bin/ffmpeg",
+        f"{prefix}/runtime/ffmpeg/bin/ffprobe",
+        f"{prefix}/runtime/ffmpeg/manifest.json",
+        f"{prefix}/runtime/ffmpeg/LICENSE.md",
+        f"{prefix}/runtime/uv/uv",
     }
     assert required <= names
     forbidden_parts = {

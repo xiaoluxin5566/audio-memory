@@ -6,3 +6,4 @@ API Key 仅保存在 macOS Keychain。Audio Memory 的数据库、日志、反�
 
 用户数据默认位于 `~/Library/Application Support/AudioMemory`。重新安装或升级程序不会主动删除该目录；彻底删除数据需要用户另行确认。
 
+发布包包含本地 `ffmpeg` 和 `ffprobe` 可执行文件。它们只处理本机音频，不会因此增加上传或网络传输。

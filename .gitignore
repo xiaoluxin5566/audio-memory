@@ -12,6 +12,8 @@ prototype/output/
 .env
 .env.*
 /dist/
+/vendor/
+/.ffmpeg-build-cache/
 prototype/node_modules
 prototype/dist/
 prototype/test-results/

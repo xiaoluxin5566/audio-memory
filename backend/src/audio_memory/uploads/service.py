@@ -15,6 +15,7 @@ from audio_memory.config import AppPaths, PinnedDevelopmentRoot
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, TempFileManifest, Transcript
+from audio_memory.runtime_tools import RuntimeToolUnavailable
 from audio_memory.transcription.segments import progress_percent
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.uploads.cleanup import remove_staged_file
@@ -23,6 +24,7 @@ from audio_memory.api.events import JobEventBroker
 
 
 FORMAT_MESSAGE = "不支持该文件格式，请上传 MP3/AAC 格式文件"
+RUNTIME_MESSAGE = "本地音频组件不可用，请重新安装 Audio Memory"
 
 
 class UploadError(RuntimeError):
@@ -231,7 +233,11 @@ class UploadService:
             await upload.close()
 
         position = await self._next_position(job_id)
-        probe = await probe_audio(target) if extension in {".mp3", ".aac"} else None
+        try:
+            probe = await probe_audio(target) if extension in {".mp3", ".aac"} else None
+        except RuntimeToolUnavailable as exc:
+            await self._remove_manifest_and_file(manifest_id, target)
+            raise UploadError(RUNTIME_MESSAGE, code="audio_runtime_unavailable") from exc
         accepted = supports(extension, probe)
         recording_started_at = probe.creation_time if probe else None
         recording_time_source = "embedded" if recording_started_at else "unknown"

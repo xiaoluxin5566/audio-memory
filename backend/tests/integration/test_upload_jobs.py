@@ -140,6 +140,26 @@ async def test_extension_and_content_must_both_be_supported(job_client):
 
 
 @pytest.mark.asyncio
+async def test_missing_audio_runtime_is_not_reported_as_unsupported_format(
+    job_client, monkeypatch
+):
+    client, _, _ = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    monkeypatch.setenv("AUDIO_MEMORY_RELEASE_MODE", "1")
+    monkeypatch.setenv("AUDIO_MEMORY_RELEASE_ROOT", "/missing-audio-memory-release")
+    monkeypatch.delenv("AUDIO_MEMORY_FFPROBE", raising=False)
+
+    response = await client.post(
+        f"/api/jobs/{job_id}/files",
+        files={"file": ("real-name.mp3", b"audio bytes", "audio/mpeg")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "audio_runtime_unavailable"
+    assert "音频组件" in response.json()["detail"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_file_pauses_batch_until_removed(job_client, tmp_path):
     client, _, _ = job_client
     job_id = (await client.post("/api/jobs")).json()["id"]

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from audio_memory.runtime_tools import resolve_runtime_tool
+
 
 WINDOW_MS = 30 * 60 * 1000
 WINDOW_OVERLAP_MS = 30 * 1000
@@ -14,7 +16,7 @@ MIN_LABEL_OVERLAP_MS = 2 * 1000
 def probe_duration_ms(path: Path) -> int:
     completed = subprocess.run(
         [
-            "ffprobe",
+            resolve_runtime_tool("ffprobe"),
             "-v",
             "error",
             "-show_entries",
@@ -35,7 +37,7 @@ def decode_audio_window(path: Path, start_ms: int, duration_ms: int):
 
     completed = subprocess.run(
         [
-            "ffmpeg",
+            resolve_runtime_tool("ffmpeg"),
             "-loglevel",
             "error",
             "-ss",

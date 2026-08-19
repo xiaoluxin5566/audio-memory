@@ -5,6 +5,9 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import hashlib
+import json
+import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -25,7 +28,10 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
     )
     (root / "prototype" / "dist" / "client").mkdir(parents=True)
     (root / "scripts").mkdir()
+    (root / "runtime" / "ffmpeg" / "bin").mkdir(parents=True)
+    (root / "runtime" / "uv").mkdir(parents=True)
     (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (root / "THIRD_PARTY_NOTICES.md").write_text("fixture notices\n", encoding="utf-8")
     (root / "backend" / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0.0.0'\n")
     (root / "backend" / "uv.lock").write_text("version = 1\nrevision = 1\nrequires-python = '>=3.12'\n")
     (root / "prototype" / "dist" / "client" / "index.html").write_text("release")
@@ -38,8 +44,25 @@ def create_release(root: Path, version: str = "0.1.0-beta.1") -> Path:
         "install-release.sh",
         "runtime_config.py",
         "start.sh",
+        "verify-ffmpeg-runtime.py",
     ):
         shutil.copy2(PROJECT_ROOT / "scripts" / name, root / "scripts" / name)
+    binaries = {}
+    for name in ("ffmpeg", "ffprobe"):
+        path = root / "runtime" / "ffmpeg" / "bin" / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        binaries[name] = {"path": f"bin/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    runtime = root / "runtime" / "ffmpeg"
+    (runtime / "LICENSE.md").write_text("fixture license\n", encoding="utf-8")
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "ffmpeg_version": "fixture", "platform": "darwin-arm64",
+        "source_url": "https://ffmpeg.org/fixture", "source_sha256": "a" * 64,
+        "configure_flags": ["--disable-gpl", "--disable-nonfree"], "binaries": binaries,
+    }), encoding="utf-8")
+    uv = root / "runtime" / "uv" / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(0o755)
     return root
 
 
@@ -53,6 +76,8 @@ def run_installer(
         "HOME": str(home),
         "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
         "AUDIO_MEMORY_SKIP_RELEASE_SETUP": "1",
+        "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+        "AUDIO_MEMORY_BOOTSTRAP_PYTHON": sys.executable,
     }
     if data_root is None:
         environment.pop("AUDIO_MEMORY_DATA_ROOT", None)
@@ -223,3 +248,22 @@ def test_installed_doctor_can_resolve_its_packaged_runtime_config(tmp_path: Path
 
     assert installation.returncode == 0, installation.stdout + installation.stderr
     assert "运行配置：profile=production port=8765 data=production" in result.stdout
+
+
+def test_tampered_ffmpeg_runtime_does_not_replace_current_version(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    existing = data_root / "app" / "versions" / "0.0.9"
+    existing.mkdir(parents=True)
+    (existing / "VERSION").write_text("0.0.9\n")
+    (data_root / "app" / "current").symlink_to(existing)
+    release = create_release(tmp_path / "release")
+    with (release / "runtime" / "ffmpeg" / "bin" / "ffprobe").open("ab") as handle:
+        handle.write(b"tampered")
+    home.mkdir()
+
+    result = run_installer(home, data_root, release)
+
+    assert result.returncode != 0
+    assert "FFmpeg runtime verification failed" in result.stderr
+    assert (data_root / "app" / "current").resolve() == existing

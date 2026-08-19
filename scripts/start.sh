@@ -6,6 +6,7 @@ PYTHON="$PROJECT_ROOT/backend/.venv/bin/python"
 PORT="${AUDIO_MEMORY_PORT:-8765}"
 URL="http://127.0.0.1:${PORT}/"
 HEALTH="http://127.0.0.1:${PORT}/api/health"
+FFMPEG_BIN="$PROJECT_ROOT/runtime/ffmpeg/bin"
 
 if curl --silent --fail --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   printf 'Audio Memory 已在运行：%s\n' "$URL"
@@ -22,9 +23,20 @@ if [ ! -x "$PYTHON" ]; then
   printf '启动失败：运行环境不存在，请重新运行安装程序。\n' >&2
   exit 1
 fi
+if [ ! -x "$FFMPEG_BIN/ffmpeg" ] || [ ! -x "$FFMPEG_BIN/ffprobe" ]; then
+  printf '启动失败：随包音频运行组件不完整，请重新安装。\n' >&2
+  exit 1
+fi
 
 cd "$PROJECT_ROOT/backend"
-env PYTHONPATH="$PROJECT_ROOT/backend/src" "$PYTHON" -m uvicorn audio_memory.main:app \
+env \
+  AUDIO_MEMORY_RELEASE_MODE=1 \
+  AUDIO_MEMORY_RELEASE_ROOT="$PROJECT_ROOT" \
+  AUDIO_MEMORY_FFMPEG="$PROJECT_ROOT/runtime/ffmpeg/bin/ffmpeg" \
+  AUDIO_MEMORY_FFPROBE="$PROJECT_ROOT/runtime/ffmpeg/bin/ffprobe" \
+  PATH="$PROJECT_ROOT/runtime/ffmpeg/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  PYTHONPATH="$PROJECT_ROOT/backend/src" \
+  "$PYTHON" -m uvicorn audio_memory.main:app \
   --host 127.0.0.1 --port "$PORT" &
 SERVER_PID=$!
 cleanup() { kill "$SERVER_PID" >/dev/null 2>&1 || true; }

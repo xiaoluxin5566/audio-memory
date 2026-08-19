@@ -4,6 +4,7 @@ set -u
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND_ROOT="$PROJECT_ROOT/backend"
 PYTHON_BIN="${BACKEND_ROOT}/.venv/bin/python"
+FFMPEG_RUNTIME="$PROJECT_ROOT/runtime/ffmpeg"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="python3"
 CONFIG_VALUES="$("$PYTHON_BIN" "$PROJECT_ROOT/scripts/runtime_config.py" doctor-values --project-root "$PROJECT_ROOT" --home "${HOME:?HOME is required}")" || exit $?
 IFS=$'\t' read -r PROFILE APP_DATA MODEL_ROOT MODEL_MANIFEST_ROOT PORT <<EOF
@@ -36,6 +37,14 @@ raise SystemExit(
 ' "$PROFILE"
 }
 
+check_audio_runtime() {
+  if [ -f "$FFMPEG_RUNTIME/manifest.json" ]; then
+    "$PYTHON_BIN" "$PROJECT_ROOT/scripts/verify-ffmpeg-runtime.py" "$FFMPEG_RUNTIME"
+  else
+    command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1
+  fi
+}
+
 printf 'Audio Memory 本地诊断\n\n'
 printf '运行配置：profile=%s port=%s data=%s\n' "$PROFILE" "$PORT" "$PROFILE"
 printf '系统：%s / %s\n' "$(uname -s)" "$(uname -m)"
@@ -44,7 +53,7 @@ if [ "${AUDIO_MEMORY_DOCTOR_CORE_ONLY:-0}" != "1" ]; then
   check 'macOS Apple Silicon' sh -c '[ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]'
   check 'Python 3.12 / uv 环境' sh -c 'command -v uv >/dev/null && cd "$1/backend" && UV_CACHE_DIR="$1/.uv-cache" uv run --no-sync python -c "import sys; raise SystemExit(sys.version_info[:2] != (3,12))"' _ "$PROJECT_ROOT"
   check 'Node.js 与 npm' sh -c 'command -v node >/dev/null && command -v npm >/dev/null'
-  check 'ffmpeg' command -v ffmpeg
+  check 'ffmpeg/ffprobe 音频组件' check_audio_runtime
   check '前端生产文件' test -f "$PROJECT_ROOT/prototype/dist/client/index.html"
 fi
 check 'Whisper 模型清单' python3 "$PROJECT_ROOT/scripts/doctor_checks.py" whisper "$MODEL_MANIFEST_ROOT" "$MODEL_ROOT"

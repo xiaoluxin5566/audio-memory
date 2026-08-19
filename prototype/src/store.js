@@ -23,6 +23,11 @@ export function orderCards(cards) {
   return [...cards].sort((a, b) => CARD_ORDER.indexOf(a.sceneId) - CARD_ORDER.indexOf(b.sceneId));
 }
 
+export function uploadFailureState(error) {
+  const unsupported = error?.code === 'unsupported_format';
+  return { invalid: unsupported, failed: !unsupported, paused: unsupported };
+}
+
 export function jobProgressValue(job) {
   const live = job?.live_progress_percent;
   const durable = job?.progress_percent;

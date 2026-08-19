@@ -7,6 +7,12 @@ ARCHITECTURE="${AUDIO_MEMORY_ARCH_OVERRIDE:-$(uname -m)}"
 DRY_RUN="${AUDIO_MEMORY_DRY_RUN:-0}"
 MODEL_SMOKE_TEST="${AUDIO_MEMORY_MODEL_SMOKE_TEST:-0}"
 PREBUILT="${AUDIO_MEMORY_PREBUILT:-0}"
+UV="uv"
+FFMPEG_BIN=""
+if [ "$PREBUILT" = "1" ]; then
+  UV="$PROJECT_ROOT/runtime/uv/uv"
+  FFMPEG_BIN="$PROJECT_ROOT/runtime/ffmpeg/bin"
+fi
 
 fail() { printf '安装失败：%s\n' "$1" >&2; exit 1; }
 need() {
@@ -23,14 +29,19 @@ run() {
 if [ "$MODEL_SMOKE_TEST" = "1" ]; then
   need python3
 else
-  need uv
-  need ffmpeg
-  if [ "$PREBUILT" != "1" ]; then need npm; fi
+  if [ "$PREBUILT" = "1" ]; then
+    [ -x "$UV" ] || fail "随包 uv 运行组件缺失"
+    [ -x "$FFMPEG_BIN/ffmpeg" ] && [ -x "$FFMPEG_BIN/ffprobe" ] || fail "随包音频运行组件缺失"
+  else
+    need uv
+    need ffmpeg
+    need npm
+  fi
 
   printf '正在准备 Audio Memory…\n'
   (
     cd "$PROJECT_ROOT/backend"
-    run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
+    run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" "$UV" sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
   )
   if [ "$PREBUILT" != "1" ]; then
     (
@@ -52,7 +63,7 @@ if [ "${AUDIO_MEMORY_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   else
     (
       cd "$PROJECT_ROOT/backend"
-      python_command=(env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" uv run --no-sync python)
+      python_command=(env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" "$UV" run --no-sync python)
       if [ "$MODEL_SMOKE_TEST" = "1" ]; then
         python_command=(python3)
       fi
