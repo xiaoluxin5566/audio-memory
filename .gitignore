@@ -1,4 +1,5 @@
 .worktrees/
+/.runtime/
 .DS_Store
 .uv-cache/
 .private-eval/
