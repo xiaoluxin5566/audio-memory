@@ -6,7 +6,13 @@ TOOLCHAIN_ROOT="${AUDIO_MEMORY_TOOLCHAIN_ROOT:-$FEATURE_ROOT}"
 PYTEST="$TOOLCHAIN_ROOT/backend/.venv/bin/pytest"
 NODE="$(command -v node)"
 NPM="$(command -v npm)"
-PLAYWRIGHT="$TOOLCHAIN_ROOT/prototype/node_modules/.bin/playwright"
+SHARED_PLAYWRIGHT="$TOOLCHAIN_ROOT/prototype/node_modules/.bin/playwright"
+LOCAL_PLAYWRIGHT="$FEATURE_ROOT/prototype/node_modules/.bin/playwright"
+if [ -x "$LOCAL_PLAYWRIGHT" ]; then
+  PLAYWRIGHT="$LOCAL_PLAYWRIGHT"
+else
+  PLAYWRIGHT="$SHARED_PLAYWRIGHT"
+fi
 FRONTEND_PATH="$TOOLCHAIN_ROOT/prototype/node_modules/.bin:$PATH"
 REQUESTED_CHECK="${1:-all}"
 

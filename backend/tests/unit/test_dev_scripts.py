@@ -19,6 +19,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_HELPER = REPOSITORY_ROOT / "scripts" / "runtime_config.py"
 DEV_START = REPOSITORY_ROOT / "scripts" / "dev-start.sh"
 DEV_STOP = REPOSITORY_ROOT / "scripts" / "dev-stop.sh"
+QUALITY_GATE = REPOSITORY_ROOT / "scripts" / "quality-gate.sh"
 PYTHON = REPOSITORY_ROOT / "backend" / ".venv" / "bin" / "python"
 REAL_PYTHON = str(PYTHON)
 SCRIPTS_ROOT = REPOSITORY_ROOT / "scripts"
@@ -145,6 +146,38 @@ def test_server_argv_preserves_symlinked_shared_virtualenv_python(
 
     assert argv[0] == str(shared_python.absolute())
     assert argv[5] == str(REPOSITORY_ROOT / "backend" / "src")
+
+
+def test_quality_gate_prefers_feature_local_playwright_to_avoid_mixed_versions(
+    tmp_path: Path,
+) -> None:
+    feature = tmp_path / "feature"
+    toolchain = tmp_path / "toolchain"
+    (feature / "prototype/node_modules/.bin").mkdir(parents=True)
+    (toolchain / "prototype/node_modules/.bin").mkdir(parents=True)
+    (toolchain / "backend/.venv/bin").mkdir(parents=True)
+    write_executable(
+        feature / "prototype/node_modules/.bin/playwright",
+        "printf 'feature-playwright\\n'",
+    )
+    write_executable(
+        toolchain / "prototype/node_modules/.bin/playwright",
+        "printf 'toolchain-playwright\\n'",
+    )
+    write_executable(toolchain / "backend/.venv/bin/pytest", "exit 0")
+
+    result = subprocess.run(
+        [str(QUALITY_GATE), "browser"],
+        cwd=feature,
+        env={**os.environ, "AUDIO_MEMORY_TOOLCHAIN_ROOT": str(toolchain)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "feature-playwright" in result.stdout
+    assert "toolchain-playwright" not in result.stdout
 
 
 def test_server_argv_rejects_untrusted_shared_python(tmp_path: Path) -> None:
