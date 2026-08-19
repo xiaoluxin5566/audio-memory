@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 import json
 import os
 from pathlib import Path
@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import ClassVar
+from typing import Callable, ClassVar
 
 
 class GovernanceError(RuntimeError):
@@ -439,6 +439,39 @@ class FeatureService:
                 )
         return tuple(statuses)
 
+    def finish(
+        self,
+        feature_id: str,
+        gate_runner: Callable[[Path], tuple[str, ...]],
+    ) -> FeatureStatus:
+        record = self.store.load(feature_id)
+        verified = self._verified_status(record)
+        feature_repository = GitRepository(verified.path)
+        if feature_repository.current_branch != record.branch:
+            raise GovernanceError("当前 worktree 不属于记录的功能分支。")
+        if not feature_repository.is_clean:
+            raise GovernanceError("功能 worktree 存在未提交修改。")
+        passed = tuple(gate_runner(verified.path))
+        missing = [
+            check for check in FeatureRecord.REQUIRED_CHECKS if check not in passed
+        ]
+        unexpected = [
+            check for check in passed if check not in FeatureRecord.REQUIRED_CHECKS
+        ]
+        if missing or unexpected or len(set(passed)) != len(passed):
+            details = ", ".join([*missing, *unexpected])
+            raise GovernanceError(f"功能完成门禁未全部通过：{details}")
+        completed = replace(
+            record,
+            status="ready_to_merge",
+            head_commit=feature_repository.head_commit,
+            current_step="等待合并",
+            passed_checks=FeatureRecord.REQUIRED_CHECKS,
+            merge_approved=False,
+        )
+        self.store.save(completed)
+        return FeatureStatus(record=completed, path=verified.path, valid=True)
+
     def _verified_status(self, record: FeatureRecord) -> FeatureStatus:
         expected_path = self._expected_path(record)
         matching = [
@@ -450,7 +483,21 @@ class FeatureService:
             raise GovernanceError(
                 f"功能开发进度记录与 worktree 或分支不一致：{record.feature_id}"
             )
-        return FeatureStatus(record=record, path=expected_path, valid=True)
+        effective_record = record
+        if (
+            record.status == "ready_to_merge"
+            and matching[0].head_commit != record.head_commit
+        ):
+            effective_record = replace(
+                record,
+                status="in_progress",
+                current_step="代码已变更，需重新验收",
+                passed_checks=(),
+                merge_approved=False,
+            )
+        return FeatureStatus(
+            record=effective_record, path=expected_path, valid=True
+        )
 
     def _expected_path(self, record: FeatureRecord) -> Path:
         return (self.repository.repository_root / record.worktree).resolve()
@@ -470,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("feature_id", nargs="?")
+    finish_parser = subparsers.add_parser("finish")
+    finish_parser.add_argument("feature_id")
     arguments = parser.parse_args(argv)
     try:
         service = FeatureService(_repository_from_current_directory())
@@ -503,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                     dict(os.environ),
                 )
-        else:
+        elif arguments.command == "status":
             statuses = service.status(arguments.feature_id)
             print(json.dumps([
                 {
@@ -516,6 +565,35 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 for item in statuses
             ], ensure_ascii=False))
+        else:
+            controller_root = Path(__file__).resolve().parent.parent
+            gate = controller_root / "scripts/quality-gate.sh"
+
+            def run_gate(feature_root: Path) -> tuple[str, ...]:
+                environment = dict(os.environ)
+                environment.setdefault(
+                    "AUDIO_MEMORY_TOOLCHAIN_ROOT", str(controller_root)
+                )
+                result = subprocess.run(
+                    [str(gate)],
+                    cwd=feature_root,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    diagnostic = (result.stderr or result.stdout).strip()
+                    raise GovernanceError(f"功能门禁失败：{diagnostic}")
+                return tuple(result.stdout.splitlines()[-4:])
+
+            finished = service.finish(arguments.feature_id, run_gate)
+            print(json.dumps({
+                "feature_id": finished.record.feature_id,
+                "status": finished.record.status,
+                "tested_commit": finished.record.head_commit,
+                "passed_checks": list(finished.record.passed_checks),
+            }, ensure_ascii=False))
         return 0
     except GovernanceError as exc:
         print(f"功能轨道操作失败：{exc}", file=sys.stderr)

@@ -306,3 +306,58 @@ def test_feature_stop_is_safe_when_no_runtime_is_recorded(
 
     assert result.returncode == 0
     assert "未运行" in result.stdout
+
+
+def test_finish_never_marks_dirty_feature_ready(git_repository: Path) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    started = service.start("search", "v0.1.0-beta.3")
+    (started.path / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(GovernanceError, match="未提交"):
+        service.finish("search", lambda _: FeatureRecord.REQUIRED_CHECKS)
+
+    assert service.store.load("search").status == "in_progress"
+
+
+def test_finish_records_exact_tested_commit_and_checks(
+    git_repository: Path,
+) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    started = service.start("search", "v0.1.0-beta.3")
+
+    finished = service.finish(
+        "search", lambda _: FeatureRecord.REQUIRED_CHECKS
+    )
+
+    assert finished.record.status == "ready_to_merge"
+    assert finished.record.head_commit == git(started.path, "rev-parse", "HEAD")
+    assert finished.record.passed_checks == FeatureRecord.REQUIRED_CHECKS
+    assert finished.record.current_step == "等待合并"
+
+
+def test_failed_gate_keeps_feature_in_progress(git_repository: Path) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    service.start("search", "v0.1.0-beta.3")
+
+    with pytest.raises(GovernanceError, match="browser"):
+        service.finish(
+            "search",
+            lambda _: ("backend", "frontend", "runtime-isolation"),
+        )
+
+    assert service.store.load("search").status == "in_progress"
+
+
+def test_new_commit_invalidates_ready_evidence(git_repository: Path) -> None:
+    service = FeatureService(GitRepository(git_repository))
+    started = service.start("search", "v0.1.0-beta.3")
+    service.finish("search", lambda _: FeatureRecord.REQUIRED_CHECKS)
+    (started.path / "change.txt").write_text("later\n", encoding="utf-8")
+    git(started.path, "add", "change.txt")
+    git(started.path, "commit", "-m", "later change")
+
+    status = service.status("search")[0]
+
+    assert status.record.status == "in_progress"
+    assert status.record.passed_checks == ()
+    assert service.store.load("search").status == "ready_to_merge"
