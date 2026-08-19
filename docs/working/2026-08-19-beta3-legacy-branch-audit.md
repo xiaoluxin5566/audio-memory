@@ -143,3 +143,40 @@
 3. 未跟踪依赖、缓存、数据库和输出不进入 Git；删除它们仍需和工作树删除一起经过用户批准。
 4. 先验证迁移提交，再移除工作树，再删除本地分支；远程分支单独列出并批准。
 5. Release 标签永久保留。真实 Keychain、正式数据和真实 provider 不属于本次审计读取范围。
+
+## 建议执行的清理批次
+
+### 批次 A：已确认无独有成果
+
+在用户明确批准后，可移除以下工作树并删除对应本地分支：
+
+- `analysis-sleep-prevention` / `codex/analysis-sleep-prevention`：能力已等价进入主线，工作树干净。
+- `card-model-provenance` / `codex/card-model-provenance`：分支已完全合并，工作树干净。
+- `cloud-asr-evaluation` / `codex/cloud-asr-evaluation`：工作树干净，方法和事实边界已脱敏归档。
+- `full-release-validation` / `codex/full-release-validation`：分支已完全合并，工作树干净。
+- `release-v0-1-beta` / `codex/release-v0-1-beta`：分支已完全合并；发布历史由 `v0.1.0-beta.1` 和 `v0.1.0-beta.2` 标签保留。
+- `smooth-progress` / `codex/smooth-progress`：能力已等价进入主线；未跟踪内容只有可重建的 `.venv` 和 `node_modules`。
+- `glm-report-recovery`：该工作树当前检出 `main`，工作树干净；只移除额外工作树，不删除 `main`。
+
+以下没有挂载工作树、且已完全合并的本地分支也可删除：
+
+- `codex/adaptive-audit-main-integration`
+- `codex/direct-single-report`
+- `codex/local-fast-v0`
+- `codex/local-fast-v0-1`
+- `codex/report-metrics-display`
+- `codex/single-upload-report`
+
+### 批次 B：审计后判定不迁移，但删除会丢弃未跟踪文件
+
+只有在用户明确接受丢弃下列未跟踪文件后才移除：
+
+- `audio-memory-phase1` / `codex/audio-memory-phase1`：两份过时交接和 Playwright 本地状态。
+- `codex-transcription-phase0` / `codex/transcription-phase0`：一个依赖早期内部接口、无当前测试的本地 benchmark 脚本。
+- `dev-prod-isolation` / `codex/dev-prod-isolation`：4 个未提交文件的 patch 已逐项对照；取消后通知、30 秒提交超时、持久状态复核、转写保留和资源所有权测试均已由 beta.3 更严格实现并通过完整回归。旧 patch 中“取消后仍保持 analyzing”的行为已被修正，不应保留。
+
+### 当前必须保留
+
+- `local-fast-v0-1` 工作树 / `codex/autonomous-day-map`：含真实导出、截图、研究文档、依赖和辅助脚本；其中可能有用户文件，不删除。
+- 仓库根工作树 / `codex/report-audit-revision-pipeline`：大量未提交研发成果和本地数据；不删除、不清理。
+- `codex/beta3-stability`：当前 beta.3 集成分支，待审查完成后合并 `main`。
