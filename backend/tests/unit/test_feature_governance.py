@@ -509,3 +509,40 @@ def test_release_build_refuses_mutable_or_existing_version(
 
     with pytest.raises(GovernanceError):
         release.authorize_build(path, manifest.digest())
+
+
+def legacy_feature_worktree(root: Path, feature_id: str) -> Path:
+    path = root / ".worktrees" / feature_id
+    git(root, "worktree", "add", "-b", f"codex/{feature_id}", str(path), "main")
+    return path
+
+
+def test_adopt_preview_is_read_only_and_describes_current_track(
+    git_repository: Path,
+) -> None:
+    feature_path = legacy_feature_worktree(git_repository, "legacy")
+    service = FeatureService(GitRepository(feature_path))
+
+    record, digest = service.adopt_preview("legacy", "v0.1.0-beta.3")
+
+    assert record.branch == "codex/legacy"
+    assert record.worktree == ".worktrees/legacy"
+    assert record.head_commit == git(feature_path, "rev-parse", "HEAD")
+    assert len(digest) == 64
+    assert not service.store.exists("legacy")
+
+
+def test_adopt_requires_exact_preview_digest_before_writing(
+    git_repository: Path,
+) -> None:
+    feature_path = legacy_feature_worktree(git_repository, "legacy")
+    service = FeatureService(GitRepository(feature_path))
+    _, digest = service.adopt_preview("legacy", "v0.1.0-beta.3")
+
+    with pytest.raises(GovernanceError, match="纳管确认"):
+        service.adopt("legacy", "v0.1.0-beta.3", "wrong")
+    assert not service.store.exists("legacy")
+
+    adopted = service.adopt("legacy", "v0.1.0-beta.3", digest)
+    assert adopted.record.status == "in_progress"
+    assert service.store.load("legacy") == adopted.record

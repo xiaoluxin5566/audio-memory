@@ -480,6 +480,54 @@ class FeatureService:
         self.store.save(completed)
         return FeatureStatus(record=completed, path=verified.path, valid=True)
 
+    def adopt_preview(
+        self, feature_id: str, target_version: str
+    ) -> tuple[FeatureRecord, str]:
+        FeatureRecord._validate_feature_id(feature_id)
+        if self.store.exists(feature_id):
+            raise GovernanceError("功能轨道已经纳管。")
+        expected_branch = f"codex/{feature_id}"
+        expected_path = (
+            self.repository.repository_root / ".worktrees" / feature_id
+        ).resolve()
+        if (
+            self.repository.current_branch != expected_branch
+            or self.repository.top_level != expected_path
+            or not self.repository.is_clean
+        ):
+            raise GovernanceError(
+                "审计纳管必须从同名、干净的功能 worktree 执行。"
+            )
+        base_commit = self.repository._git("merge-base", "main", "HEAD")
+        record = replace(
+            FeatureRecord.new(
+                feature_id, base_commit, target_version=target_version
+            ),
+            head_commit=self.repository.head_commit,
+            current_step="已审计现有轨道，等待继续开发",
+        )
+        digest = hashlib.sha256(
+            json.dumps(
+                record.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return record, digest
+
+    def adopt(
+        self,
+        feature_id: str,
+        target_version: str,
+        approval_token: str | None,
+    ) -> FeatureStatus:
+        record, digest = self.adopt_preview(feature_id, target_version)
+        if approval_token is None or approval_token != digest:
+            raise GovernanceError("当前轨道未获得精确的纳管确认。")
+        self.store.save(record)
+        return self._verified_status(record)
+
     def _verified_status(self, record: FeatureRecord) -> FeatureStatus:
         expected_path = self._expected_path(record)
         matching = [
@@ -804,6 +852,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("feature_id", nargs="?")
+    status_parser.add_argument("--adopt-preview", action="store_true")
+    status_parser.add_argument("--adopt", action="store_true")
+    status_parser.add_argument("--approve")
+    status_parser.add_argument(
+        "--target-version", default="v0.1.0-beta.3"
+    )
     finish_parser = subparsers.add_parser("finish")
     finish_parser.add_argument("feature_id")
     prepare_parser = subparsers.add_parser("release-prepare")
@@ -849,18 +903,46 @@ def main(argv: list[str] | None = None) -> int:
                     dict(os.environ),
                 )
         elif arguments.command == "status":
-            statuses = service.status(arguments.feature_id)
-            print(json.dumps([
-                {
-                    "feature_id": item.record.feature_id,
-                    "branch": item.record.branch,
-                    "worktree": str(item.path),
-                    "status": item.record.status,
-                    "valid": item.valid,
-                    "diagnostic": item.diagnostic,
-                }
-                for item in statuses
-            ], ensure_ascii=False))
+            if arguments.adopt_preview or arguments.adopt:
+                if not arguments.feature_id:
+                    raise GovernanceError("审计纳管必须指定功能标识。")
+                if arguments.adopt_preview and arguments.adopt:
+                    raise GovernanceError("纳管预览与写入不能同时执行。")
+                if arguments.adopt_preview:
+                    record, digest = service.adopt_preview(
+                        arguments.feature_id, arguments.target_version
+                    )
+                    print(json.dumps({
+                        "mode": "read_only_preview",
+                        "preview_digest": digest,
+                        "record": record.to_dict(),
+                    }, ensure_ascii=False))
+                else:
+                    adopted = service.adopt(
+                        arguments.feature_id,
+                        arguments.target_version,
+                        arguments.approve,
+                    )
+                    print(json.dumps({
+                        "feature_id": adopted.record.feature_id,
+                        "branch": adopted.record.branch,
+                        "worktree": str(adopted.path),
+                        "status": adopted.record.status,
+                        "head_commit": adopted.record.head_commit,
+                    }, ensure_ascii=False))
+            else:
+                statuses = service.status(arguments.feature_id)
+                print(json.dumps([
+                    {
+                        "feature_id": item.record.feature_id,
+                        "branch": item.record.branch,
+                        "worktree": str(item.path),
+                        "status": item.record.status,
+                        "valid": item.valid,
+                        "diagnostic": item.diagnostic,
+                    }
+                    for item in statuses
+                ], ensure_ascii=False))
         elif arguments.command == "finish":
             controller_root = Path(__file__).resolve().parent.parent
             gate = controller_root / "scripts/quality-gate.sh"
