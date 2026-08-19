@@ -129,6 +129,7 @@ def test_runtime_config_accepts_explicit_path_service_and_port_overrides(
     assert config.keychain_service == "Audio Memory Test"
     assert config.port == 9012
     assert not data_root.exists()
+    assert not model_root.exists()
 
 
 def test_app_paths_are_all_under_local_application_support(tmp_path: Path) -> None:
