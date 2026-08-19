@@ -6,12 +6,13 @@ import errno
 import fcntl
 import json
 import os
+import signal
 import shutil
 import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ class ProcessRecord:
     argv: tuple[str, ...]
     command: str
     port: int
+    phase: str
 
     def to_bytes(self) -> bytes:
         return (
@@ -50,12 +52,39 @@ class ProcessRecord:
                     "argv": list(self.argv),
                     "command": self.command,
                     "port": self.port,
+                    "phase": self.phase,
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
             + "\n"
         ).encode("utf-8")
+
+
+class SignalForwarder:
+    def __init__(self) -> None:
+        self.child: subprocess.Popen[Any] | None = None
+        self.received: int | None = None
+        self._previous: dict[int, Any] = {}
+
+    def __enter__(self) -> SignalForwarder:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            self._previous[signum] = signal.signal(signum, self._handle)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        for signum, previous in self._previous.items():
+            signal.signal(signum, previous)
+
+    def attach(self, child: subprocess.Popen[Any]) -> None:
+        self.child = child
+        if self.received is not None and child.poll() is None:
+            child.send_signal(self.received)
+
+    def _handle(self, signum: int, _frame: object) -> None:
+        self.received = signum
+        if self.child is not None and self.child.poll() is None:
+            self.child.send_signal(signum)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -188,6 +217,7 @@ def _parse_record(data: bytes, expected_argv: tuple[str, ...], port: int) -> Pro
         "argv",
         "command",
         "port",
+        "phase",
     }:
         raise StaleProcessRecord("PID 记录字段无效。")
     pid = payload["pid"]
@@ -195,6 +225,7 @@ def _parse_record(data: bytes, expected_argv: tuple[str, ...], port: int) -> Pro
     argv = payload["argv"]
     started_at = payload["started_at"]
     command = payload["command"]
+    phase = payload["phase"]
     if (
         payload["version"] != 1
         or not isinstance(pid, int)
@@ -208,9 +239,13 @@ def _parse_record(data: bytes, expected_argv: tuple[str, ...], port: int) -> Pro
         or not started_at.strip()
         or not isinstance(command, str)
         or command.strip() != _expected_process_command(expected_argv)
+        or not isinstance(phase, str)
+        or phase not in {"starting", "ready"}
     ):
         raise StaleProcessRecord("PID 记录身份无效。")
-    return ProcessRecord(pid, started_at.strip(), tuple(argv), command.strip(), port)
+    return ProcessRecord(
+        pid, started_at.strip(), tuple(argv), command.strip(), port, phase
+    )
 
 
 def _write_record(runtime_fd: int, record: ProcessRecord) -> bytes:
@@ -261,6 +296,14 @@ def _health(port: int) -> tuple[str, dict[str, Any] | None]:
     return "ok", payload if isinstance(payload, dict) else None
 
 
+def _is_development_health(payload: dict[str, Any] | None) -> bool:
+    return bool(
+        payload
+        and payload.get("status") == "ok"
+        and payload.get("profile") == "development"
+    )
+
+
 def _port_is_occupied(port: int) -> bool:
     return _run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]).returncode == 0
 
@@ -292,12 +335,32 @@ def _owns_listener(pid: int, port: int) -> bool:
     return result.returncode == 0 and str(pid) in result.stdout.splitlines()
 
 
-def _validate_live_identity(record: ProcessRecord) -> None:
+def _validate_process_identity(record: ProcessRecord) -> None:
     command, started_at = _snapshot(record.pid)
     if command != record.command or started_at != record.started_at:
         raise StaleProcessRecord("开发进程的命令或启动身份已改变。")
+
+
+def _validate_live_identity(record: ProcessRecord) -> None:
+    _validate_process_identity(record)
     if not _owns_listener(record.pid, record.port):
         raise StaleProcessRecord("记录中的 PID 未持有预期开发端口。")
+
+
+def _startup_guard_is_locked(runtime_fd: int) -> bool:
+    try:
+        guard_fd = _open_regular_at(runtime_fd, GUARD_NAME, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(guard_fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(guard_fd)
 
 
 def _remove_if_unchanged(runtime_fd: int, expected: bytes) -> None:
@@ -309,14 +372,50 @@ def _remove_if_unchanged(runtime_fd: int, expected: bytes) -> None:
         _unlink_at(runtime_fd, PID_NAME)
 
 
+def _wait_foreground(
+    child: subprocess.Popen[Any], forwarder: SignalForwarder
+) -> int:
+    while True:
+        try:
+            return child.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            if forwarder.received is None:
+                continue
+            try:
+                return child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                return child.wait()
+
+
+def _cleanup_child(child: subprocess.Popen[Any]) -> None:
+    if child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
 def start(project_root: Path, home: Path) -> int:
+    with SignalForwarder() as forwarder:
+        return _start(project_root, home, forwarder)
+
+
+def _start(
+    project_root: Path, home: Path, forwarder: SignalForwarder
+) -> int:
     config = development_config(project_root=project_root, home=home)
     health_status, health_payload = _health(config.port)
     if health_status == "ok":
-        if health_payload and health_payload.get("profile") == "development":
+        if _is_development_health(health_payload):
             print(f"Audio Memory 开发环境已在运行：http://127.0.0.1:{config.port}/")
             return 0
-        raise LifecycleError(f"端口 {config.port} 上的服务不是 Audio Memory 开发环境。")
+        raise LifecycleError(
+            f"端口 {config.port} 上的服务不是可用的 Audio Memory 开发环境。"
+        )
     if _port_is_occupied(config.port):
         raise LifecycleError(f"端口 {config.port} 已被其他程序占用。")
 
@@ -344,6 +443,7 @@ def start(project_root: Path, home: Path) -> int:
                     stderr=subprocess.STDOUT,
                     close_fds=True,
                 )
+                forwarder.attach(child)
             finally:
                 os.close(log_fd)
 
@@ -361,15 +461,26 @@ def start(project_root: Path, home: Path) -> int:
                 raise LifecycleError("无法记录开发进程的启动身份。")
             if command != _expected_process_command(argv):
                 raise LifecycleError("开发进程命令与预期的精确启动命令不匹配。")
-            record = ProcessRecord(child.pid, started_at, argv, command, config.port)
+            record = ProcessRecord(
+                child.pid,
+                started_at,
+                argv,
+                command,
+                config.port,
+                "starting",
+            )
             record_bytes = _write_record(runtime_fd, record)
 
             for _ in range(60):
+                if forwarder.received is not None:
+                    return _wait_foreground(child, forwarder)
                 status, payload = _health(config.port)
                 if status == "ok":
-                    if payload and payload.get("profile") == "development":
+                    if _is_development_health(payload):
+                        record = replace(record, phase="ready")
+                        record_bytes = _write_record(runtime_fd, record)
                         print(f"Audio Memory 开发环境已启动：http://127.0.0.1:{config.port}/")
-                        return child.wait()
+                        return _wait_foreground(child, forwarder)
                     raise LifecycleError("健康检查返回了错误的运行环境。")
                 if child.poll() is not None:
                     return child.returncode or 0
@@ -378,13 +489,8 @@ def start(project_root: Path, home: Path) -> int:
         finally:
             os.close(guard_fd)
     finally:
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+        if child is not None:
+            _cleanup_child(child)
         if record_bytes is not None:
             _remove_if_unchanged(runtime_fd, record_bytes)
         os.close(runtime_fd)
@@ -405,7 +511,18 @@ def stop(project_root: Path, home: Path) -> int:
             record = _parse_record(
                 raw_record, _server_argv(project_root, config.port), config.port
             )
-            _validate_live_identity(record)
+            _validate_process_identity(record)
+            if not _owns_listener(record.pid, record.port):
+                if (
+                    record.phase == "starting"
+                    and _startup_guard_is_locked(runtime_fd)
+                ):
+                    raise LifecycleError(
+                        "开发启动尚未就绪；已保留 PID 记录并拒绝停止。"
+                    )
+                raise StaleProcessRecord(
+                    "记录中的 PID 未持有预期开发端口。"
+                )
         except StaleProcessRecord as exc:
             _unlink_at(runtime_fd, PID_NAME)
             raise LifecycleError(f"{exc}已清理过期的 PID 记录。") from exc
@@ -413,7 +530,13 @@ def stop(project_root: Path, home: Path) -> int:
         health_status, health_payload = _health(config.port)
         if health_status != "ok":
             raise LifecycleError("健康检查暂时不可用；已保留 PID 记录并拒绝停止。")
-        if not health_payload or health_payload.get("profile") != "development":
+        if _is_development_health(health_payload):
+            pass
+        elif health_payload and health_payload.get("profile") == "development":
+            raise LifecycleError(
+                "开发服务健康状态不是 ok；已保留 PID 记录并拒绝停止。"
+            )
+        else:
             _unlink_at(runtime_fd, PID_NAME)
             raise LifecycleError("健康身份不是 development；已清理过期记录。")
 

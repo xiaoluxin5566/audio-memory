@@ -3,9 +3,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +21,9 @@ DEV_START = REPOSITORY_ROOT / "scripts" / "dev-start.sh"
 DEV_STOP = REPOSITORY_ROOT / "scripts" / "dev-stop.sh"
 PYTHON = REPOSITORY_ROOT / "backend" / ".venv" / "bin" / "python"
 REAL_PYTHON = str(PYTHON.resolve())
+SCRIPTS_ROOT = REPOSITORY_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_ROOT))
+import dev_lifecycle  # noqa: E402
 
 
 def isolated_environment(home: Path, **overrides: str) -> dict[str, str]:
@@ -106,6 +113,7 @@ def process_record(
     started_at: str = "Tue Aug 19 11:00:00 2026",
     argv: list[str] | None = None,
     command: str | None = None,
+    phase: str = "ready",
 ) -> dict[str, object]:
     resolved_argv = argv or expected_server_argv()
     return {
@@ -115,6 +123,7 @@ def process_record(
         "argv": resolved_argv,
         "command": command or " ".join(resolved_argv),
         "port": 8766,
+        "phase": phase,
     }
 
 
@@ -174,7 +183,14 @@ def lifecycle_fakes(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def run_start(
-    *, home: Path, data_root: Path, fake_bin: Path, calls: Path
+    *,
+    home: Path,
+    data_root: Path,
+    fake_bin: Path,
+    calls: Path,
+    health: str = "",
+    curl_status: int = 1,
+    lsof_status: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["/bin/bash", str(DEV_START)],
@@ -186,8 +202,9 @@ def run_start(
             FAKE_PS_START_COUNT=str(home.parent / "ps-start-count"),
             FAKE_PS_START="Tue Aug 19 11:00:00 2026",
             FAKE_PS_COMMAND=" ".join(expected_server_argv()),
-            FAKE_CURL_STATUS="1",
-            FAKE_LSOF_STATUS="1",
+            FAKE_HEALTH=health,
+            FAKE_CURL_STATUS=str(curl_status),
+            FAKE_LSOF_STATUS=str(lsof_status),
             AUDIO_MEMORY_DATA_ROOT=str(data_root),
             AUDIO_MEMORY_NO_OPEN="1",
         ),
@@ -238,6 +255,121 @@ def run_stop(
 
 def recorded_calls(calls: Path) -> list[str]:
     return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+
+class FakeServerProcess:
+    def __init__(self, argv: list[str], **kwargs: object) -> None:
+        self.pid = 4242
+        self.argv = argv
+        self.environment = dict(kwargs["env"])  # type: ignore[arg-type]
+        self.returncode: int | None = None
+        self.signals: list[int] = []
+        self._finished = threading.Event()
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self._finished.wait(timeout):
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        assert self.returncode is not None
+        return self.returncode
+
+    def send_signal(self, signum: int) -> None:
+        self.signals.append(signum)
+        self.complete(-signum)
+
+    def terminate(self) -> None:
+        self.send_signal(signal.SIGTERM)
+
+    def kill(self) -> None:
+        self.send_signal(signal.SIGKILL)
+
+    def complete(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self._finished.set()
+
+
+def wait_for_record_phase(
+    path: Path, phase: str, timeout: float = 2.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            time.sleep(0.01)
+            continue
+        if record.get("phase") == phase:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {path} phase {phase}")
+
+
+def launch_fake_successful_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[
+    threading.Thread,
+    list[int],
+    FakeServerProcess,
+    Path,
+    dict[int, object],
+]:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = data_root / "runtime" / "audio-memory-dev.pid"
+    results: list[int] = []
+    handlers: dict[int, object] = {}
+    health_calls = 0
+    fake_process: FakeServerProcess | None = None
+
+    monkeypatch.setenv("AUDIO_MEMORY_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("AUDIO_MEMORY_MODEL_ROOT", raising=False)
+    monkeypatch.setattr(dev_lifecycle, "_port_is_occupied", lambda port: False)
+
+    def fake_health(port: int) -> tuple[str, dict[str, str] | None]:
+        nonlocal health_calls
+        health_calls += 1
+        if health_calls == 1:
+            return "unavailable", None
+        return "ok", {"status": "ok", "profile": "development"}
+
+    def fake_popen(argv: list[str], **kwargs: object) -> FakeServerProcess:
+        nonlocal fake_process
+        fake_process = FakeServerProcess(argv, **kwargs)
+        return fake_process
+
+    monkeypatch.setattr(dev_lifecycle, "_health", fake_health)
+    monkeypatch.setattr(dev_lifecycle.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        dev_lifecycle,
+        "_snapshot",
+        lambda pid: (
+            " ".join(expected_server_argv()),
+            "Tue Aug 19 11:00:00 2026",
+        ),
+    )
+    class FakeSignalModule:
+        SIGINT = signal.SIGINT
+        SIGTERM = signal.SIGTERM
+        SIG_DFL = signal.SIG_DFL
+
+        @staticmethod
+        def signal(signum: int, handler: object) -> object:
+            previous = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return previous
+
+    monkeypatch.setattr(dev_lifecycle, "signal", FakeSignalModule, raising=False)
+
+    thread = threading.Thread(
+        target=lambda: results.append(dev_lifecycle.start(REPOSITORY_ROOT, home)),
+        daemon=True,
+    )
+    thread.start()
+    wait_for_record_phase(pid_file, "ready")
+    assert fake_process is not None
+    return thread, results, fake_process, pid_file, handlers
 
 
 def test_development_env_resolves_validated_defaults_without_writes(
@@ -344,6 +476,26 @@ def test_dev_start_refuses_an_occupied_port_without_runtime_writes(
     assert all("launchctl" not in call for call in recorded_calls(calls))
 
 
+def test_dev_start_rejects_development_profile_with_error_health_status(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_start(
+        home=home,
+        data_root=data_root,
+        fake_bin=fake_bin,
+        calls=calls,
+        health='{"status":"error","profile":"development"}',
+        curl_status=0,
+    )
+
+    assert result.returncode != 0
+    assert "不是可用的 Audio Memory 开发环境" in result.stderr
+    assert_no_runtime_artifacts(data_root)
+
+
 def test_dev_start_refuses_log_symlink_without_following_it(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
@@ -386,6 +538,69 @@ def test_dev_start_refuses_when_another_start_holds_the_guard(
     assert "另一个开发启动正在进行" in result.stderr
     assert "spawned" not in recorded_calls(calls)
     assert not (runtime / "audio-memory-dev.pid").exists()
+
+
+def test_dev_start_success_publishes_ready_identity_and_holds_guard_until_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    thread, results, child, pid_file, _ = launch_fake_successful_start(
+        monkeypatch, tmp_path
+    )
+    record = json.loads(pid_file.read_text(encoding="utf-8"))
+    guard = pid_file.parent / "audio-memory-dev.start.lock"
+    competing_guard_fd = os.open(guard, os.O_RDWR)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(
+                competing_guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+            )
+    finally:
+        os.close(competing_guard_fd)
+
+    assert record["pid"] == child.pid
+    assert record["phase"] == "ready"
+    assert record["argv"] == expected_server_argv()
+    assert "AUDIO_MEMORY_MODEL_ROOT" not in child.environment
+    assert thread.is_alive()
+
+    child.complete(0)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert results == [0]
+    assert not pid_file.exists()
+    released_guard_fd = os.open(guard, os.O_RDWR)
+    try:
+        fcntl.flock(released_guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(released_guard_fd)
+
+
+def test_dev_start_sigterm_forwards_and_cleans_own_record_and_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    thread, results, child, pid_file, handlers = launch_fake_successful_start(
+        monkeypatch, tmp_path
+    )
+    own_record = pid_file.read_bytes()
+    replacement = json.dumps(process_record(pid=9999)).encode("utf-8")
+    pid_file.write_bytes(replacement)
+    guard = pid_file.parent / "audio-memory-dev.start.lock"
+    handler = handlers[signal.SIGTERM]
+
+    assert callable(handler)
+    handler(signal.SIGTERM, None)
+    thread.join(timeout=2)
+
+    assert child.signals == [signal.SIGTERM]
+    assert not thread.is_alive()
+    assert results == [-signal.SIGTERM]
+    assert own_record
+    assert pid_file.read_bytes() == replacement
+    released_guard_fd = os.open(guard, os.O_RDWR)
+    try:
+        fcntl.flock(released_guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(released_guard_fd)
 
 
 def test_dev_stop_rejects_pid_symlink_without_following_target(
@@ -457,6 +672,59 @@ def test_dev_stop_preserves_valid_record_when_health_is_unavailable(
     assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
 
+def test_dev_stop_preserves_valid_record_for_error_health_status(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = write_process_record(data_root, process_record())
+    original = pid_file.read_bytes()
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home,
+        data_root=data_root,
+        fake_bin=fake_bin,
+        calls=calls,
+        health='{"status":"error","profile":"development"}',
+    )
+
+    assert result.returncode != 0
+    assert "开发服务健康状态不是 ok" in result.stderr
+    assert pid_file.read_bytes() == original
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+def test_dev_stop_preserves_starting_record_when_guard_is_held(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    pid_file = write_process_record(
+        data_root, process_record(phase="starting")
+    )
+    original = pid_file.read_bytes()
+    guard = pid_file.parent / "audio-memory-dev.start.lock"
+    guard_fd = os.open(guard, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    try:
+        result = run_stop(
+            home=home,
+            data_root=data_root,
+            fake_bin=fake_bin,
+            calls=calls,
+            listener_pid="",
+            lsof_status=1,
+        )
+    finally:
+        os.close(guard_fd)
+
+    assert result.returncode != 0
+    assert "开发启动尚未就绪" in result.stderr
+    assert pid_file.read_bytes() == original
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
 def test_dev_stop_requires_pid_to_own_expected_listener(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "development-data"
@@ -506,6 +774,23 @@ def test_dev_stop_rejects_non_exact_recorded_argv(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0
+    assert not pid_file.exists()
+    assert not any(call.startswith("kill ") for call in recorded_calls(calls))
+
+
+def test_dev_stop_removes_malformed_non_string_phase(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "development-data"
+    record = process_record()
+    record["phase"] = []
+    pid_file = write_process_record(data_root, record)
+    fake_bin, calls = lifecycle_fakes(tmp_path)
+    result = run_stop(
+        home=home, data_root=data_root, fake_bin=fake_bin, calls=calls
+    )
+
+    assert result.returncode != 0
+    assert "PID 记录身份无效" in result.stderr
     assert not pid_file.exists()
     assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
