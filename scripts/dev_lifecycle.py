@@ -96,9 +96,33 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _server_argv(project_root: Path, port: int) -> tuple[str, ...]:
+def _server_argv(
+    project_root: Path,
+    port: int,
+    *,
+    python_executable: Path | None = None,
+) -> tuple[str, ...]:
     backend_source = project_root / "backend" / "src"
-    virtualenv_python = project_root / "backend" / ".venv" / "bin" / "python"
+    configured_python = python_executable
+    preserve_local_path = configured_python is None and not os.environ.get(
+        "AUDIO_MEMORY_DEV_PYTHON"
+    )
+    if configured_python is None:
+        override = os.environ.get("AUDIO_MEMORY_DEV_PYTHON")
+        configured_python = (
+            Path(override)
+            if override
+            else project_root / "backend" / ".venv" / "bin" / "python"
+        )
+    try:
+        resolved_python = configured_python.resolve(strict=True)
+    except OSError as exc:
+        raise LifecycleError("开发 Python 运行环境不存在。") from exc
+    if not resolved_python.is_file() or not os.access(
+        resolved_python, os.X_OK
+    ):
+        raise LifecycleError("开发 Python 运行环境不可执行。")
+    virtualenv_python = configured_python if preserve_local_path else resolved_python
     return (
         str(virtualenv_python),
         "-m",

@@ -113,6 +113,32 @@ def test_server_argv_preserves_virtualenv_python_path() -> None:
     assert argv[0] == str(PYTHON)
 
 
+def test_server_argv_can_use_a_verified_shared_toolchain_python(
+    tmp_path: Path,
+) -> None:
+    shared_python = tmp_path / "toolchain" / "python"
+    shared_python.parent.mkdir()
+    shared_python.write_bytes(b"python")
+    shared_python.chmod(0o755)
+
+    argv = dev_lifecycle._server_argv(
+        REPOSITORY_ROOT, 8766, python_executable=shared_python
+    )
+
+    assert argv[0] == str(shared_python.resolve())
+    assert argv[5] == str(REPOSITORY_ROOT / "backend" / "src")
+
+
+def test_server_argv_rejects_untrusted_shared_python(tmp_path: Path) -> None:
+    shared_python = tmp_path / "python"
+    shared_python.write_bytes(b"not executable")
+
+    with pytest.raises(dev_lifecycle.LifecycleError, match="Python"):
+        dev_lifecycle._server_argv(
+            REPOSITORY_ROOT, 8766, python_executable=shared_python
+        )
+
+
 def process_record(
     *,
     pid: int = 4242,
