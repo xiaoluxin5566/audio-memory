@@ -32,6 +32,9 @@ def run_migrations_online() -> None:
         hide_parameters=True,
     )
     with connectable.connect() as connection:
+        connection_guard = config.attributes.get("connection_guard")
+        if connection_guard is not None:
+            connection_guard()
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()

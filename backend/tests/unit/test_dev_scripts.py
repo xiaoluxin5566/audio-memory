@@ -386,9 +386,7 @@ def test_development_env_resolves_validated_defaults_without_writes(
     assert assignments["AUDIO_MEMORY_DATA_ROOT"] == str(
         (project_root / ".runtime" / "dev").resolve()
     )
-    assert assignments["AUDIO_MEMORY_MODEL_ROOT"] == str(
-        (production_root / "models").resolve()
-    )
+    assert "AUDIO_MEMORY_MODEL_ROOT" not in assignments
     assert "AUDIO_MEMORY_MODELS_WRITABLE" not in assignments
     assert assignments["AUDIO_MEMORY_KEYCHAIN_SERVICE"] == "Audio Memory Dev"
     assert assignments["AUDIO_MEMORY_PORT"] == "8766"
@@ -397,6 +395,147 @@ def test_development_env_resolves_validated_defaults_without_writes(
     )
     assert not (project_root / ".runtime").exists()
     assert not production_root.exists()
+
+    roundtrip = run_helper(
+        project_root=project_root,
+        home=home,
+        overrides=assignments,
+    )
+    assert roundtrip.returncode == 0, roundtrip.stderr
+    assert parse_assignments(roundtrip.stdout) == assignments
+    assert not (project_root / ".runtime").exists()
+    assert not production_root.exists()
+
+
+def test_open_runtime_rejects_data_root_symlink_swap_without_target_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project_root = tmp_path / "project"
+    data_root = project_root / ".runtime/dev"
+    runtime = data_root / "runtime"
+    runtime.mkdir(parents=True)
+    protected_target = tmp_path / "production-target"
+    protected_runtime = protected_target / "runtime"
+    protected_runtime.mkdir(parents=True, mode=0o755)
+    protected_mode = protected_runtime.stat().st_mode & 0o777
+    config = dev_lifecycle.development_config(
+        project_root=project_root, home=home
+    )
+    parked_root = data_root.with_name("dev-before-swap")
+    config_type = type(config)
+    original_validate = config_type.validate_development_isolation
+    swapped = False
+
+    def validate_then_swap(candidate: object) -> None:
+        nonlocal swapped
+        original_validate(candidate)  # type: ignore[arg-type]
+        if candidate is config and not swapped:
+            data_root.rename(parked_root)
+            data_root.symlink_to(protected_target, target_is_directory=True)
+            swapped = True
+
+    monkeypatch.setattr(
+        config_type, "validate_development_isolation", validate_then_swap
+    )
+
+    with pytest.raises(dev_lifecycle.LifecycleError):
+        runtime_fd = dev_lifecycle._open_runtime(config, create=True)
+        if runtime_fd is not None:
+            os.close(runtime_fd)
+
+    assert swapped is True
+    assert protected_runtime.stat().st_mode & 0o777 == protected_mode
+    assert not any(protected_runtime.iterdir())
+
+
+def test_open_runtime_validates_before_creating_any_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project_root = tmp_path / "project"
+    config = dev_lifecycle.development_config(
+        project_root=project_root, home=home
+    )
+    config_type = type(config)
+
+    def reject_before_write(candidate: object) -> None:
+        assert candidate is config
+        raise dev_lifecycle.RuntimeConfigurationError("injected rejection")
+
+    monkeypatch.setattr(
+        config_type, "validate_development_isolation", reject_before_write
+    )
+
+    with pytest.raises(dev_lifecycle.LifecycleError):
+        dev_lifecycle._open_runtime(config, create=True)
+
+    assert not config.paths.root.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "flags"),
+    [
+        (dev_lifecycle.LOG_NAME, os.O_WRONLY | os.O_APPEND),
+        (dev_lifecycle.PID_NAME, os.O_RDONLY),
+    ],
+)
+def test_runtime_open_rejects_log_and_pid_hardlinks_after_root_is_pinned(
+    tmp_path: Path,
+    name: str,
+    flags: int,
+) -> None:
+    home = tmp_path / "home"
+    project_root = tmp_path / "project"
+    config = dev_lifecycle.development_config(
+        project_root=project_root, home=home
+    )
+    runtime_fd = dev_lifecycle._open_runtime(config, create=True)
+    assert runtime_fd is not None
+    protected = tmp_path / f"production-{name}"
+    protected.write_bytes(b"preserve exactly")
+    runtime_path = config.paths.runtime / name
+    os.link(protected, runtime_path)
+
+    try:
+        with pytest.raises(dev_lifecycle.LifecycleError, match="硬链接"):
+            fd = dev_lifecycle._open_regular_at(runtime_fd, name, flags)
+            try:
+                if flags & os.O_WRONLY:
+                    os.write(fd, b"mutated")
+            finally:
+                os.close(fd)
+    finally:
+        os.close(runtime_fd)
+
+    assert protected.read_bytes() == b"preserve exactly"
+
+
+def test_development_env_preserves_explicit_dev_local_model_root_roundtrip(
+    tmp_path: Path,
+) -> None:
+    project_root = copied_project(tmp_path)
+    home = tmp_path / "home"
+    data_root = project_root / ".runtime/dev"
+    model_root = data_root / "models"
+    result = run_helper(
+        project_root=project_root,
+        home=home,
+        overrides={
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_MODEL_ROOT": str(model_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assignments = parse_assignments(result.stdout)
+    assert assignments["AUDIO_MEMORY_MODEL_ROOT"] == str(model_root.resolve())
+    roundtrip = run_helper(
+        project_root=project_root, home=home, overrides=assignments
+    )
+    assert roundtrip.returncode == 0, roundtrip.stderr
+    assert parse_assignments(roundtrip.stdout) == assignments
+    assert not data_root.exists()
 
 
 @pytest.mark.parametrize("relative_data_root", [".", "child"])
@@ -621,7 +760,8 @@ def test_dev_stop_rejects_pid_symlink_without_following_target(
 
     assert result.returncode != 0
     assert target.read_text(encoding="utf-8") == "4242\n"
-    assert not pid_file.exists()
+    assert pid_file.is_symlink()
+    assert "符号链接" in result.stderr
     assert not any(call.startswith("kill ") for call in recorded_calls(calls))
 
 

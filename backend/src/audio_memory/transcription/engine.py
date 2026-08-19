@@ -7,21 +7,27 @@ from difflib import SequenceMatcher
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import time
 from typing import Callable
 import unicodedata
 from uuid import uuid4
+import wave
+from io import BytesIO
 
 from sqlalchemy import select
 
 from audio_memory.config import (
     AppPaths,
     AppProfile,
+    PinnedDevelopmentRoot,
     RuntimeConfigurationError,
+    UnsafeDevelopmentPathError,
     WHISPER_MODEL_ID,
 )
 from audio_memory.db import Database
@@ -165,7 +171,9 @@ class VoiceActivityDetector:
         self.model = model
         self.last_energy_intervals: list[EnergyInterval] = []
 
-    def detect(self, path: Path) -> list[SpeechInterval]:
+    def detect(
+        self, path: Path, *, source_fd: int | None = None
+    ) -> list[SpeechInterval]:
         if not self.model.is_file():
             raise RuntimeError(f"VAD model is missing: {self.model}")
 
@@ -187,13 +195,14 @@ class VoiceActivityDetector:
             buffer_size_in_seconds=self.BUFFER_SECONDS,
         )
         window_samples = int(config.silero_vad.window_size)
+        input_value = str(path) if source_fd is None else f"pipe:{source_fd}"
         process = subprocess.Popen(
             [
                 "ffmpeg",
                 "-loglevel",
                 "error",
                 "-i",
-                str(path),
+                input_value,
                 "-f",
                 "s16le",
                 "-ar",
@@ -204,6 +213,7 @@ class VoiceActivityDetector:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **({"pass_fds": (source_fd,)} if source_fd is not None else {}),
         )
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("Unable to open the VAD audio stream")
@@ -707,7 +717,14 @@ def shift_whisper_segments(
     return shifted
 
 
-def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path:
+def prepare_compact_wav(
+    source: Path,
+    batch: CompactBatch,
+    target: Path,
+    *,
+    source_fd: int | None = None,
+    target_fd: int | None = None,
+) -> Path:
     """Materialize one compact batch without copying silence between sources."""
     filters: list[str] = []
     labels: list[str] = []
@@ -731,7 +748,16 @@ def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path
     filters.append(
         "".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]"
     )
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if target_fd is None:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    input_value = str(source) if source_fd is None else f"pipe:{source_fd}"
+    output_value = str(target) if target_fd is None else f"pipe:{target_fd}"
+    inherited_fds = tuple(
+        descriptor
+        for descriptor in (source_fd, target_fd)
+        if descriptor is not None
+    )
+    output_format = [] if target_fd is None else ["-f", "wav"]
     completed = subprocess.run(
         [
             "ffmpeg",
@@ -739,7 +765,7 @@ def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path
             "error",
             "-y",
             "-i",
-            str(source),
+            input_value,
             "-filter_complex",
             ";".join(filters),
             "-map",
@@ -750,11 +776,13 @@ def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path
             "1",
             "-c:a",
             "pcm_s16le",
-            str(target),
+            *output_format,
+            output_value,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         check=False,
+        **({"pass_fds": inherited_fds} if inherited_fds else {}),
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -1087,6 +1115,7 @@ class MLXWhisperEngine:
         diarization_engine=None,
         voice_activity_detector=None,
         speech_padding_ms: int = DEFAULT_SPEECH_PADDING_MS,
+        write_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         if speech_padding_ms < 0:
             raise ValueError("Speech padding cannot be negative")
@@ -1109,6 +1138,7 @@ class MLXWhisperEngine:
             else VoiceActivityDetector(paths.diarization_vad_model)
         )
         self.speech_padding_ms = speech_padding_ms
+        self.write_boundary = write_boundary
         self._executor: ProcessPoolExecutor | None = None
         self.metrics_by_job: dict[str, dict[str, object]] = {}
 
@@ -1183,7 +1213,7 @@ class MLXWhisperEngine:
             vad_started = time.monotonic()
             try:
                 detected = await asyncio.to_thread(
-                    self.voice_activity_detector.detect, source
+                    self._detect_speech, source
                 )
             except Exception as exc:
                 detected = []
@@ -1241,7 +1271,14 @@ class MLXWhisperEngine:
                     and entry.source_end_ms is not None
                 ],
             )
-            chunk_dir.mkdir(mode=0o700, parents=False, exist_ok=True)
+            if self.write_boundary is None:
+                chunk_dir.mkdir(mode=0o700, parents=False, exist_ok=True)
+            else:
+                chunk_fd = self.write_boundary.open_directory(
+                    chunk_dir, create=True
+                )
+                assert chunk_fd is not None
+                os.close(chunk_fd)
             loop = asyncio.get_running_loop()
             if self._executor is None:
                 self._executor = ProcessPoolExecutor(max_workers=1)
@@ -1266,8 +1303,8 @@ class MLXWhisperEngine:
                         target = chunk_dir / f"compact-{batch.index:05d}.wav"
                         try:
                             preparation_started = time.monotonic()
-                            await asyncio.to_thread(
-                                prepare_compact_wav, source, batch, target
+                            await self._prepare_compact_wav(
+                                source, batch, target
                             )
                             metrics.add_timing(
                                 "wav_preparation",
@@ -1275,10 +1312,18 @@ class MLXWhisperEngine:
                             )
                             prepared_count += 1
                             metrics.observe_prepared_wavs(prepared_count)
-                            if target.exists():
+                            if self.write_boundary is not None:
+                                temporary_size = (
+                                    self.write_boundary.regular_file_size(target)
+                                )
+                            elif target.exists():
+                                temporary_size = target.stat().st_size
+                            else:
+                                temporary_size = 0
+                            if temporary_size:
                                 metrics.observe_resources(
                                     peak_rss_bytes=0,
-                                    temporary_disk_bytes=target.stat().st_size,
+                                    temporary_disk_bytes=temporary_size,
                                 )
                         except Exception:
                             prepared_limit.release()
@@ -1315,8 +1360,11 @@ class MLXWhisperEngine:
                             + 44
                         )
                         physical_chunks = (
-                            await self._normalize_to_chunks(chunk, subchunk_dir)
-                            if chunk.stat().st_size > max_pcm_chunk_bytes
+                            await self._normalize_to_chunks_safely(
+                                chunk, subchunk_dir
+                            )
+                            if self._regular_file_size(chunk)
+                            > max_pcm_chunk_bytes
                             else [chunk]
                         )
                         combined_segments: list[dict[str, object]] = []
@@ -1335,6 +1383,7 @@ class MLXWhisperEngine:
                             restored = load_physical_chunk_checkpoint(
                                 checkpoint_path,
                                 staging_root=self.paths.staging,
+                                write_boundary=self.write_boundary,
                                 expected_fingerprint=physical_fingerprint,
                                 expected_part_index=part_index,
                             )
@@ -1355,8 +1404,13 @@ class MLXWhisperEngine:
                                     part_index + 1, len(physical_chunks),
                                     part_audio_seconds,
                                 )
+                                worker_audio: object = (
+                                    self._read_pcm16_audio(physical_chunk)
+                                    if self.write_boundary is not None
+                                    else str(physical_chunk)
+                                )
                                 worker_arguments: list[object] = [
-                                    str(physical_chunk),
+                                    worker_audio,
                                     model_reference,
                                     parameters.word_timestamps,
                                     language_lock,
@@ -1382,6 +1436,7 @@ class MLXWhisperEngine:
                                 save_physical_chunk_checkpoint(
                                     checkpoint_path,
                                     staging_root=self.paths.staging,
+                                    write_boundary=self.write_boundary,
                                     fingerprint=physical_fingerprint,
                                     part_index=part_index,
                                     segments=list(part_result),
@@ -1423,16 +1478,15 @@ class MLXWhisperEngine:
                                     if isinstance(part_confidence, (int, float))
                                     else None
                                 )
-                            physical_chunk.unlink(missing_ok=True)
+                            self._unlink_staging_file(physical_chunk)
                         raw_segments = WhisperBatchResult(
                             combined_segments,
                             language=detected_language,
                             language_confidence=detected_confidence,
                         )
                     finally:
-                        chunk.unlink(missing_ok=True)
-                        if subchunk_dir.exists():
-                            shutil.rmtree(subchunk_dir)
+                        self._unlink_staging_file(chunk)
+                        self._remove_staging_tree(subchunk_dir)
                         prepared_count = max(0, prepared_count - 1)
                         prepared_limit.release()
                     if chunk_index == 0 and (
@@ -1507,10 +1561,20 @@ class MLXWhisperEngine:
                         language_lock=language_lock,
                     )
                     await self._persist_compact_checkpoint(file, checkpoint)
-                    for checkpoint_path in chunk_dir.glob(
-                        f"compact-{batch.index:05d}-part-*.json"
-                    ):
-                        checkpoint_path.unlink(missing_ok=True)
+                    if self.write_boundary is None:
+                        checkpoint_paths = tuple(
+                            chunk_dir.glob(
+                                f"compact-{batch.index:05d}-part-*.json"
+                            )
+                        )
+                    else:
+                        checkpoint_paths = self.write_boundary.list_regular_files(
+                            chunk_dir,
+                            prefix=f"compact-{batch.index:05d}-part-",
+                            suffix=".json",
+                        )
+                    for checkpoint_path in checkpoint_paths:
+                        self._unlink_staging_file(checkpoint_path)
                     self.eta_tracker.record(
                         file.job_id,
                         batch.speech_ms,
@@ -1534,9 +1598,13 @@ class MLXWhisperEngine:
                 file.job_id,
                 json.dumps(metrics.to_dict(), sort_keys=True, separators=(",", ":")),
             )
-            safe_dir = assert_staging_path(chunk_dir, self.paths.staging)
-            if completed and safe_dir.exists():
-                shutil.rmtree(safe_dir)
+            safe_dir = (
+                assert_staging_path(chunk_dir, self.paths.staging)
+                if self.write_boundary is None
+                else chunk_dir
+            )
+            if completed:
+                self._remove_staging_tree(safe_dir)
             if completed:
                 await self._remove_manifest(manifest_id)
 
@@ -1544,6 +1612,139 @@ class MLXWhisperEngine:
         if self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
+
+    async def _prepare_compact_wav(
+        self, source: Path, batch: CompactBatch, target: Path
+    ) -> None:
+        if self.write_boundary is None:
+            await asyncio.to_thread(prepare_compact_wav, source, batch, target)
+            return
+        source_fd = self.write_boundary.open_regular_file(source, os.O_RDONLY)
+        temporary = target.with_name(
+            f".{target.name}.{secrets.token_hex(16)}.ffmpeg"
+        )
+        try:
+            target_fd = self.write_boundary.open_regular_file(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                create_parents=True,
+            )
+        except BaseException:
+            os.close(source_fd)
+            raise
+        try:
+            try:
+                await asyncio.to_thread(
+                    prepare_compact_wav,
+                    source,
+                    batch,
+                    target,
+                    source_fd=source_fd,
+                    target_fd=target_fd,
+                )
+                metadata = os.fstat(target_fd)
+                if metadata.st_nlink > 1:
+                    raise UnsafeDevelopmentPathError(
+                        "开发转录临时文件不能是硬链接。"
+                    )
+            finally:
+                os.close(target_fd)
+                os.close(source_fd)
+            self.write_boundary.replace_file(temporary, target)
+        finally:
+            self.write_boundary.unlink_file(temporary, missing_ok=True)
+
+    def _detect_speech(self, source: Path) -> list[SpeechInterval]:
+        if self.write_boundary is None or not isinstance(
+            self.voice_activity_detector, VoiceActivityDetector
+        ):
+            return self.voice_activity_detector.detect(source)
+        descriptor = self.write_boundary.open_regular_file(source, os.O_RDONLY)
+        try:
+            return self.voice_activity_detector.detect(
+                source, source_fd=descriptor
+            )
+        finally:
+            os.close(descriptor)
+
+    def _regular_file_size(self, path: Path) -> int:
+        if self.write_boundary is None:
+            return path.stat().st_size
+        return self.write_boundary.regular_file_size(path)
+
+    def _unlink_staging_file(self, path: Path) -> None:
+        if self.write_boundary is None:
+            path.unlink(missing_ok=True)
+        else:
+            self.write_boundary.unlink_file(path, missing_ok=True)
+
+    def _remove_staging_tree(self, path: Path) -> None:
+        if self.write_boundary is None:
+            if path.exists():
+                shutil.rmtree(path)
+        else:
+            self.write_boundary.remove_directory_tree(path, missing_ok=True)
+
+    def _read_pcm16_audio(self, path: Path):
+        assert self.write_boundary is not None
+        descriptor = self.write_boundary.open_regular_file(path, os.O_RDONLY)
+        try:
+            with os.fdopen(os.dup(descriptor), "rb", closefd=True) as raw:
+                with wave.open(raw, "rb") as audio:
+                    if (
+                        audio.getnchannels() != 1
+                        or audio.getsampwidth() != 2
+                        or audio.getframerate() != 16_000
+                    ):
+                        raise RuntimeError(
+                            "Development Whisper chunks must be 16 kHz mono PCM"
+                        )
+                    frames = audio.readframes(audio.getnframes())
+        finally:
+            os.close(descriptor)
+        import numpy as np
+
+        return np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
+
+    async def _normalize_to_chunks_safely(
+        self, source: Path, target_dir: Path
+    ) -> list[Path]:
+        if self.write_boundary is None:
+            return await self._normalize_to_chunks(source, target_dir)
+        self.write_boundary.create_directory(target_dir)
+        descriptor = self.write_boundary.open_regular_file(source, os.O_RDONLY)
+        chunks: list[Path] = []
+        try:
+            with os.fdopen(os.dup(descriptor), "rb", closefd=True) as raw:
+                with wave.open(raw, "rb") as audio:
+                    if (
+                        audio.getnchannels() != 1
+                        or audio.getsampwidth() != 2
+                        or audio.getframerate() != 16_000
+                    ):
+                        raise RuntimeError(
+                            "Development Whisper chunks must be 16 kHz mono PCM"
+                        )
+                    frames_per_chunk = 16_000 * WHISPER_CHUNK_SECONDS
+                    index = 0
+                    while frames := audio.readframes(frames_per_chunk):
+                        encoded = BytesIO()
+                        with wave.open(encoded, "wb") as output:
+                            output.setnchannels(1)
+                            output.setsampwidth(2)
+                            output.setframerate(16_000)
+                            output.writeframes(frames)
+                        target = target_dir / f"chunk-{index:05d}.wav"
+                        self.write_boundary.write_bytes_atomic(
+                            target, encoded.getvalue()
+                        )
+                        chunks.append(target)
+                        index += 1
+        finally:
+            os.close(descriptor)
+        if not chunks:
+            raise RuntimeError("Audio chunking produced no output")
+        return chunks
 
     @staticmethod
     async def _normalize(source: Path, target: Path) -> None:

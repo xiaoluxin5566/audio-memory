@@ -14,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from audio_memory import __version__
 from audio_memory.config import (
     AppPaths,
+    AppProfile,
+    PinnedDevelopmentRoot,
     RuntimeConfig,
     assert_supported_platform,
 )
@@ -82,17 +84,43 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         assert_supported_platform()
         resolved_runtime_config.validate()
-        resolved_paths.ensure_directories()
-        instance_lock = InstanceLock(resolved_paths.lock)
-        instance_lock.acquire()
-        app.state.paths = resolved_paths
-        app.state.instance_lock = instance_lock
+        development_boundary: PinnedDevelopmentRoot | None = None
+        instance_lock: InstanceLock | None = None
         database: Database | None = None
         provider_clients: list[httpx.AsyncClient] = []
         whisper_engine: MLXWhisperEngine | None = None
         try:
-            await asyncio.to_thread(run_migrations, resolved_paths.database)
-            database = Database(resolved_paths.database)
+            if resolved_runtime_config.profile is AppProfile.DEVELOPMENT:
+                development_boundary = PinnedDevelopmentRoot.open(
+                    resolved_runtime_config, create=True
+                )
+                assert development_boundary is not None
+                development_boundary.ensure_directories()
+            else:
+                resolved_paths.ensure_directories()
+            if development_boundary is not None:
+                development_boundary.verify()
+            instance_lock = InstanceLock(
+                resolved_paths.lock,
+                write_boundary=development_boundary,
+            )
+            instance_lock.acquire()
+            app.state.paths = resolved_paths
+            app.state.instance_lock = instance_lock
+            local_security.write_boundary = development_boundary
+            if development_boundary is not None:
+                development_boundary.verify()
+            await asyncio.to_thread(
+                run_migrations,
+                resolved_paths.database,
+                write_boundary=development_boundary,
+            )
+            if development_boundary is not None:
+                development_boundary.verify()
+            database = Database(
+                resolved_paths.database,
+                write_boundary=development_boundary,
+            )
             app.state.database = database
             app.state.settings_repository = AppSettingsRepository(database)
             sleep_prevention = SleepPreventionManager()
@@ -101,19 +129,28 @@ def create_app(
             async def protect_upload(job_id: str) -> None:
                 if await app.state.settings_repository.prevent_sleep_enabled():
                     await sleep_prevention.acquire(job_id)
-            await cleanup_abandoned_uploads(database, resolved_paths.staging)
+            await cleanup_abandoned_uploads(
+                database,
+                resolved_paths.staging,
+                write_boundary=development_boundary,
+            )
             job_events = JobEventBroker()
             app.state.job_events = job_events
             eta_tracker = TranscriptionEtaTracker()
             app.state.eta_tracker = eta_tracker
             app.state.upload_service = UploadService(
-                database, resolved_paths, job_events, eta_tracker=eta_tracker
+                database,
+                resolved_paths,
+                job_events,
+                eta_tracker=eta_tracker,
+                write_boundary=development_boundary,
             )
             whisper_engine = MLXWhisperEngine(
                 database,
                 resolved_paths,
                 runtime_profile=resolved_runtime_config.profile,
                 eta_tracker=eta_tracker,
+                write_boundary=development_boundary,
             )
             app.state.whisper_engine = whisper_engine
             transcription_service = TranscriptionService(
@@ -124,7 +161,10 @@ def create_app(
             await transcription_service.mark_abandoned_work_interrupted()
             app.state.transcription_service = transcription_service
             app.state.transcription_tasks = {}
-            prompt_store = PromptStore(resolved_paths.prompts)
+            prompt_store = PromptStore(
+                resolved_paths.prompts,
+                write_boundary=development_boundary,
+            )
             await asyncio.to_thread(prompt_store.initialize)
             app.state.prompt_store = prompt_store
             adapters = {
@@ -154,7 +194,11 @@ def create_app(
             analysis_client = ProviderAnalysisClient(
                 keychain_repository, analysis_http_client
             )
-            analysis_publisher = AnalysisPublisher(database, resolved_paths)
+            analysis_publisher = AnalysisPublisher(
+                database,
+                resolved_paths,
+                write_boundary=development_boundary,
+            )
             analysis_runner = SingleReportRunner(
                 database=database,
                 provider=analysis_client,
@@ -195,15 +239,19 @@ def create_app(
                 database,
                 resolved_paths,
                 RemoteQuestionAnswerer(analysis_client, coordinator),
+                read_boundary=development_boundary,
             )
             app.state.feedback_writer = FeedbackWriter(
-                database, resolved_paths.feedback
+                database,
+                resolved_paths.feedback,
+                write_boundary=development_boundary,
             )
             app.state.history_cleaner = HistoryCleaner(
                 database,
                 resolved_paths.audio,
                 resolved_paths.staging,
                 task_coordinator=analysis_tasks,
+                write_boundary=development_boundary,
             )
             yield
         finally:
@@ -228,7 +276,10 @@ def create_app(
                 await sleep_prevention.close()
             if database is not None:
                 await database.dispose()
-            instance_lock.release()
+            if instance_lock is not None:
+                instance_lock.release()
+            if development_boundary is not None:
+                development_boundary.close()
 
     app = FastAPI(title="Audio Memory", version=__version__, lifespan=lifespan)
     app.state.runtime_config = resolved_runtime_config

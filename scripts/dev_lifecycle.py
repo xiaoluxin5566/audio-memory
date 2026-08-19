@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from audio_memory.config import PinnedDevelopmentRoot, RuntimeConfigurationError
 from runtime_config import development_config
 
 
@@ -149,28 +150,32 @@ def _open_regular_at(
         if exc.errno == errno.ELOOP:
             raise LifecycleError(f"拒绝跟随运行文件的符号链接：{name}") from exc
         raise
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
         os.close(fd)
         raise LifecycleError(f"运行文件必须是普通文件：{name}")
+    if metadata.st_nlink > 1:
+        os.close(fd)
+        raise LifecycleError(f"运行文件不能是硬链接：{name}")
     return fd
 
 
 def _open_runtime(config: Any, *, create: bool) -> int | None:
-    runtime = config.paths.runtime
-    if create:
-        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
-        config.validate_development_isolation()
-    elif not runtime.exists():
-        return None
     try:
-        fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | _nofollow_flag())
-    except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise LifecycleError("开发 runtime 目录不能是符号链接。") from exc
-        raise
-    if create:
-        os.fchmod(fd, 0o700)
-    return fd
+        boundary = PinnedDevelopmentRoot.open(config, create=create)
+        if boundary is None:
+            return None
+        try:
+            runtime_fd = boundary.open_directory(
+                config.paths.runtime, create=create
+            )
+            if runtime_fd is not None and create:
+                os.fchmod(runtime_fd, 0o700)
+            return runtime_fd
+        finally:
+            boundary.close()
+    except RuntimeConfigurationError as exc:
+        raise LifecycleError(str(exc)) from exc
 
 
 def _unlink_at(runtime_fd: int, name: str) -> None:
@@ -563,7 +568,7 @@ def main() -> int:
         if arguments.command == "start":
             return start(arguments.project_root.resolve(), arguments.home)
         return stop(arguments.project_root.resolve(), arguments.home)
-    except (LifecycleError, OSError) as exc:
+    except (LifecycleError, RuntimeConfigurationError, OSError) as exc:
         print(f"{arguments.command} 失败：{exc}", file=sys.stderr)
         return 1
 

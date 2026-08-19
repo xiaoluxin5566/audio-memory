@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -401,6 +402,122 @@ def test_development_config_rejects_nested_runtime_symlink_outside_data_root(
 
     assert not (outside / "audio-memory.lock").exists()
     assert not (outside / "local-web-security.sqlite3").exists()
+
+
+def test_development_config_rejects_hardlinked_production_database_before_writes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    production_root = home / "Library/Application Support/AudioMemory"
+    production_root.mkdir(parents=True)
+    production_database = production_root / "audio-memory.sqlite3"
+    production_database.write_bytes(b"production database sentinel")
+    production_identity = production_database.stat()
+
+    development_root = tmp_path / "repo/.runtime/dev"
+    development_root.mkdir(parents=True)
+    os.link(production_database, development_root / "audio-memory.sqlite3")
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="硬链接"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_PROFILE": "development"},
+        )
+
+    assert production_database.read_bytes() == b"production database sentinel"
+    assert production_database.stat().st_ino == production_identity.st_ino
+    assert not (development_root / "runtime").exists()
+
+
+def test_development_config_rejects_nested_symlink_in_writable_tree(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    development_root = tmp_path / "repo/.runtime/dev"
+    protected_target = tmp_path / "production-feedback"
+    (development_root / "意见反馈").mkdir(parents=True)
+    protected_target.mkdir()
+    (development_root / "意见反馈/2026-08-19").symlink_to(
+        protected_target, target_is_directory=True
+    )
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="符号链接"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_PROFILE": "development"},
+        )
+
+    assert not any(protected_target.iterdir())
+
+
+def test_development_config_rejects_special_file_in_writable_tree(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    development_root = tmp_path / "repo/.runtime/dev"
+    development_root.mkdir(parents=True)
+    os.mkfifo(development_root / "unexpected.pipe")
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="普通文件"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_PROFILE": "development"},
+        )
+
+
+def test_development_config_allows_symlinks_only_inside_explicit_model_cache(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    development_root = tmp_path / "repo/.runtime/dev"
+    model_root = development_root / "models"
+    blob = model_root / "blobs/model.bin"
+    snapshot = model_root / "snapshots/revision/model.bin"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"isolated model fixture")
+    snapshot.parent.mkdir(parents=True)
+    snapshot.symlink_to(blob)
+
+    config = RuntimeConfig.from_environment(
+        home=home,
+        project_root=tmp_path / "repo",
+        environ={
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_MODEL_ROOT": str(model_root),
+        },
+    )
+
+    assert config.paths.models == model_root.resolve()
+    assert config.paths.models_writable is True
+    assert snapshot.is_symlink()
+
+
+def test_development_config_rejects_model_cache_symlink_outside_cache(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    development_root = tmp_path / "repo/.runtime/dev"
+    model_root = development_root / "models"
+    snapshot = model_root / "snapshots/revision/model.bin"
+    protected_model = tmp_path / "production-model.bin"
+    snapshot.parent.mkdir(parents=True)
+    protected_model.write_bytes(b"production model fixture")
+    snapshot.symlink_to(protected_model)
+
+    with pytest.raises(UnsafeDevelopmentPathError, match="模型缓存符号链接"):
+        RuntimeConfig.from_environment(
+            home=home,
+            project_root=tmp_path / "repo",
+            environ={
+                "AUDIO_MEMORY_PROFILE": "development",
+                "AUDIO_MEMORY_MODEL_ROOT": str(model_root),
+            },
+        )
+
+    assert protected_model.read_bytes() == b"production model fixture"
 
 
 @pytest.mark.parametrize("model_subpath", ["models", "audio"])

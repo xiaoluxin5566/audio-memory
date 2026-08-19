@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import delete, select, update
 
 from audio_memory.db import Database
+from audio_memory.config import PinnedDevelopmentRoot
 from audio_memory.models import (
     AnalysisJob,
     AnalysisVersion,
@@ -31,11 +32,13 @@ class HistoryCleaner:
         staging_root: Path | None = None,
         *,
         task_coordinator=None,
+        write_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         self.database = database
         self.audio_root = audio_root
         self.staging_root = staging_root
         self.task_coordinator = task_coordinator
+        self.write_boundary = write_boundary
         self._lock = asyncio.Lock()
 
     async def clear(self, *, confirm: bool) -> None:
@@ -103,8 +106,10 @@ class HistoryCleaner:
         async with guard() as profile_retry_raced:
             yield profile_retry_raced
 
-    @staticmethod
-    def _clear_root(path: Path) -> None:
+    def _clear_root(self, path: Path) -> None:
+        if self.write_boundary is not None:
+            self.write_boundary.clear_directory_contents(path)
+            return
         root = path.resolve(strict=False)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         for child in root.iterdir():

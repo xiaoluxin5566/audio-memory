@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
+
+from audio_memory.config import (
+    PinnedDevelopmentRoot,
+    RuntimeConfig,
+    UnsafeDevelopmentPathError,
+)
 
 from audio_memory.transcription.physical_checkpoints import (
     load_physical_chunk_checkpoint,
@@ -81,3 +90,37 @@ def test_physical_checkpoint_write_leaves_no_temporary_sibling(tmp_path) -> None
 
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
     assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_development_checkpoint_rejects_nested_staging_symlink(
+    tmp_path: Path,
+) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+    boundary = PinnedDevelopmentRoot.open(config, create=True)
+    assert boundary is not None
+    boundary.ensure_directories()
+    protected = tmp_path / "production-checkpoints"
+    protected.mkdir()
+    nested = config.paths.staging / "job-1"
+    nested.symlink_to(protected, target_is_directory=True)
+
+    try:
+        with pytest.raises(UnsafeDevelopmentPathError):
+            save_physical_chunk_checkpoint(
+                nested / "part.json",
+                staging_root=config.paths.staging,
+                write_boundary=boundary,
+                fingerprint="a" * 64,
+                part_index=0,
+                segments=[],
+                language=None,
+                language_confidence=None,
+            )
+    finally:
+        boundary.close()
+
+    assert not any(protected.iterdir())

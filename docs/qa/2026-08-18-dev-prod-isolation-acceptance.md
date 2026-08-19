@@ -194,7 +194,7 @@ exit 0
 | 只读 Whisper 共享模型 | `models_writable=False` 时只从模型根旁的受控清单解析已安装本地 snapshot；清单缺失、身份不符、文件缺失或越界均失败，不把 repo ID 交给 `snapshot_download`。显式可写 development 模型根调用下载时固定 `cache_dir=<development model root>`。 |
 | `create_app` 身份分裂 | `paths` 与 `local_port` 覆盖先合成为一个不可变的 effective `RuntimeConfig`，再统一验证、保存到 `app.state` 并供 health、Keychain、数据库和本地安全边界使用；development 注入正式路径或缺少正式边界均在零产品产物状态下拒绝。 |
 | Doctor 模型位置 | `doctor-values` 现在输出经同一 resolver 派生的 manifest root；Whisper 与 diarization 都从共享模型根旁的 manifest 检查。隔离 development fixture 实际执行 Whisper 校验、带隔离信任集合的 diarization 语义校验、迁移/import/Prompt/可写性检查，Doctor 退出码为 0。 |
-| `MODELS_WRITABLE` 输出 | 选择删除误导性的 `AUDIO_MEMORY_MODELS_WRITABLE` shell 输出；可写状态仍是 `RuntimeConfig.paths.models_writable` 的内部类型化状态，下载边界直接消费该状态，不再尝试从未解析的环境变量 round-trip。 |
+| 模型可写性输出 | 删除误导性的 `AUDIO_MEMORY_MODELS_WRITABLE` shell 输出。默认共享只读模型时，`development-env` 也不再输出 `AUDIO_MEMORY_MODEL_ROOT`，否则反向导入会把共享路径误解为显式可写路径并被隔离校验拒绝。只有显式指向开发根内的独立模型目录时才输出 `AUDIO_MEMORY_MODEL_ROOT`；两种输出都已精确 round-trip。可写状态仍只由 `RuntimeConfig.paths.models_writable` 表示。 |
 | LaunchAgent 身份 | 非 core 的 production Doctor 精确检查 `launchctl print gui/<uid>/com.audio-memory.local`；development 同一测试证明既不调用 `launchctl`，也不调用 Keychain 可访问性检查。 |
 
 TDD RED 记录：路径别名 `2 failed`；跨环境 Keychain `2 failed`；effective runtime 三项 `3 failed`；写前复验 `1 failed`；缺少正式边界 `1 failed`；Whisper 初始三项 `3 failed`，只读自定义 repo fallback `1 failed`；Doctor 路径与 LaunchAgent 组合 `2 failed`。每组失败原因均为待实现行为缺失，随后对应聚焦测试转绿。
@@ -214,3 +214,59 @@ Shell 语法：exit 0
 首次在受限沙箱中运行回环监听测试时，后端与前端分别出现 `PermissionError/EPERM`；获准仅使用随机 `127.0.0.1` 临时端口后，后端隔离验收和前端代理测试全部通过。该差异来自沙箱禁止监听，不是产品失败。
 
 本轮仍只使用临时目录、假 Security client、fail-closed provider 和隔离模型文件；没有读取或改写真实正式数据库、真实 Keychain、真实模型缓存、LaunchAgent 或运行服务，没有 provider 外联，也没有访问远端 Git、标签或 Release。
+
+## 残留审查修正轮 2（2026-08-19）
+
+本轮 3 条意见均在实际代码与 macOS 文件系统语义上成立，无需反驳：
+
+| 审查项 | 技术处理与直接证据 |
+|---|---|
+| 开发数据库硬链接到正式数据库 | 硬链接不是路径包含关系，旧校验确实会放行。新校验通过 no-follow 目录描述符遍历已有开发可写树，任一非目录条目 `st_nlink > 1` 即保守拒绝；因此不仅覆盖主 SQLite，也覆盖 session DB、lock、Prompt、feedback、staging/audio 内的已有可写文件。`os.link` 回归证明拒绝发生在 runtime 目录和迁移产物出现之前，正式哨兵内容/inode 不变。 |
+| 验证后的目录符号链接替换 | 本轮引入了已固定根目录和写前/写后复验，但第 3 轮审查证明 lock、SQLite 等内部仍使用路径 API，可在复验与实际写入之间被替换。因此本行只代表第 2 轮的中间加固，完整写边界以下方“残留审查修正轮 3”为准。 |
+| `development-env` 共享模型 round-trip | 默认共享只读配置不输出 `AUDIO_MEMORY_MODEL_ROOT`，再次作为环境输入时输出逐字段一致、不写入开发或正式目录。显式开发根内模型目录仍会输出，且同样可 round-trip。 |
+
+本轮聚焦回归为 `69 passed in 17.21s`。后端在受限沙箱内除真实回环监听验收外全部通过：`1037 passed, 28 skipped, 1 deselected in 42.40s`。前端同样只有 4 个需要 localhost listen 的既有用例被沙箱 `EPERM` 阻断，其余 `87 passed`；生产构建为 `39 modules transformed; built in 402ms`，Shell 语法退出码为 0。
+
+本轮尝试仅为随机 `127.0.0.1` 监听申请权限，但授权系统因执行额度限制拒绝，因此未绕过限制重跑。该后端双进程与 4 个前端代理用例在上一修正轮已使用相同临时边界通过，但不将旧结果冒充为本轮新证据。本轮仍未访问真实正式数据、Keychain、provider、LaunchAgent、真实模型缓存、远程 Git、tag 或 Release。
+
+## 残留审查修正轮 3（2026-08-19）
+
+审查者的 runtime TOCTOU 与嵌套 symlink 逃逸均可复现，且是合并阻断问题。旧实现在 `InstanceLock.acquire()` 内替换开发根时会在保护目标生成 runtime/lock；在 `run_migrations()` 入口插入硬链接会把完整 Alembic schema 写入保护 inode；lifespan 后插入的 session DB 硬链接和 feedback 日期目录 symlink 也都能被真实写入。六个核心 RED 当场结果为 `6 failed in 1.76s`。
+
+最终架构分两层：
+
+1. 普通文件系统操作由同一个 lifespan 级 `PinnedDevelopmentRoot` 执行。根目录 fd 持续存活，所有父目录逐级 `O_DIRECTORY|O_NOFOLLOW` 打开，文件在 `openat` 后校验为单链接普通文件；原子写、移动、删除和递归清理分别使用带 `src_dir_fd/dst_dir_fd` 的 replace、`unlinkat`/`rmdir at`。lock、upload、Prompt、feedback、首次发布音频移动、遗留 upload 清理和历史清理均只在 development 注入该边界；production 继续原有路径分支。
+2. macOS 实测 `sqlite3.connect('/dev/fd/<directory-fd>/file')` 返回 `unable to open database file`，不能用目录 fd 伪路径。因此 SQLite 采用等价的 fail-closed 层：先用 `openat` 安全预创建并记录 inode，再用 `mode=rw` URI 打开（禁止 SQLite 在被替换路径上创建新 DB）；Alembic 在 connect 后、首条 migration 前执行根/inode/nlink 守卫，async Database 的每个新 DBAPI connection 也执行同一守卫；local-session SQLite 每次 connect 前后都重做安全打开与 inode 核对。Alembic 的 ConfigParser 层会把百分号视为插值语法，因此设置 URL 时仅对该层进行百分号转义；含中文和空格的 development 根实际迁移和查询回归通过。
+
+开发可写树中现在拒绝任何嵌套 symlink、FIFO/socket/device 等非普通条目和硬链接。唯一例外是显式 dev-local Hugging Face 模型缓存内部的 symlink：模型根本身必须是 no-follow 真实目录，内部 symlink 的解析目标必须仍在该模型根内，非普通条目和硬链接仍拒绝。临时模型夹具同时证明内部 blob symlink 允许、越界 symlink 拒绝。
+
+第 3 轮最终精确聚焦回归（含中文/空格 SQLite 兼容性）为 `9 passed in 2.28s`；受影响模块组合回归为 `162 passed in 16.35s`；数据库 schema 组合为 `24 passed in 2.10s`；最终受限沙箱内的后端非监听全量为 `1046 passed, 28 skipped, 1 deselected in 46.12s`；Shell 语法与 `git diff --check` 均通过。惟一 deselected 仍是需要 localhost listen 的双进程验收；本轮没有重新申请已知被额度系统阻断的升级权限，也未绕过限制。
+
+全部竞争、硬链接、symlink、SQLite 和模型夹具均位于 pytest 临时目录。本轮没有读取或改写真实正式数据、Keychain、provider、LaunchAgent、真实模型缓存、远程 Git、tag 或 Release，也按上级要求未执行 Git stage/commit。
+
+## 残留审查修正轮 4（2026-08-19）
+
+本轮四个运行时边界缺口和一个性能问题均经调用链核对成立，无需技术反驳：
+
+| 审查项 | 最终处理 |
+|---|---|
+| 主 SQLite 连接池复用 | development 主库在 session 进入、pool checkout、transaction begin 和每条 `before_cursor_execute` 都执行常数级根/inode/nlink 守卫；不安全连接立即 invalidate 并 fail closed。已 checkout 且执行过 `SELECT` 的同一连接在外部新增硬链接后，下一条 DDL 之前被拒绝；单独回归也覆盖已归还连接的 checkout。保护副本字节与 schema 保持不变。 |
+| lifecycle 日志/PID 硬链接 | `_open_regular_at` 现在在实际 `openat` 后对 fd 执行 `fstat`，同时要求 regular file 且 `st_nlink == 1`。根目录固定之后再插入 log/PID 硬链接的两个回归均在读写前拒绝，保护文件逐字节不变。 |
+| 转录 staging 与物理 checkpoint | lifespan 持有的 pinned boundary 注入 `MLXWhisperEngine` 和物理 checkpoint 层。chunk 目录、文件、checkpoint 原子替换、unlink 和递归清理均使用目录 fd；开发环境的 Whisper 输入由 no-follow fd 解码为数组后交给 worker。ffmpeg 读取 pinned source fd，并通过 `pipe:<fd>` 写入预打开的随机临时 regular file，验证 nlink 后再用 dir-fd 原子发布。真实 ffmpeg 回归完成了 WAV 生成、fd 解码和清理。 |
+| staging symlink/整根替换 | nested chunk/checkpoint symlink 在首次写前拒绝。转录进行中把整个 development 根换成指向保护目标的 symlink 时，ffmpeg 只能写已固定的旧 fd，后续发布/清理 fail closed；目标目录无新产物，哨兵文件未被删除。 |
+| 证据音频读边界 | `ContentService` 在 development 中通过 pinned root 逐级 no-follow 打开音频，API 在响应结束前持有 fd，并通过 `/dev/fd/<fd>` 的已打开描述符流式传输，不再重新解析数据库路径。在 service 打开后、response 读取前替换整个 audio 目录，Range 请求仍返回 development 已打开内容，没有泄露外部音频。production 仍使用原 `FileResponse(Path)` 分支。 |
+| 请求时全树扫描 | 完整可写树审计仍保留在 development 启动/明示 `verify()` 阶段。文件、目录、DB SQL 和 API 读写边界改为根 identity + 直接父链 + 当前 entry/fd 的常数级检查，不再每次请求递归扫描全树。 |
+
+TDD 证据：连接池与 lifecycle 首次组合为 `3 failed in 1.22s`；转录/checkpoint 边界注入用例在旧构造器和函数签名上按预期失败；修正测试夹具后，音频竞争直接读出 `production secret` 而失败。最终新增的安全与真实 ffmpeg 回归以下方新鲜聚焦数字为准。
+
+最终验证：
+
+```text
+第 4 轮精确安全/兼容性回归：9 passed in 1.69s
+受影响模块组合：188 passed in 20.35s
+后端非监听全量：1055 passed, 28 skipped, 1 deselected in 43.21s
+```
+
+单独尝试未纳入上述全量的 localhost 双进程验收时，在随机 `127.0.0.1` 端口的 `socket.bind` 阶段被当前沙箱以 `PermissionError: Operation not permitted` 拒绝，未进入应用逻辑，不冒充通过。Shell 语法、Python 编译和 `git diff --check` 的最终结果在本轮交付前重新执行。
+
+全部新回归只使用 pytest 临时目录、假 Security client 与本地 ffmpeg。未读取或修改真实正式数据、Keychain、provider、LaunchAgent、真实模型缓存、远程 Git、tag 或 Release，本轮变更按要求保持 unstaged/uncommitted。

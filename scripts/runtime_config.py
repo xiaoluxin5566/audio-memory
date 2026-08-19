@@ -36,16 +36,17 @@ def development_config(
 def _development_assignments(*, project_root: Path, home: Path) -> tuple[str, ...]:
     config = development_config(project_root=project_root, home=home)
     runtime = config.paths.runtime
-    values = (
+    values = [
         ("AUDIO_MEMORY_PROFILE", config.profile.value),
         ("AUDIO_MEMORY_DATA_ROOT", str(config.paths.root)),
-        ("AUDIO_MEMORY_MODEL_ROOT", str(config.paths.models)),
         ("AUDIO_MEMORY_KEYCHAIN_SERVICE", config.keychain_service),
         ("AUDIO_MEMORY_PORT", str(config.port)),
         ("AUDIO_MEMORY_RUNTIME_DIR", str(runtime)),
         ("AUDIO_MEMORY_PID_FILE", str(runtime / "audio-memory-dev.pid")),
         ("AUDIO_MEMORY_LOG_FILE", str(runtime / "audio-memory-dev.log")),
-    )
+    ]
+    if config.paths.models_writable:
+        values.insert(2, ("AUDIO_MEMORY_MODEL_ROOT", str(config.paths.models)))
     return tuple(_shell_assignment(name, value) for name, value in values)
 
 

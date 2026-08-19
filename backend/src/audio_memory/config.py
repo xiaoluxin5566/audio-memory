@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import platform
+import errno
 import os
+import platform
+import secrets
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -80,6 +83,167 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     return _path_is_same_or_within(first, second) or _path_is_same_or_within(
         second, first
     )
+
+
+def _directory_open_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | _directory_nofollow_flag()
+
+
+def _directory_nofollow_flag() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise RuntimeConfigurationError(
+            "当前系统不支持安全的 no-follow 目录打开。"
+        )
+    return nofollow
+
+
+def _unsafe_directory_error(path: Path, exc: BaseException | None = None) -> None:
+    error = UnsafeDevelopmentPathError(
+        f"开发可写目录的文件系统身份不安全：{path}"
+    )
+    if exc is None:
+        raise error
+    raise error from exc
+
+
+def _open_absolute_directory(path: Path, *, create: bool) -> int | None:
+    """Open a directory chain without following symlinks at any component."""
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    current_fd = os.open(absolute.anchor, _directory_open_flags())
+    traversed = Path(absolute.anchor)
+    try:
+        for component in absolute.parts[1:]:
+            traversed /= component
+            try:
+                next_fd = os.open(
+                    component, _directory_open_flags(), dir_fd=current_fd
+                )
+            except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(
+                        component, _directory_open_flags(), dir_fd=current_fd
+                    )
+                except OSError as exc:
+                    _unsafe_directory_error(traversed, exc)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    _unsafe_directory_error(traversed, exc)
+                raise
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _open_directory_at(
+    root_fd: int, parts: tuple[str, ...], *, create: bool
+) -> int | None:
+    current_fd = os.dup(root_fd)
+    try:
+        for component in parts:
+            try:
+                next_fd = os.open(
+                    component, _directory_open_flags(), dir_fd=current_fd
+                )
+            except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(
+                        component, _directory_open_flags(), dir_fd=current_fd
+                    )
+                except OSError as exc:
+                    _unsafe_directory_error(Path(*parts), exc)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    _unsafe_directory_error(Path(*parts), exc)
+                raise
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _reject_unsafe_writable_entries(
+    directory_fd: int,
+    location: Path,
+    *,
+    model_cache_exception: Path | None = None,
+    _allow_symlinks: bool = False,
+) -> None:
+    """Reject aliases inside a tree intended to be development-only writable."""
+    try:
+        entries = list(os.scandir(directory_fd))
+    except OSError as exc:
+        _unsafe_directory_error(location, exc)
+    for entry in entries:
+        entry_location = location / entry.name
+        try:
+            metadata = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            _unsafe_directory_error(entry_location, exc)
+        if stat.S_ISLNK(metadata.st_mode):
+            if _allow_symlinks:
+                assert model_cache_exception is not None
+                try:
+                    resolved_target = entry_location.resolve(strict=False)
+                except (OSError, RuntimeError) as exc:
+                    _unsafe_directory_error(entry_location, exc)
+                if not _path_is_same_or_within(
+                    resolved_target, model_cache_exception.resolve(strict=False)
+                ):
+                    raise UnsafeDevelopmentPathError(
+                        "开发模型缓存符号链接必须保持在独立模型根内："
+                        f"{entry_location}"
+                    )
+                continue
+            raise UnsafeDevelopmentPathError(
+                f"开发可写资源不能是符号链接：{entry_location}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UnsafeDevelopmentPathError(
+                    f"开发可写资源必须是普通文件或目录：{entry_location}"
+                )
+            if metadata.st_nlink > 1:
+                raise UnsafeDevelopmentPathError(
+                    f"开发可写资源不能是硬链接：{entry_location}"
+                )
+            continue
+        try:
+            child_fd = os.open(
+                entry.name, _directory_open_flags(), dir_fd=directory_fd
+            )
+        except OSError as exc:
+            _unsafe_directory_error(entry_location, exc)
+        try:
+            _reject_unsafe_writable_entries(
+                child_fd,
+                entry_location,
+                model_cache_exception=model_cache_exception,
+                _allow_symlinks=(
+                    _allow_symlinks or entry_location == model_cache_exception
+                ),
+            )
+        finally:
+            os.close(child_fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +509,19 @@ class RuntimeConfig:
                     "开发模型目录必须位于开发数据目录中。"
                 )
 
+        data_root_fd = _open_absolute_directory(self.paths.root, create=False)
+        if data_root_fd is not None:
+            try:
+                _reject_unsafe_writable_entries(
+                    data_root_fd,
+                    self.paths.root,
+                    model_cache_exception=(
+                        self.paths.models if self.paths.models_writable else None
+                    ),
+                )
+            finally:
+                os.close(data_root_fd)
+
     @staticmethod
     def _path_value(
         values: Mapping[str, str], name: str, default: Path
@@ -357,6 +534,462 @@ class RuntimeConfig:
         else:
             raw_path = Path(raw_value.strip())
         return raw_path.expanduser().resolve()
+
+
+class PinnedDevelopmentRoot:
+    """A no-follow, identity-pinned boundary for development filesystem writes."""
+
+    def __init__(self, config: RuntimeConfig, root_fd: int) -> None:
+        self.config = config
+        self.root_fd = root_fd
+        metadata = os.fstat(root_fd)
+        self._identity = (metadata.st_dev, metadata.st_ino)
+        self._closed = False
+
+    @classmethod
+    def open(
+        cls, config: RuntimeConfig, *, create: bool
+    ) -> "PinnedDevelopmentRoot | None":
+        if config.profile is not AppProfile.DEVELOPMENT:
+            raise RuntimeConfigurationError(
+                "只能为 development 运行配置固定可写边界。"
+            )
+        # This validation must precede even directory creation.
+        config.validate_development_isolation()
+        root_fd = _open_absolute_directory(config.paths.root, create=create)
+        if root_fd is None:
+            return None
+        boundary = cls(config, root_fd)
+        try:
+            boundary.verify()
+        except BaseException:
+            boundary.close()
+            raise
+        return boundary
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        os.close(self.root_fd)
+
+    def __enter__(self) -> "PinnedDevelopmentRoot":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        if self._closed:
+            raise RuntimeConfigurationError("开发可写边界已关闭。")
+        self.config.validate_development_isolation()
+        self._verify_root_identity()
+        _reject_unsafe_writable_entries(
+            self.root_fd,
+            self.config.paths.root,
+            model_cache_exception=(
+                self.config.paths.models
+                if self.config.paths.models_writable
+                else None
+            ),
+        )
+        self._verify_root_identity()
+
+    def _verify_root_identity(self) -> None:
+        try:
+            path_metadata = os.lstat(self.config.paths.root)
+        except OSError as exc:
+            _unsafe_directory_error(self.config.paths.root, exc)
+        if (
+            not stat.S_ISDIR(path_metadata.st_mode)
+            or (path_metadata.st_dev, path_metadata.st_ino) != self._identity
+        ):
+            _unsafe_directory_error(self.config.paths.root)
+
+    def open_directory(self, directory: Path, *, create: bool) -> int | None:
+        self._verify_root_identity()
+        relative_parts = self._relative_parts(directory)
+        opened = _open_directory_at(
+            self.root_fd, relative_parts, create=create
+        )
+        try:
+            self._verify_root_identity()
+        except BaseException:
+            if opened is not None:
+                os.close(opened)
+            raise
+        return opened
+
+    def open_regular_file(
+        self,
+        path: Path,
+        flags: int,
+        *,
+        mode: int = 0o600,
+        create_parents: bool = False,
+    ) -> int:
+        """Open a development file relative to the pinned root without aliases."""
+        self._verify_root_identity()
+        relative_parts = self._relative_parts(path)
+        if not relative_parts:
+            raise UnsafeDevelopmentPathError("开发普通文件不能是数据根目录。")
+        parent_fd = _open_directory_at(
+            self.root_fd, relative_parts[:-1], create=create_parents
+        )
+        if parent_fd is None:
+            raise FileNotFoundError(path.parent)
+        try:
+            requested_truncate = bool(flags & os.O_TRUNC)
+            fd = os.open(
+                relative_parts[-1],
+                (flags & ~os.O_TRUNC) | _directory_nofollow_flag(),
+                mode,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            os.close(parent_fd)
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                _unsafe_directory_error(path, exc)
+            raise
+        os.close(parent_fd)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UnsafeDevelopmentPathError(
+                    f"开发可写资源必须是普通文件：{path}"
+                )
+            if metadata.st_nlink > 1:
+                raise UnsafeDevelopmentPathError(
+                    f"开发可写资源不能是硬链接：{path}"
+                )
+            if requested_truncate:
+                os.ftruncate(fd, 0)
+            self._verify_root_identity()
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def create_directory(self, directory: Path) -> None:
+        self._verify_root_identity()
+        relative_parts = self._relative_parts(directory)
+        if not relative_parts:
+            raise UnsafeDevelopmentPathError("开发数据根目录已存在。")
+        parent_fd = _open_directory_at(
+            self.root_fd, relative_parts[:-1], create=False
+        )
+        if parent_fd is None:
+            raise FileNotFoundError(directory.parent)
+        try:
+            os.mkdir(relative_parts[-1], mode=0o700, dir_fd=parent_fd)
+            directory_fd = os.open(
+                relative_parts[-1],
+                _directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+            os.close(directory_fd)
+            self._verify_root_identity()
+        finally:
+            os.close(parent_fd)
+
+    def ensure_regular_file(self, path: Path) -> tuple[int, int]:
+        fd = self.open_regular_file(
+            path,
+            os.O_RDWR | os.O_CREAT,
+            create_parents=True,
+        )
+        try:
+            metadata = os.fstat(fd)
+            return metadata.st_dev, metadata.st_ino
+        finally:
+            os.close(fd)
+
+    def verify_regular_file(
+        self, path: Path, identity: tuple[int, int] | None = None
+    ) -> tuple[int, int]:
+        fd = self.open_regular_file(path, os.O_RDWR)
+        try:
+            metadata = os.fstat(fd)
+            current = (metadata.st_dev, metadata.st_ino)
+            if identity is not None and current != identity:
+                raise UnsafeDevelopmentPathError(
+                    f"开发可写文件的文件系统身份已变化：{path}"
+                )
+            return current
+        finally:
+            os.close(fd)
+
+    def write_text_atomic(self, path: Path, content: str) -> None:
+        self.write_bytes_atomic(path, content.encode("utf-8"))
+
+    def write_bytes_atomic(self, path: Path, content: bytes) -> None:
+        relative_parts = self._relative_parts(path)
+        if not relative_parts:
+            raise UnsafeDevelopmentPathError("开发写入目标不能是数据根目录。")
+        self._verify_root_identity()
+        parent_fd = _open_directory_at(
+            self.root_fd, relative_parts[:-1], create=True
+        )
+        assert parent_fd is not None
+        temporary_name = (
+            f".{relative_parts[-1]}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        )
+        temporary_fd: int | None = None
+        try:
+            self._validate_destination_at(parent_fd, relative_parts[-1], path)
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _directory_nofollow_flag(),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(temporary_fd, "wb", closefd=True) as handle:
+                temporary_fd = None
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._validate_destination_at(parent_fd, relative_parts[-1], path)
+            os.replace(
+                temporary_name,
+                relative_parts[-1],
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            self._verify_root_identity()
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            os.close(parent_fd)
+
+    def unlink_file(self, path: Path, *, missing_ok: bool = False) -> None:
+        self._verify_root_identity()
+        relative_parts = self._relative_parts(path)
+        if not relative_parts:
+            raise UnsafeDevelopmentPathError("不能删除开发数据根目录。")
+        parent_fd = _open_directory_at(
+            self.root_fd, relative_parts[:-1], create=False
+        )
+        if parent_fd is None:
+            if missing_ok:
+                return
+            raise FileNotFoundError(path)
+        try:
+            try:
+                metadata = os.stat(
+                    relative_parts[-1], dir_fd=parent_fd, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                if missing_ok:
+                    return
+                raise
+            self._validate_regular_metadata(path, metadata)
+            os.unlink(relative_parts[-1], dir_fd=parent_fd)
+            self._verify_root_identity()
+        finally:
+            os.close(parent_fd)
+
+    def replace_file(self, source: Path, destination: Path) -> None:
+        self._verify_root_identity()
+        source_parts = self._relative_parts(source)
+        destination_parts = self._relative_parts(destination)
+        if not source_parts or not destination_parts:
+            raise UnsafeDevelopmentPathError("开发文件移动不能使用数据根目录。")
+        source_parent = _open_directory_at(
+            self.root_fd, source_parts[:-1], create=False
+        )
+        if source_parent is None:
+            raise FileNotFoundError(source)
+        destination_parent = _open_directory_at(
+            self.root_fd, destination_parts[:-1], create=True
+        )
+        assert destination_parent is not None
+        try:
+            source_metadata = os.stat(
+                source_parts[-1],
+                dir_fd=source_parent,
+                follow_symlinks=False,
+            )
+            self._validate_regular_metadata(source, source_metadata)
+            self._validate_destination_at(
+                destination_parent, destination_parts[-1], destination
+            )
+            os.replace(
+                source_parts[-1],
+                destination_parts[-1],
+                src_dir_fd=source_parent,
+                dst_dir_fd=destination_parent,
+            )
+            self._verify_root_identity()
+        finally:
+            os.close(destination_parent)
+            os.close(source_parent)
+
+    def clear_directory_contents(self, path: Path) -> None:
+        directory_fd = self.open_directory(path, create=True)
+        assert directory_fd is not None
+        try:
+            self._clear_directory_fd(directory_fd, path)
+            self._verify_root_identity()
+        finally:
+            os.close(directory_fd)
+
+    def read_text(self, path: Path) -> str:
+        fd = self.open_regular_file(path, os.O_RDONLY)
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=True) as handle:
+            return handle.read()
+
+    def read_bytes(self, path: Path) -> bytes:
+        fd = self.open_regular_file(path, os.O_RDONLY)
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            return handle.read()
+
+    def regular_file_size(self, path: Path) -> int:
+        fd = self.open_regular_file(path, os.O_RDONLY)
+        try:
+            return os.fstat(fd).st_size
+        finally:
+            os.close(fd)
+
+    def regular_file_exists(self, path: Path) -> bool:
+        try:
+            fd = self.open_regular_file(path, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        os.close(fd)
+        return True
+
+    def list_regular_files(
+        self,
+        directory: Path,
+        *,
+        prefix: str = "",
+        suffix: str = "",
+    ) -> tuple[Path, ...]:
+        directory_fd = self.open_directory(directory, create=False)
+        if directory_fd is None:
+            return ()
+        try:
+            found: list[Path] = []
+            for entry in os.scandir(directory_fd):
+                if not entry.name.startswith(prefix) or not entry.name.endswith(suffix):
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+                entry_path = directory / entry.name
+                self._validate_regular_metadata(entry_path, metadata)
+                found.append(entry_path)
+            return tuple(sorted(found))
+        finally:
+            os.close(directory_fd)
+
+    def remove_directory_tree(
+        self, path: Path, *, missing_ok: bool = False
+    ) -> None:
+        self._verify_root_identity()
+        relative_parts = self._relative_parts(path)
+        if not relative_parts:
+            raise UnsafeDevelopmentPathError("不能删除开发数据根目录。")
+        parent_fd = _open_directory_at(
+            self.root_fd, relative_parts[:-1], create=False
+        )
+        if parent_fd is None:
+            if missing_ok:
+                return
+            raise FileNotFoundError(path)
+        try:
+            try:
+                metadata = os.stat(
+                    relative_parts[-1],
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                if missing_ok:
+                    return
+                raise
+            if not stat.S_ISDIR(metadata.st_mode):
+                _unsafe_directory_error(path)
+            try:
+                directory_fd = os.open(
+                    relative_parts[-1],
+                    _directory_open_flags(),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                _unsafe_directory_error(path, exc)
+            try:
+                self._clear_directory_fd(directory_fd, path)
+            finally:
+                os.close(directory_fd)
+            os.rmdir(relative_parts[-1], dir_fd=parent_fd)
+            self._verify_root_identity()
+        finally:
+            os.close(parent_fd)
+
+    def _relative_parts(self, path: Path) -> tuple[str, ...]:
+        root = Path(os.path.abspath(os.fspath(self.config.paths.root.expanduser())))
+        absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+        try:
+            return absolute.relative_to(root).parts
+        except ValueError as exc:
+            raise UnsafeDevelopmentPathError(
+                "开发可写路径必须位于已固定的数据根目录中。"
+            ) from exc
+
+    def _clear_directory_fd(self, directory_fd: int, path: Path) -> None:
+        for entry in list(os.scandir(directory_fd)):
+            entry_path = path / entry.name
+            metadata = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(
+                    entry.name,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    self._clear_directory_fd(child_fd, entry_path)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(entry.name, dir_fd=directory_fd)
+                continue
+            self._validate_regular_metadata(entry_path, metadata)
+            os.unlink(entry.name, dir_fd=directory_fd)
+
+    @staticmethod
+    def _validate_regular_metadata(path: Path, metadata: os.stat_result) -> None:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise UnsafeDevelopmentPathError(
+                f"开发可写资源必须是普通文件：{path}"
+            )
+        if metadata.st_nlink > 1:
+            raise UnsafeDevelopmentPathError(
+                f"开发可写资源不能是硬链接：{path}"
+            )
+
+    @classmethod
+    def _validate_destination_at(
+        cls, parent_fd: int, name: str, path: Path
+    ) -> None:
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        cls._validate_regular_metadata(path, metadata)
+
+    def ensure_directories(self) -> None:
+        self._verify_root_identity()
+        os.fchmod(self.root_fd, 0o700)
+        for directory in self.config.paths.required_directories:
+            directory_fd = self.open_directory(directory, create=True)
+            assert directory_fd is not None
+            try:
+                os.fchmod(directory_fd, 0o700)
+            finally:
+                os.close(directory_fd)
+        self.verify()
 
 
 def assert_supported_platform() -> None:

@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 
+from audio_memory.config import PinnedDevelopmentRoot
+
 
 PROMPT_SCENES = ("todo", "meeting", "parenting", "content", "growth", "inspiration")
 PACKAGED_DEFAULT_VERSION = 7
@@ -73,8 +75,14 @@ class PromptDocument:
 
 
 class PromptStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        write_boundary: PinnedDevelopmentRoot | None = None,
+    ) -> None:
         self.root = root
+        self.write_boundary = write_boundary
         self._locks = {scene_id: threading.RLock() for scene_id in PROMPT_SCENES}
 
     def initialize(self) -> list[PromptDocument]:
@@ -92,7 +100,7 @@ class PromptStore:
         self._validate_scene(scene_id)
         with self._locks[scene_id]:
             scene_root = self.root / scene_id
-            if not (scene_root / "current.md").exists():
+            if not self._file_exists(scene_root / "current.md"):
                 return self._initialize_scene(scene_id)
             return self._reconcile_existing_scene(scene_id)
 
@@ -111,7 +119,7 @@ class PromptStore:
                 )
             scene_root = self.root / scene_id
             versions = scene_root / "versions"
-            versions.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._mkdir(versions)
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
             self._atomic_write(
                 versions / f"{current.version}-{timestamp}.md", current.content
@@ -132,10 +140,10 @@ class PromptStore:
         with self._locks[scene_id]:
             scene_root = self.root / scene_id
             current_path = scene_root / "current.md"
-            if current_path.exists():
+            if self._file_exists(current_path):
                 return self._reconcile_existing_scene(scene_id)
-            scene_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            (scene_root / "versions").mkdir(mode=0o700, exist_ok=True)
+            self._mkdir(scene_root)
+            self._mkdir(scene_root / "versions")
             default = self._packaged_default(scene_id)
             self._atomic_write(current_path, default)
             self._atomic_write(
@@ -148,10 +156,10 @@ class PromptStore:
         scene_root = self.root / scene_id
         current_path = scene_root / "current.md"
         metadata_path = scene_root / "metadata.json"
-        content = current_path.read_text()
+        content = self._read_text(current_path)
         metadata = (
-            json.loads(metadata_path.read_text())
-            if metadata_path.exists()
+            json.loads(self._read_text(metadata_path))
+            if self._file_exists(metadata_path)
             else {"version": 1}
         )
         version = int(metadata.get("version", 1))
@@ -161,11 +169,11 @@ class PromptStore:
 
         if content_hash in KNOWN_LEGACY_DEFAULT_HASHES[scene_id]:
             versions = scene_root / "versions"
-            versions.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._mkdir(versions)
             archive = versions / (
                 f"{version}-packaged-default-v{PACKAGED_DEFAULT_VERSION}-upgrade.md"
             )
-            if not archive.exists():
+            if not self._file_exists(archive):
                 self._atomic_write(archive, content)
             version += 1
             content = packaged
@@ -213,14 +221,37 @@ class PromptStore:
             separators=(",", ":"),
         )
 
-    @staticmethod
-    def _atomic_write(path: Path, content: str) -> None:
+    def _atomic_write(self, path: Path, content: str) -> None:
+        if self.write_boundary is not None:
+            self.write_boundary.write_text_atomic(path, content)
+            return
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         with temporary.open("w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+
+    def _mkdir(self, path: Path) -> None:
+        if self.write_boundary is None:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            return
+        directory_fd = self.write_boundary.open_directory(path, create=True)
+        assert directory_fd is not None
+        try:
+            os.fchmod(directory_fd, 0o700)
+        finally:
+            os.close(directory_fd)
+
+    def _file_exists(self, path: Path) -> bool:
+        if self.write_boundary is None:
+            return path.exists()
+        return self.write_boundary.regular_file_exists(path)
+
+    def _read_text(self, path: Path) -> str:
+        if self.write_boundary is None:
+            return path.read_text()
+        return self.write_boundary.read_text(path)
 
     @staticmethod
     def _validate_scene(scene_id: str) -> None:
