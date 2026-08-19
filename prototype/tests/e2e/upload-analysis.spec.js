@@ -151,3 +151,91 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
   await expect(page.getByText('third.aac').locator('..')).toContainText('上传完成')
   expect(uploadCalls).toBe(3)
 })
+
+test('active transcription disables adding audio until its report is published', async ({ page }) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const { pathname } = new URL(route.request().url())
+    if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'active' } })
+    if (pathname === '/api/jobs/active') {
+      return route.fulfill({ json: {
+        id: 'job-active',
+        stage: 'transcribing',
+        progress_percent: 42,
+        files: [{ id: 'file-active', original_name: 'current.mp3', size_bytes: 1024, extension: '.mp3', upload_progress: 100 }],
+      } })
+    }
+    if (pathname === '/api/jobs/job-active') {
+      return route.fulfill({ json: { id: 'job-active', stage: 'transcribing', progress_percent: 42 } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+
+  await expect(page.getByText('当前任务完成并生成报告前，不能添加新的音频')).toBeVisible()
+  await expect(page.locator('input[type=file]')).toBeDisabled()
+})
+
+test('refresh during report publication stays locked and shows publishing progress', async ({ page }) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const { pathname } = new URL(route.request().url())
+    if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'active' } })
+    if (pathname === '/api/jobs/active' || pathname === '/api/jobs/job-publishing') {
+      return route.fulfill({ json: {
+        id: 'job-publishing',
+        stage: 'ready_to_commit',
+        analysis_phase: 'running',
+        analysis_detail_phase: 'publishing',
+        files: [{ id: 'file-publishing', original_name: 'current.mp3', size_bytes: 1024, extension: '.mp3', upload_progress: 100 }],
+      } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+
+  await expect(page.getByText('正在发布报告')).toBeVisible()
+  await expect(page.getByText('当前任务完成并生成报告前，不能添加新的音频')).toBeVisible()
+  await expect(page.locator('input[type=file]')).toBeDisabled()
+})
+
+test('clearing history also clears a terminal current task and unlocks uploads', async ({ page }) => {
+  let cleared = false
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history' && request.method() === 'DELETE') {
+      cleared = true
+      return route.fulfill({ status: 204 })
+    }
+    if (pathname === '/api/history') return route.fulfill({ json: cleared ? { days: [] } : completedHistory })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
+    if (pathname === '/api/jobs/active') {
+      return route.fulfill({ json: cleared ? null : {
+        id: 'job-failed', stage: 'failed', error_code: 'provider_unavailable',
+        files: [{ id: 'file-failed', original_name: 'current.mp3', size_bytes: 1024, extension: '.mp3', upload_progress: 100 }],
+      } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+  await expect(page.locator('input[type=file]')).toBeDisabled()
+  await page.getByRole('button', { name: '清除所有历史' }).click()
+  await page.getByRole('button', { name: '永久清除' }).click()
+
+  await expect(page.locator('input[type=file]')).toBeEnabled()
+  await expect(page.getByText('current.mp3')).toBeHidden()
+})

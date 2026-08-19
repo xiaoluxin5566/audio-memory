@@ -101,6 +101,9 @@ async def protect_job_if_enabled(request: Request, job_id: str) -> str:
 
 async def job_view_with_sleep_status(request: Request, job) -> JobView:
     view = JobView.model_validate(job, from_attributes=True)
+    if job.stage == JobStage.READY_TO_COMMIT.value:
+        view.analysis_phase = "running"
+        view.analysis_detail_phase = "publishing"
     if job.stage in {JobStage.ANALYZING.value, JobStage.FAILED.value}:
         async with service_from(request).database.session() as session:
             version = await session.scalar(
@@ -273,7 +276,15 @@ async def snapshot_analysis_request(
 
 @router.post("", status_code=201)
 async def create_job(request: Request) -> JobView:
-    job = await service_from(request).create_job()
+    try:
+        job = await service_from(request).create_job()
+    except UploadError as exc:
+        detail = {"code": exc.code, "message": str(exc)}
+        if exc.job_id is not None:
+            detail["job_id"] = exc.job_id
+        if exc.stage is not None:
+            detail["stage"] = exc.stage
+        raise HTTPException(status_code=409, detail=detail) from exc
     return JobView(id=job.id, stage=job.stage, error_code=job.error_code)
 
 

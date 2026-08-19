@@ -173,6 +173,10 @@ export function App() {
   }
 
   async function addFiles(fileList) {
+    if (state.job && state.job.stage !== 'uploading') {
+      setToast('当前任务完成并生成报告前，不能添加新的音频');
+      return;
+    }
     if (state.providers[state.activeProvider]?.state !== 'available') {
       setProviderOpen(true);
       return;
@@ -269,7 +273,7 @@ export function App() {
     setToast('分析完成，新结果已添加到信息流');
     setAnalysisSettings((current) => ({ ...current, status: 'inactive' }));
   }, [refreshContent]);
-  const watchedJobId = ['transcribing', 'analyzing'].includes(state.job?.stage)
+  const watchedJobId = ['transcribing', 'analyzing', 'ready_to_commit'].includes(state.job?.stage)
     ? state.job.id
     : null;
   useActiveJob(watchedJobId, onJobUpdate, onJobComplete);
@@ -294,6 +298,7 @@ export function App() {
   }
 
   const currentProvider = state.providers[state.activeProvider];
+  const uploadLocked = Boolean(state.job && state.job.stage !== 'uploading');
   return (
     <div className="app-shell">
       <Topbar route={route} onNavigate={navigate} reanalysis={reanalysisView} onReanalyze={openReanalysis} onClear={() => setClearOpen(true)} environment={environment} />
@@ -318,9 +323,9 @@ export function App() {
             </section>
             <section className="panel upload-panel">
               <div className="panel-title"><strong>上传音频</strong><span>{state.upload.files.length ? `${state.upload.files.length} 个文件` : ''}</span></div>
-              <div className={`drop-zone ${currentProvider.state !== 'available' ? 'disabled' : ''}`} onClick={() => currentProvider.state === 'available' ? fileInput.current?.click() : setProviderOpen(true)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(event.dataTransfer.files); }}>
-                <b>拖拽音频到这里，或点击选择</b><span>支持 MP3、AAC</span>
-                <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available'} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
+              <div className={`drop-zone ${currentProvider.state !== 'available' || uploadLocked ? 'disabled' : ''}`} onClick={() => uploadLocked ? undefined : currentProvider.state === 'available' ? fileInput.current?.click() : setProviderOpen(true)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!uploadLocked) addFiles(event.dataTransfer.files); }}>
+                <b>{uploadLocked ? '当前任务完成并生成报告前，不能添加新的音频' : '拖拽音频到这里，或点击选择'}</b><span>{uploadLocked ? '可重试或清除当前任务' : '支持 MP3、AAC'}</span>
+                <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
               </div>
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
               <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
@@ -339,7 +344,7 @@ export function App() {
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
       {sleepPromptOpen && <SleepPreventionPrompt onEnable={enableSleepPreventionAndStart} onContinue={async () => { setSleepPromptOpen(false); await executeStartAnalysis(); }} onClose={() => setSleepPromptOpen(false)} />}
-      {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [] })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
+      {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [], job: null, upload: { files: [], error: '', paused: false } })); setAnalysisSettings((current) => ({ ...current, status: 'inactive' })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
       {toast && <div className="toast" role="status">{toast}</div>}
       </>}
     </div>
@@ -363,7 +368,7 @@ function JobPanel({ job, onRetry, onCancel }) {
   if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
   if (job.stage === 'completed') return null;
   const transcribing = job.stage === 'transcribing';
-  const analysis = job.stage === 'analyzing' ? analysisProgressCopy(job) : null;
+  const analysis = ['analyzing', 'ready_to_commit'].includes(job.stage) ? analysisProgressCopy(job) : null;
   if (job.stage === 'failed' || analysis?.failed) {
     const failure = jobFailureCopy(job);
     return <div className="job-card error"><b>{analysis?.title || failure.title}</b>{job.error_code && <code>{job.error_code}</code>}<p>{analysis?.detail || failure.body}</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>{failure.action}</button></div></div>;
