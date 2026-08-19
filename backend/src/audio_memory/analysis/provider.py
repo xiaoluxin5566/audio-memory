@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.events import request_with_one_repair
+from audio_memory.observability import emit_analysis_event
 from audio_memory.analysis.parser import (
     SceneOutputError,
     parse_autonomous_retrieval_plan,
@@ -366,18 +367,49 @@ class ProviderAnalysisClient:
     ) -> str:
         lock = self._parallel_audit_limit if allow_parallel else self._remote_lock
         async with lock:
-            return await self._generate_serialized(
-                provider_id,
-                system=system,
-                user=user,
-                model_id=model_id,
-                scene_id=scene_id,
-                max_tokens=max_tokens,
-                timeout_seconds=timeout_seconds,
-                segment_count=segment_count,
-                repair_attempted=repair_attempted,
-                thinking_enabled=thinking_enabled,
+            started_at = time.monotonic()
+            resolved_model = model_id or PROVIDER_CONFIGS[provider_id].model_id
+            emit_analysis_event(
+                logger,
+                "analysis.provider.request_started",
+                provider_id=provider_id,
+                model_id=resolved_model,
+                elapsed_ms=0,
+                status="started",
             )
+            try:
+                result = await self._generate_serialized(
+                    provider_id,
+                    system=system,
+                    user=user,
+                    model_id=model_id,
+                    scene_id=scene_id,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                    segment_count=segment_count,
+                    repair_attempted=repair_attempted,
+                    thinking_enabled=thinking_enabled,
+                )
+            except BaseException as error:
+                emit_analysis_event(
+                    logger,
+                    "analysis.provider.request_finished",
+                    provider_id=provider_id,
+                    model_id=resolved_model,
+                    elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                    status="failed",
+                    error=error,
+                )
+                raise
+            emit_analysis_event(
+                logger,
+                "analysis.provider.request_finished",
+                provider_id=provider_id,
+                model_id=resolved_model,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                status="completed",
+            )
+            return result
 
     async def generate_markdown(
         self,
@@ -392,20 +424,51 @@ class ProviderAnalysisClient:
         segment_count: int = 0,
     ) -> str:
         async with self._remote_lock:
-            return await self._generate_serialized(
-                provider_id,
-                system=system,
-                user=user,
-                model_id=model_id,
-                scene_id=scene_id,
-                max_tokens=max_tokens,
-                timeout_seconds=timeout_seconds,
-                segment_count=segment_count,
-                repair_attempted=False,
-                thinking_enabled=True,
-                response_format="text",
-                reasoning_effort="high",
+            started_at = time.monotonic()
+            resolved_model = model_id or PROVIDER_CONFIGS[provider_id].model_id
+            emit_analysis_event(
+                logger,
+                "analysis.provider.request_started",
+                provider_id=provider_id,
+                model_id=resolved_model,
+                elapsed_ms=0,
+                status="started",
             )
+            try:
+                result = await self._generate_serialized(
+                    provider_id,
+                    system=system,
+                    user=user,
+                    model_id=model_id,
+                    scene_id=scene_id,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                    segment_count=segment_count,
+                    repair_attempted=False,
+                    thinking_enabled=True,
+                    response_format="text",
+                    reasoning_effort="high",
+                )
+            except BaseException as error:
+                emit_analysis_event(
+                    logger,
+                    "analysis.provider.request_finished",
+                    provider_id=provider_id,
+                    model_id=resolved_model,
+                    elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                    status="failed",
+                    error=error,
+                )
+                raise
+            emit_analysis_event(
+                logger,
+                "analysis.provider.request_finished",
+                provider_id=provider_id,
+                model_id=resolved_model,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                status="completed",
+            )
+            return result
 
     async def _generate_serialized(
         self,

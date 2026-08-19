@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from hashlib import sha256
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from audio_memory.models import (
     ReanalysisBatch,
     ReanalysisItem,
 )
+from audio_memory.observability import analysis_log_context, emit_analysis_event
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.analysis.pipeline_state import PipelineMetrics
 from audio_memory.reanalysis.preview import (
@@ -225,11 +227,29 @@ class AnalysisTaskCoordinator:
             yield
 
     @asynccontextmanager
-    async def _notify_waiters_on_exit(self):
+    async def _notify_waiters_on_exit(
+        self,
+        *,
+        job_id: str,
+        version_id: str,
+        provider_id: str,
+        model_id: str,
+        started_at: float,
+    ):
         try:
             yield
         finally:
             self._condition.notify_all()
+            emit_analysis_event(
+                logger,
+                "analysis.enqueue.worker_notified",
+                job_id=job_id,
+                analysis_version_id=version_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                status="notified",
+            )
 
     @asynccontextmanager
     async def profile_retry_guard(self):
@@ -255,6 +275,16 @@ class AnalysisTaskCoordinator:
             yield profile_retry_raced
 
     async def _submit(self, request: AnalysisRequest) -> str:
+        started_at = time.monotonic()
+        emit_analysis_event(
+            logger,
+            "analysis.enqueue.started",
+            job_id=request.source_job_id,
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+            elapsed_ms=0,
+            status="started",
+        )
         await self.initialize()
         if not request.source_job_id.strip():
             raise ValueError("source_job_id must not be empty")
@@ -290,10 +320,37 @@ class AnalysisTaskCoordinator:
             pipeline_parameters_json.encode("utf-8")
         ).hexdigest()
         version_id = str(uuid4())
-        async with self._condition, self._notify_waiters_on_exit():
+        async with self._condition, self._notify_waiters_on_exit(
+            job_id=request.source_job_id,
+            version_id=version_id,
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+            started_at=started_at,
+        ):
+            emit_analysis_event(
+                logger,
+                "analysis.enqueue.lock_acquired",
+                job_id=request.source_job_id,
+                provider_id=request.provider_id,
+                model_id=request.model_id,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                status="acquired",
+            )
             async with self.maintenance_guard():
                 try:
                     async with self.database.session() as session:
+                        emit_analysis_event(
+                            logger,
+                            "analysis.enqueue.transaction_started",
+                            job_id=request.source_job_id,
+                            analysis_version_id=version_id,
+                            provider_id=request.provider_id,
+                            model_id=request.model_id,
+                            elapsed_ms=round(
+                                (time.monotonic() - started_at) * 1000
+                            ),
+                            status="started",
+                        )
                         await session.execute(text("BEGIN IMMEDIATE"))
                         existing = await session.scalar(
                             select(AnalysisVersion.id).where(
@@ -433,6 +490,18 @@ class AnalysisTaskCoordinator:
                         if reanalysis_item is not None:
                             reanalysis_item.analysis_version_id = version_id
                         await session.commit()
+                        emit_analysis_event(
+                            logger,
+                            "analysis.enqueue.committed",
+                            job_id=request.source_job_id,
+                            analysis_version_id=version_id,
+                            provider_id=request.provider_id,
+                            model_id=request.model_id,
+                            elapsed_ms=round(
+                                (time.monotonic() - started_at) * 1000
+                            ),
+                            status="committed",
+                        )
                 except IntegrityError as exc:
                     raise AlreadyRunningError(
                         "Analysis is already pending or running for "
@@ -474,6 +543,7 @@ class AnalysisTaskCoordinator:
                             .limit(1)
                         )
                         if row is not None:
+                            lease_expires_at = self._lease_deadline()
                             claimed = await session.execute(
                                 update(AnalysisVersion)
                                 .where(
@@ -483,7 +553,7 @@ class AnalysisTaskCoordinator:
                                 .values(
                                     status="running",
                                     worker_owner_id=self.owner_id,
-                                    lease_expires_at=self._lease_deadline(),
+                                    lease_expires_at=lease_expires_at,
                                 )
                             )
                             if int(claimed.rowcount) != 1:
@@ -499,6 +569,17 @@ class AnalysisTaskCoordinator:
                                     item.status = "running"
                             await session.commit()
                             request = self._request_from_version(row)
+                            emit_analysis_event(
+                                logger,
+                                "analysis.worker.claimed",
+                                job_id=request.source_job_id,
+                                analysis_version_id=row.id,
+                                provider_id=request.provider_id,
+                                model_id=request.model_id,
+                                queue_owner_id=self.owner_id,
+                                lease_expires_at=lease_expires_at,
+                                status="running",
+                            )
                             return row.id, request
                 await self._condition.wait()
 
@@ -577,7 +658,14 @@ class AnalysisTaskCoordinator:
                     )
             heartbeat = asyncio.create_task(self._heartbeat(version_id))
             try:
-                await runner.run(version_id, self.owner_id)
+                with analysis_log_context(
+                    job_id=request.source_job_id,
+                    analysis_version_id=version_id,
+                    provider_id=request.provider_id,
+                    model_id=request.model_id,
+                    queue_owner_id=self.owner_id,
+                ):
+                    await runner.run(version_id, self.owner_id)
             except asyncio.CancelledError:
                 raise
             except Exception:

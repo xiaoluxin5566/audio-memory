@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -204,7 +205,7 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_analysis_submission_failure_preserves_transcript_and_releases_sleep(
-    tmp_path: Path,
+    tmp_path: Path, caplog
 ) -> None:
     database = Database(tmp_path / "analysis-submission-failure.sqlite3")
     await database.create_schema()
@@ -260,6 +261,7 @@ async def test_analysis_submission_failure_preserves_transcript_and_releases_sle
         sleep_prevention=SleepPrevention(),
     )
     request = SimpleNamespace(app=SimpleNamespace(state=state))
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     with pytest.raises(RuntimeError, match="queue insertion failed"):
         await run_pipeline(request, job_id, SimpleNamespace(), sleep_protected=True)
@@ -275,6 +277,17 @@ async def test_analysis_submission_failure_preserves_transcript_and_releases_sle
     assert transcript is not None
     assert transcript.text == "must survive queue failure"
     assert released == [job_id]
+    structured = []
+    for record in caplog.records:
+        try:
+            structured.append(json.loads(record.message))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    assert [item["event"] for item in structured] == [
+        "transcription.completed",
+        "analysis.job.failed",
+    ]
+    assert all("must survive queue failure" not in record.message for record in caplog.records)
     await database.dispose()
 
 

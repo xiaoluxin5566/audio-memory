@@ -607,6 +607,44 @@ async def test_cancel_after_queue_commit_still_wakes_waiting_worker(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_enqueue_and_claim_emit_ordered_structured_events(
+    tmp_path, caplog
+) -> None:
+    database = Database(tmp_path / "queue-events.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-events")
+    coordinator = AnalysisTaskCoordinator(database)
+    caplog.set_level("INFO", logger="uvicorn.error")
+
+    version_id = await coordinator.submit_new_upload(
+        request("job-events", batch_id=None, priority=0)
+    )
+    await coordinator.next_request()
+
+    payloads = []
+    for record in caplog.records:
+        try:
+            payloads.append(json.loads(record.message))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    events = [payload.get("event") for payload in payloads]
+    assert events == [
+        "analysis.enqueue.started",
+        "analysis.enqueue.lock_acquired",
+        "analysis.enqueue.transaction_started",
+        "analysis.enqueue.committed",
+        "analysis.enqueue.worker_notified",
+        "analysis.worker.claimed",
+    ]
+    assert all(payload.get("job_id") == "job-events" for payload in payloads)
+    assert all(payload.get("provider_id") == "kimi" for payload in payloads)
+    assert all(payload.get("model_id") == "kimi-k2.5" for payload in payloads)
+    assert payloads[3]["analysis_version_id"] == version_id
+    assert payloads[-1]["queue_owner_id"] == coordinator.owner_id
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_reanalysis_requires_a_source_batch(tmp_path) -> None:
     database = Database(tmp_path / "history-source-required.sqlite3")
     await database.create_schema()

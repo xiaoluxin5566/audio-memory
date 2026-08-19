@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -13,6 +14,7 @@ from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, AnalysisVersion
+from audio_memory.observability import emit_analysis_event
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
@@ -136,11 +138,21 @@ async def run_pipeline(
     transcription = request.app.state.transcription_service
     engine = request.app.state.whisper_engine
     submitted = False
+    pipeline_started_at = time.monotonic()
     try:
         if resume:
             await transcription.resume_job(job_id, engine)
         else:
             await transcription.run_job(job_id, engine)
+        emit_analysis_event(
+            logger,
+            "transcription.completed",
+            job_id=job_id,
+            provider_id=getattr(analysis_request, "provider_id", None),
+            model_id=getattr(analysis_request, "model_id", None),
+            elapsed_ms=round((time.monotonic() - pipeline_started_at) * 1000),
+            status="completed",
+        )
         try:
             async with asyncio.timeout(ANALYSIS_SUBMISSION_TIMEOUT_SECONDS):
                 await request.app.state.analysis_task_coordinator.submit_new_upload(
@@ -162,6 +174,19 @@ async def run_pipeline(
                         job.stage = JobStage.FAILED.value
                         job.error_code = "model_analysis_failed"
                         await session.commit()
+            if not submitted:
+                emit_analysis_event(
+                    logger,
+                    "analysis.job.failed",
+                    job_id=job_id,
+                    provider_id=getattr(analysis_request, "provider_id", None),
+                    model_id=getattr(analysis_request, "model_id", None),
+                    elapsed_ms=round(
+                        (time.monotonic() - pipeline_started_at) * 1000
+                    ),
+                    status="failed",
+                    error=error,
+                )
             if submitted and not isinstance(error, asyncio.CancelledError):
                 return
             raise
