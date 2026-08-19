@@ -7,6 +7,7 @@ import {
   jobModelDisplayName,
   jobProgressValue,
   orderCards,
+  uploadFailureState,
 } from './store.js';
 import { api } from './api/client.js';
 import { uploadFile } from './api/upload.js';
@@ -175,7 +176,7 @@ export function App() {
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       const localId = crypto.randomUUID();
-      const pending = { id: localId, name: file.name, size: file.size, type: file.name.split('.').pop()?.toUpperCase(), progress: 0, invalid: false };
+      const pending = { id: localId, name: file.name, size: file.size, type: file.name.split('.').pop()?.toUpperCase(), progress: 0, invalid: false, failed: false };
       setState((current) => ({ ...current, upload: { ...current.upload, files: [...current.upload.files, pending], error: '' } }));
       try {
         const uploaded = await uploadFile(jobId, file, { onProgress: (progress) => {
@@ -183,8 +184,9 @@ export function App() {
         } });
         setState((current) => ({ ...current, upload: { ...current.upload, files: current.upload.files.map((item) => item.id === localId ? { ...item, id: uploaded.id, progress: 100, type: uploaded.extension.slice(1).toUpperCase() } : item) } }));
       } catch (error) {
-        if (error.code === 'unsupported_format') pendingUploadFiles.current = files.slice(index + 1);
-        setState((current) => ({ ...current, upload: { files: current.upload.files.map((item) => item.id === localId ? { ...item, id: error.fileId || localId, invalid: true } : item), error: error.message, paused: error.code === 'unsupported_format' } }));
+        const failure = uploadFailureState(error);
+        if (failure.paused) pendingUploadFiles.current = files.slice(index + 1);
+        setState((current) => ({ ...current, upload: { files: current.upload.files.map((item) => item.id === localId ? { ...item, id: error.fileId || localId, ...failure } : item), error: error.message, paused: failure.paused } }));
         break;
       }
     }
@@ -192,7 +194,8 @@ export function App() {
 
   async function removeFile(id) {
     const removedInvalidFile = state.upload.files.some((file) => file.id === id && file.invalid);
-    if (state.job?.id) await api.removeFile(state.job.id, id);
+    const removedLocalFailure = state.upload.files.some((file) => file.id === id && file.failed);
+    if (state.job?.id && !removedLocalFailure) await api.removeFile(state.job.id, id);
     setState((current) => {
       const files = current.upload.files.filter((file) => file.id !== id);
       return { ...current, upload: { files, error: files.some((file) => file.invalid) ? current.upload.error : '', paused: files.some((file) => file.invalid) } };
@@ -341,7 +344,8 @@ function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear }) {
 }
 
 function UploadFile({ file, onRemove }) {
-  return <div className={`upload-file ${file.invalid ? 'invalid' : ''}`}><div className="file-type">{file.type}</div><div className="file-main"><b>{file.name}</b><span>{prettySize(file.size)} · {file.invalid ? '不支持的格式' : file.progress === 100 ? '上传完成' : `上传中 ${file.progress}%`}</span>{!file.invalid && file.progress < 100 && <div className="progress"><i style={{ width: `${file.progress}%` }} /></div>}</div><button className="icon-button" onClick={onRemove} aria-label={`移除 ${file.name}`}>×</button></div>;
+  const status = file.invalid ? '不支持的格式' : file.failed ? '上传失败' : file.progress === 100 ? '上传完成' : `上传中 ${file.progress}%`;
+  return <div className={`upload-file ${file.invalid ? 'invalid' : ''}`}><div className="file-type">{file.type}</div><div className="file-main"><b>{file.name}</b><span>{prettySize(file.size)} · {status}</span>{!file.invalid && !file.failed && file.progress < 100 && <div className="progress"><i style={{ width: `${file.progress}%` }} /></div>}</div><button className="icon-button" onClick={onRemove} aria-label={`移除 ${file.name}`}>×</button></div>;
 }
 
 function JobPanel({ job, onRetry, onCancel }) {

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from audio_memory.runtime_tools import resolve_runtime_tool
+
 
 @dataclass(frozen=True, slots=True)
 class AudioProbe:
@@ -16,7 +18,7 @@ class AudioProbe:
 
 async def probe_audio(path: Path) -> AudioProbe | None:
     process = await asyncio.create_subprocess_exec(
-        "ffprobe",
+        resolve_runtime_tool("ffprobe"),
         "-v",
         "error",
         "-select_streams",

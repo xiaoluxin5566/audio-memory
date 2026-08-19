@@ -67,3 +67,6 @@ def test_start_uses_the_release_virtual_environment_without_shell_path() -> None
 
     assert 'PYTHON="$PROJECT_ROOT/backend/.venv/bin/python"' in script
     assert '"$PYTHON" -m uvicorn' in script
+    assert 'AUDIO_MEMORY_FFMPEG="$PROJECT_ROOT/runtime/ffmpeg/bin/ffmpeg"' in script
+    assert 'AUDIO_MEMORY_FFPROBE="$PROJECT_ROOT/runtime/ffmpeg/bin/ffprobe"' in script
+    assert 'PATH="$PROJECT_ROOT/runtime/ffmpeg/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in script

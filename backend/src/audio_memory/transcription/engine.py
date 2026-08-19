@@ -27,6 +27,7 @@ from audio_memory.diarization.alignment import (
 )
 from audio_memory.diarization.engine import OfflineDiarizationEngine, SpeakerTurn
 from audio_memory.models import JobFile, TempFileManifest, Transcript
+from audio_memory.runtime_tools import resolve_runtime_tool
 from audio_memory.transcription.segments import TranscriptSegment
 from audio_memory.transcription.compact import (
     CompactBatch,
@@ -184,7 +185,7 @@ class VoiceActivityDetector:
         window_samples = int(config.silero_vad.window_size)
         process = subprocess.Popen(
             [
-                "ffmpeg",
+                resolve_runtime_tool("ffmpeg"),
                 "-loglevel",
                 "error",
                 "-i",
@@ -716,7 +717,7 @@ def prepare_compact_wav(source: Path, batch: CompactBatch, target: Path) -> Path
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     completed = subprocess.run(
         [
-            "ffmpeg",
+            resolve_runtime_tool("ffmpeg"),
             "-loglevel",
             "error",
             "-y",
@@ -898,7 +899,7 @@ class SelectiveRefiner:
         end_ms: int,
     ) -> None:
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            resolve_runtime_tool("ffmpeg"),
             "-loglevel",
             "error",
             "-ss",
@@ -1459,7 +1460,7 @@ class MLXWhisperEngine:
     @staticmethod
     async def _normalize(source: Path, target: Path) -> None:
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            resolve_runtime_tool("ffmpeg"),
             "-loglevel",
             "error",
             "-i",
@@ -1487,7 +1488,7 @@ class MLXWhisperEngine:
         target_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
         pattern = target_dir / "chunk-%05d.wav"
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-loglevel", "error", "-i", str(source),
+            resolve_runtime_tool("ffmpeg"), "-loglevel", "error", "-i", str(source),
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
             "-f", "segment", "-segment_time", str(WHISPER_CHUNK_SECONDS),
             "-reset_timestamps", "1", "-y", str(pattern),
@@ -1515,7 +1516,7 @@ class MLXWhisperEngine:
         for index, interval in enumerate(intervals):
             target = target_dir / f"speech-{index:05d}.wav"
             process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
+                resolve_runtime_tool("ffmpeg"),
                 "-loglevel",
                 "error",
                 "-ss",
