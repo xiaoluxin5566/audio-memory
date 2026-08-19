@@ -11,7 +11,7 @@ LABEL="com.audio-memory.local"
 DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_FILE="$DATA_ROOT/runtime/audio-memory.log"
-PYTHON="$CURRENT_ROOT/backend/.venv/bin/python"
+PYTHON="${AUDIO_MEMORY_RUNTIME_PYTHON:-$CURRENT_ROOT/backend/.venv/bin/python}"
 USAGE="用法：audio-memory {start|stop|restart|status|doctor|logs|version}"
 
 require_install() {

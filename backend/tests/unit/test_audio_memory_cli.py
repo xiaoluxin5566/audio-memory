@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -28,6 +29,7 @@ def run_cli(
             "AUDIO_MEMORY_APP_ROOT": str(app_root),
             "AUDIO_MEMORY_DATA_ROOT": str(tmp_path / "data"),
             "AUDIO_MEMORY_NO_OPEN": "1",
+            "AUDIO_MEMORY_RUNTIME_PYTHON": sys.executable,
             **(overrides or {}),
         },
         capture_output=True,
@@ -108,6 +110,7 @@ def test_rendered_launch_agent_preserves_the_production_runtime_contract(
             "AUDIO_MEMORY_APP_ROOT": str(app_root),
             "AUDIO_MEMORY_DATA_ROOT": str(data_root),
             "AUDIO_MEMORY_NO_OPEN": "1",
+            "AUDIO_MEMORY_RUNTIME_PYTHON": sys.executable,
         },
         capture_output=True,
         text=True,
