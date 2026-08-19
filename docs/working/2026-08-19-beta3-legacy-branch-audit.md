@@ -16,6 +16,26 @@
 
 当前 `git branch --no-merged main` 除本审计分支外，正好是以上五个旧分支；没有遗漏其他未合并本地分支。
 
+### 已完全合并到 `main` 的本地历史分支
+
+以下分支均被 `git branch --merged main` 确认为其顶端已被 `main` 包含，没有独有提交，不需要再次迁移代码：
+
+- `codex/adaptive-audit-main-integration`
+- `codex/audio-memory-phase1`
+- `codex/autonomous-day-map`
+- `codex/card-model-provenance`
+- `codex/direct-single-report`
+- `codex/full-release-validation`
+- `codex/glm-report-recovery`
+- `codex/local-fast-v0`
+- `codex/local-fast-v0-1`
+- `codex/release-v0-1-beta`
+- `codex/report-metrics-display`
+- `codex/single-upload-report`
+- `codex/transcription-phase0`
+
+这些分支是首批本地删除候选。删除前仍需检查对应工作树是否干净；`codex/release-v0-1-beta` 指向的发布历史已由不可变标签 `v0.1.0-beta.1`、`v0.1.0-beta.2` 保留，删除本地分支不会删除标签或已发布版本。
+
 ## 1. `codex/analysis-sleep-prevention`
 
 - 分叉点：`85e01ff`
@@ -61,8 +81,9 @@
 - 内容：阿里云与火山 ASR 适配、分块合并、证据清单、事实对比、盲审包、报告生成、CLI 和完整测试。
 - 产品判断：用户当前版本的核心承诺是本地转写；把云 ASR 运行时代码合入 beta.3 会扩大凭据、网络、隐私和维护面，不符合本次稳定性目标。
 - 价值判断：评测方法、事实审计原则、清单 schema、已验证的错误处理结论具有研究价值。
-- 处置：`retain-as-research-evidence`。后续只迁移一份精简方法/结论文档及必要 schema 说明；不迁移 `audio_memory/transcription/cloud/` 到生产包，不迁移供应商凭据或真实运行产物。
-- 删除门槛：精简证据文档可在当前基线独立阅读并给出原分支/提交引用；确认未来如需复现实验可从标签或归档提交恢复。
+- 处置：`research-evidence-archived`。精简方法与证据边界已迁移至 `docs/research/2026-08-19-cloud-asr-evaluation-archive.md`；不迁移 `audio_memory/transcription/cloud/` 到生产包，不迁移供应商凭据或真实运行产物。
+- 事实边界：该分支没有获授权的真实音频/API 评测结果，不能产生供应商胜负结论；原实现可从提交 `2ee16d9` 恢复。
+- 删除门槛：归档文档通过审查，并再次确认云评测工作树干净。
 
 ## 5. `codex/report-audit-revision-pipeline` 与主工作树
 
