@@ -15,6 +15,10 @@
     <string>__HOME__</string>
     <key>AUDIO_MEMORY_NO_OPEN</key>
     <string>1</string>
+    <key>AUDIO_MEMORY_PROFILE</key>
+    <string>production</string>
+    <key>AUDIO_MEMORY_DATA_ROOT</key>
+    <string>__DATA_ROOT__</string>
     <key>AUDIO_MEMORY_PORT</key>
     <string>__PORT__</string>
   </dict>

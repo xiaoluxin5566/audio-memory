@@ -778,6 +778,81 @@ def test_doctor_exercises_phase_one_release_checks(tmp_path: Path) -> None:
     assert invalid_model.returncode == 1
 
 
+def _write_doctor_fake(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/bash\nset -eu\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_profile_aware_doctor(
+    tmp_path: Path, *, profile: str, port: int, health: str
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    keychain_calls = tmp_path / "keychain-calls"
+    _write_doctor_fake(fake_bin / "curl", 'printf "%s\\n" "$FAKE_HEALTH"')
+    _write_doctor_fake(
+        fake_bin / "security",
+        'printf "security\\n" >> "$FAKE_KEYCHAIN_CALLS"',
+    )
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    model_root = home / "Library" / "Application Support" / "AudioMemory" / "models"
+    data_root.mkdir()
+    model_root.mkdir(parents=True)
+    model_root.chmod(0o500)
+    try:
+        return subprocess.run(
+            ["bash", str(PROJECT_ROOT / "scripts" / "doctor.sh")],
+            cwd=PROJECT_ROOT,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_HEALTH": health,
+                "FAKE_KEYCHAIN_CALLS": str(keychain_calls),
+                "AUDIO_MEMORY_PROFILE": profile,
+                "AUDIO_MEMORY_PORT": str(port),
+                "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        model_root.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("profile", "port", "data_classification"),
+    (("production", 8765, "production"), ("development", 8766, "development")),
+)
+def test_doctor_reports_the_resolved_runtime_profile(
+    tmp_path: Path, profile: str, port: int, data_classification: str
+) -> None:
+    result = _run_profile_aware_doctor(
+        tmp_path,
+        profile=profile,
+        port=port,
+        health=json.dumps({"status": "ok", "profile": profile}),
+    )
+
+    assert f"运行配置：profile={profile} port={port} data={data_classification}" in result.stdout
+    assert "✓ 本地服务健康" in result.stdout
+    if profile == "development":
+        assert not (tmp_path / "keychain-calls").exists()
+
+
+def test_doctor_rejects_a_healthy_response_from_another_profile(tmp_path: Path) -> None:
+    result = _run_profile_aware_doctor(
+        tmp_path,
+        profile="production",
+        port=9123,
+        health='{"status":"ok","profile":"development"}',
+    )
+
+    assert "✗ 本地服务健康" in result.stdout
+
+
 def test_doctor_accepts_huggingface_style_symlinked_whisper_snapshot(
     tmp_path: Path,
 ) -> None:

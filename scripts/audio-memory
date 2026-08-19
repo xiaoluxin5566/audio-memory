@@ -21,7 +21,23 @@ require_install() {
 }
 
 healthy() {
-  curl --silent --fail --max-time 2 "$HEALTH" >/dev/null 2>&1
+  payload="$(curl --silent --fail --max-time 2 "$HEALTH")" || return 1
+  printf '%s' "$payload" | /usr/bin/python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if isinstance(payload, dict)
+    and payload.get("status") == "ok"
+    and payload.get("profile") == "production"
+    else 1
+)
+'
 }
 
 render_launch_agent() {

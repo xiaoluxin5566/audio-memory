@@ -53,12 +53,32 @@ def _development_assignments(*, project_root: Path, home: Path) -> tuple[str, ..
     return tuple(_shell_assignment(name, value) for name, value in values)
 
 
+def _doctor_values(*, project_root: Path, home: Path) -> str:
+    config = RuntimeConfig.from_environment(home=home, project_root=project_root)
+    values = (
+        ("profile", config.profile.value),
+        ("data root", str(config.paths.root)),
+        ("model root", str(config.paths.models)),
+        ("models writable", "1" if config.paths.models_writable else "0"),
+        ("port", str(config.port)),
+    )
+    for name, value in values:
+        if any(character in value for character in ("\t", "\n", "\r", "\x00")):
+            raise RuntimeConfigurationError(
+                f"{name} contains an unsupported control character"
+            )
+    return "\t".join(value for _, value in values)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Resolve Audio Memory runtime settings")
     subparsers = parser.add_subparsers(dest="command", required=True)
     development = subparsers.add_parser("development-env")
     development.add_argument("--project-root", type=Path, required=True)
     development.add_argument("--home", type=Path, required=True)
+    doctor = subparsers.add_parser("doctor-values")
+    doctor.add_argument("--project-root", type=Path, required=True)
+    doctor.add_argument("--home", type=Path, required=True)
     return parser
 
 
@@ -70,13 +90,19 @@ def main() -> int:
                 project_root=arguments.project_root,
                 home=arguments.home,
             )
+            output = "\n".join(assignments)
+        elif arguments.command == "doctor-values":
+            output = _doctor_values(
+                project_root=arguments.project_root,
+                home=arguments.home,
+            )
         else:  # pragma: no cover - argparse enforces the command set
             raise RuntimeConfigurationError("未知的运行配置命令。")
     except RuntimeConfigurationError as exc:
         print(f"启动配置无效：{exc}", file=sys.stderr)
         return 2
 
-    print("\n".join(assignments))
+    print(output)
     return 0
 
 
