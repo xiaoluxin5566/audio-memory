@@ -126,6 +126,24 @@ def test_server_argv_can_use_a_verified_shared_toolchain_python(
     )
 
     assert argv[0] == str(shared_python.resolve())
+
+
+def test_server_argv_preserves_symlinked_shared_virtualenv_python(
+    tmp_path: Path,
+) -> None:
+    interpreter = tmp_path / "runtime" / "python3"
+    interpreter.parent.mkdir()
+    interpreter.write_bytes(b"python")
+    interpreter.chmod(0o755)
+    shared_python = tmp_path / "toolchain" / "bin" / "python"
+    shared_python.parent.mkdir(parents=True)
+    shared_python.symlink_to(interpreter)
+
+    argv = dev_lifecycle._server_argv(
+        REPOSITORY_ROOT, 8766, python_executable=shared_python
+    )
+
+    assert argv[0] == str(shared_python.absolute())
     assert argv[5] == str(REPOSITORY_ROOT / "backend" / "src")
 
 

@@ -104,9 +104,6 @@ def _server_argv(
 ) -> tuple[str, ...]:
     backend_source = project_root / "backend" / "src"
     configured_python = python_executable
-    preserve_local_path = configured_python is None and not os.environ.get(
-        "AUDIO_MEMORY_DEV_PYTHON"
-    )
     if configured_python is None:
         override = os.environ.get("AUDIO_MEMORY_DEV_PYTHON")
         configured_python = (
@@ -122,7 +119,9 @@ def _server_argv(
         resolved_python, os.X_OK
     ):
         raise LifecycleError("开发 Python 运行环境不可执行。")
-    virtualenv_python = configured_python if preserve_local_path else resolved_python
+    # 即使是共享工具链，也必须保留 venv 入口；解析符号链接
+    # 会绕过虚拟环境的 site-packages。
+    virtualenv_python = configured_python.absolute()
     return (
         str(virtualenv_python),
         "-m",
