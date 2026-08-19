@@ -22,8 +22,9 @@ test('provider response exposes GLM and curated model choices to the UI', () => 
     { id: 'glm-4.7-flash', label: '最高性价比' },
   ])
   assert.equal(normalized.providers.glm.modelName, 'glm-5.2')
+  assert.deepEqual(Object.keys(normalized.providers), ['kimi', 'deepseek', 'openai', 'glm'])
   assert.deepEqual(
     configurableProviderEntries(normalized.providers).map(([id]) => id),
-    ['kimi', 'deepseek', 'openai'],
+    ['deepseek', 'kimi', 'openai'],
   )
 })

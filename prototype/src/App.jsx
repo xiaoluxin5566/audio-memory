@@ -575,7 +575,7 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
   const configurableProviders = configurableProviderEntries(state.providers);
   const initialProviderId = state.activeProvider !== 'glm'
     ? state.activeProvider
-    : (configurableProviders[0]?.[0] || 'deepseek');
+    : (state.providers.kimi ? 'kimi' : configurableProviders[0]?.[0] || 'deepseek');
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(
     state.providers[initialProviderId]?.modelName || ''
