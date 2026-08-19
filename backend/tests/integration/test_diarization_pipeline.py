@@ -1538,7 +1538,7 @@ async def test_risk_gate_retains_all_repetitions_without_queue_or_refinement(
     async with database.session() as session:
         resumed = await session.get(AnalysisJob, "job-1")
     assert resumed is not None
-    assert resumed.stage == "analyzing"
+    assert resumed.stage == "transcribing"
     await database.dispose()
 
 

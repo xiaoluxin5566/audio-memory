@@ -74,7 +74,6 @@ class TranscriptionService:
             )
             raise
         self.eta_tracker.clear(job_id)
-        await self._set_stage(job_id, JobStage.ANALYZING)
 
     async def resume_job(self, job_id: str, engine: TranscriptionEngine) -> None:
         self.eta_tracker.clear(job_id)

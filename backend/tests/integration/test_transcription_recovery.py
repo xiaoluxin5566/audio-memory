@@ -10,11 +10,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+import audio_memory.api.jobs as jobs_api
 from audio_memory.db import Database
-from audio_memory.api.jobs import track_transcription
+from audio_memory.api.jobs import run_pipeline, track_transcription
 from audio_memory.diarization.alignment import AlignedTranscriptSegment, Word
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, JobFile, Transcript
+from audio_memory.models import AnalysisJob, AnalysisVersion, JobFile, Transcript
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine, SelectiveRefiner
 from audio_memory.transcription.eta import TranscriptionEtaTracker
@@ -190,14 +191,269 @@ async def test_interrupted_transcription_resumes_without_duplicates(tmp_path: Pa
         interrupted = await session.get(AnalysisJob, job_id)
         assert interrupted.stage == JobStage.INTERRUPTED.value
         assert interrupted.error_code == "transcription_failed"
-    await service.run_job(job_id, engine)
+    await service.resume_job(job_id, engine)
 
     async with database.session() as session:
         rows = list(await session.scalars(Transcript.__table__.select()))
         job = await session.get(AnalysisJob, job_id)
     assert engine.calls == [(file_id, 0), (file_id, 1)]
     assert len(rows) == 3
-    assert job.stage == JobStage.ANALYZING.value
+    assert job.stage == JobStage.TRANSCRIBING.value
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_analysis_submission_failure_preserves_transcript_and_releases_sleep(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "analysis-submission-failure.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="preserved.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="p" * 64,
+                duration_ms=1_000,
+                position=0,
+                temporary_path=str(tmp_path / "preserved.mp3"),
+            )
+        )
+        session.add(
+            Transcript(
+                id=str(uuid4()),
+                job_file_id=file_id,
+                segment_index=0,
+                start_ms=0,
+                end_ms=1_000,
+                text="must survive queue failure",
+                words_json="[]",
+            )
+        )
+        await session.commit()
+
+    class CompletedTranscription:
+        async def run_job(self, _job_id, _engine):
+            return None
+
+    class FailedSubmission:
+        async def submit_new_upload(self, _analysis_request):
+            raise RuntimeError("queue insertion failed")
+
+    released: list[str] = []
+
+    class SleepPrevention:
+        async def release(self, released_job_id):
+            released.append(released_job_id)
+
+    state = SimpleNamespace(
+        transcription_service=CompletedTranscription(),
+        whisper_engine=object(),
+        analysis_task_coordinator=FailedSubmission(),
+        database=database,
+        sleep_prevention=SleepPrevention(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with pytest.raises(RuntimeError, match="queue insertion failed"):
+        await run_pipeline(request, job_id, SimpleNamespace(), sleep_protected=True)
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        transcript = await session.scalar(
+            select(Transcript).where(Transcript.job_file_id == file_id)
+        )
+    assert job is not None
+    assert job.stage == JobStage.FAILED.value
+    assert job.error_code == "model_analysis_failed"
+    assert transcript is not None
+    assert transcript.text == "must survive queue failure"
+    assert released == [job_id]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_analysis_submission_timeout_is_failed_and_releases_sleep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "analysis-submission-timeout.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        await session.commit()
+
+    class CompletedTranscription:
+        async def run_job(self, _job_id, _engine):
+            return None
+
+    class HangingSubmission:
+        async def submit_new_upload(self, _analysis_request):
+            await asyncio.Event().wait()
+
+    released: list[str] = []
+
+    class SleepPrevention:
+        async def release(self, released_job_id):
+            released.append(released_job_id)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                transcription_service=CompletedTranscription(),
+                whisper_engine=object(),
+                analysis_task_coordinator=HangingSubmission(),
+                database=database,
+                sleep_prevention=SleepPrevention(),
+            )
+        )
+    )
+    monkeypatch.setattr(jobs_api, "ANALYSIS_SUBMISSION_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError):
+        await run_pipeline(request, job_id, SimpleNamespace(), sleep_protected=True)
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+    assert job is not None
+    assert (job.stage, job.error_code) == (
+        JobStage.FAILED.value,
+        "model_analysis_failed",
+    )
+    assert released == [job_id]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_analysis_submission_cancellation_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "analysis-submission-cancelled.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        await session.commit()
+    started = asyncio.Event()
+
+    class CompletedTranscription:
+        async def run_job(self, _job_id, _engine):
+            return None
+
+    class HangingSubmission:
+        async def submit_new_upload(self, _analysis_request):
+            started.set()
+            await asyncio.Event().wait()
+
+    released: list[str] = []
+
+    class SleepPrevention:
+        async def release(self, released_job_id):
+            released.append(released_job_id)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                transcription_service=CompletedTranscription(),
+                whisper_engine=object(),
+                analysis_task_coordinator=HangingSubmission(),
+                database=database,
+                sleep_prevention=SleepPrevention(),
+            )
+        )
+    )
+    pipeline = asyncio.create_task(
+        run_pipeline(request, job_id, SimpleNamespace(), sleep_protected=True)
+    )
+    await started.wait()
+    pipeline.cancel()
+    result = await asyncio.gather(pipeline, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert released == [job_id]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+    assert job is not None
+    assert (job.stage, job.error_code) == (
+        JobStage.FAILED.value,
+        "model_analysis_failed",
+    )
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_error_after_commit_keeps_durable_queue_and_sleep_ownership(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "analysis-submission-committed.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        await session.commit()
+
+    class CompletedTranscription:
+        async def run_job(self, _job_id, _engine):
+            return None
+
+    class CommittedSubmission:
+        async def submit_new_upload(self, _analysis_request):
+            async with database.session() as session:
+                session.add(
+                    AnalysisVersion(
+                        id=str(uuid4()),
+                        source_job_id=job_id,
+                        batch_id=None,
+                        provider_id="deepseek",
+                        model_id="deepseek-v4-pro",
+                        credential_generation=1,
+                        prompt_snapshot_json="{}",
+                        profile_snapshot_json="[]",
+                        fixed_rules_hash="x" * 64,
+                        staged_results_json="{}",
+                        status="pending",
+                    )
+                )
+                job = await session.get(AnalysisJob, job_id)
+                assert job is not None
+                job.stage = JobStage.ANALYZING.value
+                await session.commit()
+            raise TimeoutError("response lost after commit")
+
+    released: list[str] = []
+
+    class SleepPrevention:
+        async def release(self, released_job_id):
+            released.append(released_job_id)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                transcription_service=CompletedTranscription(),
+                whisper_engine=object(),
+                analysis_task_coordinator=CommittedSubmission(),
+                database=database,
+                sleep_prevention=SleepPrevention(),
+            )
+        )
+    )
+
+    await run_pipeline(request, job_id, SimpleNamespace(), sleep_protected=True)
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        version = await session.scalar(
+            select(AnalysisVersion).where(AnalysisVersion.source_job_id == job_id)
+        )
+    assert job is not None and job.stage == JobStage.ANALYZING.value
+    assert version is not None and version.status == "pending"
+    assert released == []
     await database.dispose()
 
 

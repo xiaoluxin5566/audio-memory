@@ -12,7 +12,7 @@ from sqlalchemy import select
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisVersion
+from audio_memory.models import AnalysisJob, AnalysisVersion
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
 from audio_memory.uploads.service import UploadError, UploadService
@@ -20,6 +20,7 @@ from audio_memory.uploads.service import UploadError, UploadService
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger("uvicorn.error")
+ANALYSIS_SUBMISSION_TIMEOUT_SECONDS = 30.0
 
 
 class FileView(BaseModel):
@@ -140,9 +141,30 @@ async def run_pipeline(
             await transcription.resume_job(job_id, engine)
         else:
             await transcription.run_job(job_id, engine)
-        await request.app.state.analysis_task_coordinator.submit_new_upload(
-            analysis_request
-        )
+        try:
+            async with asyncio.timeout(ANALYSIS_SUBMISSION_TIMEOUT_SECONDS):
+                await request.app.state.analysis_task_coordinator.submit_new_upload(
+                    analysis_request
+                )
+        except BaseException as error:
+            async with request.app.state.database.session() as session:
+                durable_version_id = await session.scalar(
+                    select(AnalysisVersion.id).where(
+                        AnalysisVersion.source_job_id == job_id,
+                        AnalysisVersion.status.in_(("pending", "running")),
+                    )
+                )
+                if durable_version_id is not None:
+                    submitted = True
+                else:
+                    job = await session.get(AnalysisJob, job_id)
+                    if job is not None:
+                        job.stage = JobStage.FAILED.value
+                        job.error_code = "model_analysis_failed"
+                        await session.commit()
+            if submitted and not isinstance(error, asyncio.CancelledError):
+                return
+            raise
         submitted = True
     finally:
         if sleep_protected and not submitted:

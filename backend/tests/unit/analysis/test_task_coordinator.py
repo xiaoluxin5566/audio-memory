@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 
@@ -564,6 +565,44 @@ async def test_two_coordinators_cannot_claim_the_same_pending_version(tmp_path) 
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_queue_commit_still_wakes_waiting_worker(tmp_path) -> None:
+    database = Database(tmp_path / "cancel-after-commit.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-cancel-after-commit")
+    coordinator = AnalysisTaskCoordinator(database)
+    await coordinator.initialize()
+    item = request("job-cancel-after-commit", batch_id=None, priority=0)
+
+    waiting_worker = asyncio.create_task(coordinator.next_request())
+    await asyncio.sleep(0.05)
+    session_exiting = asyncio.Event()
+
+    class PauseFirstSessionExit:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @asynccontextmanager
+        async def session(self):
+            self.calls += 1
+            call = self.calls
+            async with database.session() as session:
+                yield session
+                if call == 1:
+                    session_exiting.set()
+                    await asyncio.Event().wait()
+
+    coordinator.database = PauseFirstSessionExit()
+    submitting = asyncio.create_task(coordinator.submit_new_upload(item))
+    await asyncio.wait_for(session_exiting.wait(), timeout=1)
+    submitting.cancel()
+    result = await asyncio.gather(submitting, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert await asyncio.wait_for(waiting_worker, timeout=1) == item
     await database.dispose()
 
 

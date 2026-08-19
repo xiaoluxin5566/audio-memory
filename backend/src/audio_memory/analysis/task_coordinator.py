@@ -225,6 +225,13 @@ class AnalysisTaskCoordinator:
             yield
 
     @asynccontextmanager
+    async def _notify_waiters_on_exit(self):
+        try:
+            yield
+        finally:
+            self._condition.notify_all()
+
+    @asynccontextmanager
     async def profile_retry_guard(self):
         """Mark and fence a profile-only rebuild from history deletion."""
         async with self._maintenance_lock:
@@ -283,7 +290,7 @@ class AnalysisTaskCoordinator:
             pipeline_parameters_json.encode("utf-8")
         ).hexdigest()
         version_id = str(uuid4())
-        async with self._condition:
+        async with self._condition, self._notify_waiters_on_exit():
             async with self.maintenance_guard():
                 try:
                     async with self.database.session() as session:
@@ -431,7 +438,6 @@ class AnalysisTaskCoordinator:
                         "Analysis is already pending or running for "
                         f"{request.source_job_id}"
                     ) from exc
-            self._condition.notify_all()
         return version_id
 
     async def next_request(self) -> AnalysisRequest:
