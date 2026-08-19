@@ -11,6 +11,7 @@ LABEL="com.audio-memory.local"
 DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_FILE="$DATA_ROOT/runtime/audio-memory.log"
+PYTHON="${AUDIO_MEMORY_RUNTIME_PYTHON:-$CURRENT_ROOT/backend/.venv/bin/python}"
 USAGE="用法：audio-memory {start|stop|restart|status|doctor|logs|version}"
 
 require_install() {
@@ -21,13 +22,29 @@ require_install() {
 }
 
 healthy() {
-  curl --silent --fail --max-time 2 "$HEALTH" >/dev/null 2>&1
+  payload="$(curl --silent --fail --max-time 2 "$HEALTH")" || return 1
+  printf '%s' "$payload" | "$PYTHON" -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if isinstance(payload, dict)
+    and payload.get("status") == "ok"
+    and payload.get("profile") == "production"
+    else 1
+)
+'
 }
 
 render_launch_agent() {
   mkdir -p "$HOME/Library/LaunchAgents" "$DATA_ROOT/runtime"
   chmod 700 "$DATA_ROOT" "$DATA_ROOT/runtime" 2>/dev/null || true
-  /usr/bin/python3 - "$CURRENT_ROOT/scripts/com.audio-memory.local.plist.template" "$PLIST" "$CURRENT_ROOT" "$DATA_ROOT" "$PORT" "$HOME" <<'PY'
+  "$PYTHON" - "$CURRENT_ROOT/scripts/com.audio-memory.local.plist.template" "$PLIST" "$CURRENT_ROOT" "$DATA_ROOT" "$PORT" "$HOME" <<'PY'
 from pathlib import Path
 import sys
 

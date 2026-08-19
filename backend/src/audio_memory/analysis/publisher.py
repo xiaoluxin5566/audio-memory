@@ -20,7 +20,7 @@ from audio_memory.analysis.native_search import (
 from audio_memory.analysis.todos import reconcile_todos
 from audio_memory.analysis.versions import require_card_version
 from audio_memory.transcript_safety import pending_risk_review_exists
-from audio_memory.config import AppPaths
+from audio_memory.config import AppPaths, PinnedDevelopmentRoot
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import (
@@ -76,10 +76,12 @@ class VersionPublisher:
         database: Database,
         paths: AppPaths | None = None,
         profile_rebuilder: ProfileRebuilder | None = None,
+        write_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         self.database = database
         self.paths = paths
         self.profile_rebuilder = profile_rebuilder or ProfileRebuilder(database)
+        self.write_boundary = write_boundary
 
     async def retry_profile(self, reanalysis_batch_id: str) -> None:
         async with self.database.session() as session:
@@ -319,14 +321,34 @@ class VersionPublisher:
         if self.paths is None or version.batch_id is not None:
             return {}
         destination_root = self.paths.audio / batch_id
-        destination_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.write_boundary is None:
+            destination_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            destination_fd = self.write_boundary.open_directory(
+                destination_root, create=True
+            )
+            assert destination_fd is not None
+            os.close(destination_fd)
         destinations: dict[str, str] = {}
         for source_file in files:
             source = Path(source_file.temporary_path)
             destination = destination_root / f"{source_file.id}{source_file.extension}"
-            if source != destination and source.exists() and not destination.exists():
-                os.replace(source, destination)
-            if not destination.exists():
+            if self.write_boundary is None:
+                if source != destination and source.exists() and not destination.exists():
+                    os.replace(source, destination)
+                destination_exists = destination.exists()
+            else:
+                destination_exists = self.write_boundary.regular_file_exists(
+                    destination
+                )
+                if (
+                    source != destination
+                    and self.write_boundary.regular_file_exists(source)
+                    and not destination_exists
+                ):
+                    self.write_boundary.replace_file(source, destination)
+                    destination_exists = True
+            if not destination_exists:
                 raise FileNotFoundError(f"Missing publication audio: {source}")
             destinations[source_file.id] = str(destination)
         return destinations

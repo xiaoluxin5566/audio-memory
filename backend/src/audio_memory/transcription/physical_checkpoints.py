@@ -2,9 +2,30 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 
+from audio_memory.config import (
+    PinnedDevelopmentRoot,
+    UnsafeDevelopmentPathError,
+)
 from audio_memory.uploads.cleanup import assert_staging_path
+
+
+def _checkpoint_path(
+    path: Path,
+    staging_root: Path,
+    write_boundary: PinnedDevelopmentRoot | None,
+) -> Path:
+    if write_boundary is None:
+        return assert_staging_path(path, staging_root)
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    root = Path(os.path.abspath(os.fspath(staging_root)))
+    if absolute == root or not absolute.is_relative_to(root):
+        raise UnsafeDevelopmentPathError(
+            "开发转录 checkpoint 必须位于 staging 目录中。"
+        )
+    return absolute
 
 
 def physical_checkpoint_fingerprint(
@@ -28,14 +49,14 @@ def save_physical_chunk_checkpoint(
     path: Path,
     *,
     staging_root: Path,
+    write_boundary: PinnedDevelopmentRoot | None = None,
     fingerprint: str,
     part_index: int,
     segments: list[dict[str, object]],
     language: str | None,
     language_confidence: float | None,
 ) -> None:
-    safe_path = assert_staging_path(path, staging_root)
-    safe_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    safe_path = _checkpoint_path(path, staging_root, write_boundary)
     payload = {
         "version": 1,
         "fingerprint": fingerprint,
@@ -44,26 +65,34 @@ def save_physical_chunk_checkpoint(
         "language": language,
         "language_confidence": language_confidence,
     }
-    temporary = assert_staging_path(
-        safe_path.with_suffix(safe_path.suffix + ".tmp"), staging_root
-    )
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
-    temporary.replace(safe_path)
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if write_boundary is not None:
+        write_boundary.write_text_atomic(safe_path, serialized)
+    else:
+        safe_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = assert_staging_path(
+            safe_path.with_suffix(safe_path.suffix + ".tmp"), staging_root
+        )
+        temporary.write_text(serialized, encoding="utf-8")
+        temporary.replace(safe_path)
 
 
 def load_physical_chunk_checkpoint(
     path: Path,
     *,
     staging_root: Path,
+    write_boundary: PinnedDevelopmentRoot | None = None,
     expected_fingerprint: str,
     expected_part_index: int,
 ) -> dict[str, object] | None:
-    safe_path = assert_staging_path(path, staging_root)
+    safe_path = _checkpoint_path(path, staging_root, write_boundary)
     try:
-        payload = json.loads(safe_path.read_text(encoding="utf-8"))
+        serialized = (
+            write_boundary.read_text(safe_path)
+            if write_boundary is not None
+            else safe_path.read_text(encoding="utf-8")
+        )
+        payload = json.loads(serialized)
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):

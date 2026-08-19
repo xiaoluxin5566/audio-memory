@@ -9,6 +9,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
+
+from audio_memory.config import PinnedDevelopmentRoot
 
 
 SESSION_TTL_SECONDS = 24 * 60 * 60
@@ -49,8 +52,10 @@ class LocalSessionSecurity:
         idempotency_ttl_seconds: int = IDEMPOTENCY_TTL_SECONDS,
         max_idempotency_records: int = MAX_IDEMPOTENCY_RECORDS,
         max_live_sessions: int = MAX_LIVE_SESSIONS,
+        write_boundary: PinnedDevelopmentRoot | None = None,
     ) -> None:
         self.storage = storage
+        self.write_boundary = write_boundary
         self.session_ttl_seconds = session_ttl_seconds
         self.idempotency_ttl_seconds = idempotency_ttl_seconds
         self.max_idempotency_records = max_idempotency_records
@@ -63,8 +68,21 @@ class LocalSessionSecurity:
         return self._open_connection()
 
     def _open_connection(self) -> sqlite3.Connection:
-        self.storage.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.storage, timeout=30)
+        if self.write_boundary is None:
+            self.storage.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.storage, timeout=30)
+        else:
+            identity = self.write_boundary.ensure_regular_file(self.storage)
+            connection = sqlite3.connect(
+                f"file:{quote(str(self.storage), safe='/')}?mode=rw",
+                timeout=30,
+                uri=True,
+            )
+            try:
+                self.write_boundary.verify_regular_file(self.storage, identity)
+            except BaseException:
+                connection.close()
+                raise
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")

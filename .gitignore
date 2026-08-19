@@ -1,4 +1,5 @@
 .worktrees/
+/.runtime/
 .DS_Store
 .uv-cache/
 .private-eval/
@@ -11,6 +12,8 @@ prototype/output/
 .env
 .env.*
 /dist/
+/vendor/
+/.ffmpeg-build-cache/
 prototype/node_modules
 prototype/dist/
 prototype/test-results/

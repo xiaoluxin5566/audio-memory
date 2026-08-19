@@ -9,6 +9,7 @@ VERSIONS_ROOT="$APP_ROOT/versions"
 CURRENT_LINK="$APP_ROOT/current"
 DATABASE="$DATA_ROOT/audio-memory.sqlite3"
 CLI_TARGET="$HOME/.local/bin/audio-memory"
+BOOTSTRAP_PYTHON="${AUDIO_MEMORY_BOOTSTRAP_PYTHON:-}"
 
 fail() {
   printf '安装失败：%s\n' "$1" >&2
@@ -17,6 +18,7 @@ fail() {
 
 for required in \
   VERSION \
+  THIRD_PARTY_NOTICES.md \
   backend/pyproject.toml \
   backend/uv.lock \
   prototype/dist/client/index.html \
@@ -24,9 +26,29 @@ for required in \
   scripts/backup_data.py \
   scripts/com.audio-memory.local.plist.template \
   scripts/doctor.sh \
-  scripts/start.sh; do
+  scripts/doctor_checks.py \
+  scripts/runtime_config.py \
+  scripts/start.sh \
+  scripts/verify-ffmpeg-runtime.py \
+  runtime/ffmpeg/bin/ffmpeg \
+  runtime/ffmpeg/bin/ffprobe \
+  runtime/ffmpeg/manifest.json \
+  runtime/ffmpeg/LICENSE.md \
+  runtime/uv/uv; do
   [ -f "$RELEASE_ROOT/$required" ] || fail "发布包缺少 $required"
 done
+
+run_bootstrap_python() {
+  if [ -n "$BOOTSTRAP_PYTHON" ]; then
+    "$BOOTSTRAP_PYTHON" "$@"
+  else
+    UV_CACHE_DIR="$RELEASE_ROOT/.uv-cache" \
+      "$RELEASE_ROOT/runtime/uv/uv" run --no-project --python 3.12 python "$@"
+  fi
+}
+
+run_bootstrap_python "$RELEASE_ROOT/scripts/verify-ffmpeg-runtime.py" \
+  "$RELEASE_ROOT/runtime/ffmpeg"
 
 VERSION="$(tr -d '[:space:]' < "$RELEASE_ROOT/VERSION")"
 case "$VERSION" in
@@ -44,7 +66,7 @@ fi
 if [ -f "$DATABASE" ]; then
   BACKUP_DIR="$DATA_ROOT/backups/$(date '+%Y%m%d-%H%M%S')-$$"
   mkdir -m 700 "$BACKUP_DIR"
-  /usr/bin/python3 "$RELEASE_ROOT/scripts/backup_data.py" \
+  run_bootstrap_python "$RELEASE_ROOT/scripts/backup_data.py" \
     "$DATABASE" "$BACKUP_DIR/audio-memory.sqlite3"
 fi
 
@@ -60,7 +82,11 @@ trap cleanup EXIT INT TERM
 if [ ! -d "$TARGET" ]; then
   mkdir -m 700 "$TEMPORARY"
   cp -R "$RELEASE_ROOT/." "$TEMPORARY/"
-  chmod +x "$TEMPORARY/scripts/audio-memory" "$TEMPORARY/scripts/install-release.sh" "$TEMPORARY/scripts/start.sh" "$TEMPORARY/scripts/doctor.sh"
+  chmod +x "$TEMPORARY/scripts/audio-memory" "$TEMPORARY/scripts/install-release.sh" \
+    "$TEMPORARY/scripts/start.sh" "$TEMPORARY/scripts/doctor.sh" \
+    "$TEMPORARY/scripts/verify-ffmpeg-runtime.py" \
+    "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe" \
+    "$TEMPORARY/runtime/uv/uv"
   if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ]; then
     AUDIO_MEMORY_PREBUILT=1 "$TEMPORARY/scripts/install.sh"
   fi

@@ -1,7 +1,7 @@
 # Audio Memory v0.1.0-beta.1 验证记录
 
-日期：2026-08-18  
-候选分支：`codex/release-v0-1-beta`  
+日期：2026-08-18
+候选分支：`codex/release-v0-1-beta`
 基线：`main` at `07835bc`
 
 ## 已通过
@@ -22,6 +22,7 @@
 - 最终归档的全局命令：在隔离 HOME 与独立端口执行 `audio-memory start/status/stop` 均成功。
 - 最终归档的 HTTP 健康检查：返回 `status=ok`、版本 `0.1.0-beta.1`、平台 `macOS arm64`。
 - macOS LaunchAgent 显式固定安装用户的 HOME，并直接使用发布版本自己的 Python 环境，不依赖终端 PATH。
+- Release 强制包含并校验 Apple Silicon `ffmpeg`/`ffprobe`；运行时优先使用随包路径，不依赖 Homebrew。
 
 ## 当前环境限制
 

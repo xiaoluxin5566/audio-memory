@@ -20,15 +20,19 @@ class FakeSecurityClient:
         self.update_results: list[int] = []
         self.add_results: list[int] = []
         self.update_calls = 0
+        self.service_accounts: list[tuple[str, str]] = []
 
     def read(self, service: str, account: str):
+        self.service_accounts.append((service, account))
         return self.read_result
 
     def update(self, service: str, account: str, value: bytes) -> int:
+        self.service_accounts.append((service, account))
         self.update_calls += 1
         return self.update_results.pop(0)
 
     def add(self, service: str, account: str, value: bytes) -> int:
+        self.service_accounts.append((service, account))
         return self.add_results.pop(0)
 
 
@@ -62,6 +66,40 @@ def test_replace_retries_update_after_concurrent_duplicate_add() -> None:
     repository.replace("deepseek", b"candidate")
 
     assert client.update_calls == 2
+
+
+def test_default_service_is_used_for_every_keychain_operation() -> None:
+    client = FakeSecurityClient()
+    client.update_results = [ERR_SEC_ITEM_NOT_FOUND, ERR_SEC_SUCCESS]
+    client.add_results = [ERR_SEC_DUPLICATE_ITEM]
+    repository = KeychainRepository(client)
+
+    repository.read("kimi")
+    repository.replace("deepseek", b"candidate")
+
+    assert client.service_accounts == [
+        ("Audio Memory", "provider:kimi"),
+        ("Audio Memory", "provider:deepseek"),
+        ("Audio Memory", "provider:deepseek"),
+        ("Audio Memory", "provider:deepseek"),
+    ]
+
+
+def test_injected_service_is_used_for_every_keychain_operation() -> None:
+    client = FakeSecurityClient()
+    client.update_results = [ERR_SEC_ITEM_NOT_FOUND, ERR_SEC_SUCCESS]
+    client.add_results = [ERR_SEC_DUPLICATE_ITEM]
+    repository = KeychainRepository(client, service="Audio Memory Dev")
+
+    repository.read("kimi")
+    repository.replace("deepseek", b"candidate")
+
+    assert client.service_accounts == [
+        ("Audio Memory Dev", "provider:kimi"),
+        ("Audio Memory Dev", "provider:deepseek"),
+        ("Audio Memory Dev", "provider:deepseek"),
+        ("Audio Memory Dev", "provider:deepseek"),
+    ]
 
 
 def test_replace_reports_second_missing_update_as_keychain_unavailable() -> None:

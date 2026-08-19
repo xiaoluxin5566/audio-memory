@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards } from '../src/store.js'
+import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState } from '../src/store.js'
 
 
 test('initial state waits for the runtime autonomous prompt list', () => {
@@ -9,6 +9,16 @@ test('initial state waits for the runtime autonomous prompt list', () => {
   assert.deepEqual(Object.keys(state.prompts), [])
   assert.deepEqual(state.feed, [])
   assert.deepEqual(state.history, [])
+})
+
+
+test('only an unsupported-format response labels an upload as unsupported', () => {
+  assert.deepEqual(uploadFailureState({ code: 'unsupported_format' }), {
+    invalid: true, failed: false, paused: true,
+  })
+  assert.deepEqual(uploadFailureState({ code: 'internal_error' }), {
+    invalid: false, failed: true, paused: false,
+  })
 })
 
 

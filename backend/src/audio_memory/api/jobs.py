@@ -235,7 +235,10 @@ async def upload_file(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UploadError as exc:
-        status = 415 if exc.code == "unsupported_format" else 409
+        status = {
+            "unsupported_format": 415,
+            "audio_runtime_unavailable": 503,
+        }.get(exc.code, 409)
         return JSONResponse(
             status_code=status,
             content={

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,7 +12,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_memory import __version__
-from audio_memory.config import AppPaths, assert_supported_platform
+from audio_memory.config import (
+    AppPaths,
+    AppProfile,
+    PinnedDevelopmentRoot,
+    RuntimeConfig,
+    assert_supported_platform,
+)
 from audio_memory.db import Database, run_migrations
 from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
@@ -56,18 +61,21 @@ from audio_memory.reanalysis.worker import ReanalysisWorker
 
 def create_app(
     *,
+    runtime_config: RuntimeConfig | None = None,
     paths: AppPaths | None = None,
     frontend_dir: Path | None = None,
     local_port: int | None = None,
 ) -> FastAPI:
-    resolved_paths = paths or AppPaths.from_home(Path.home())
-    resolved_port = (
-        local_port
-        if local_port is not None
-        else int(os.environ.get("AUDIO_MEMORY_PORT", "8765"))
+    base_runtime_config = runtime_config or RuntimeConfig.from_environment(
+        home=Path.home(),
+        project_root=Path(__file__).resolve().parents[3],
     )
-    if not 1 <= resolved_port <= 65535:
-        raise ValueError("local_port must be between 1 and 65535")
+    resolved_runtime_config = base_runtime_config.with_overrides(
+        paths=paths,
+        port=local_port,
+    )
+    resolved_paths = resolved_runtime_config.paths
+    resolved_port = resolved_runtime_config.port
     resolved_frontend = frontend_dir or (
         Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
     )
@@ -75,17 +83,44 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         assert_supported_platform()
-        resolved_paths.ensure_directories()
-        instance_lock = InstanceLock(resolved_paths.lock)
-        instance_lock.acquire()
-        app.state.paths = resolved_paths
-        app.state.instance_lock = instance_lock
+        resolved_runtime_config.validate()
+        development_boundary: PinnedDevelopmentRoot | None = None
+        instance_lock: InstanceLock | None = None
         database: Database | None = None
         provider_clients: list[httpx.AsyncClient] = []
         whisper_engine: MLXWhisperEngine | None = None
         try:
-            await asyncio.to_thread(run_migrations, resolved_paths.database)
-            database = Database(resolved_paths.database)
+            if resolved_runtime_config.profile is AppProfile.DEVELOPMENT:
+                development_boundary = PinnedDevelopmentRoot.open(
+                    resolved_runtime_config, create=True
+                )
+                assert development_boundary is not None
+                development_boundary.ensure_directories()
+            else:
+                resolved_paths.ensure_directories()
+            if development_boundary is not None:
+                development_boundary.verify()
+            instance_lock = InstanceLock(
+                resolved_paths.lock,
+                write_boundary=development_boundary,
+            )
+            instance_lock.acquire()
+            app.state.paths = resolved_paths
+            app.state.instance_lock = instance_lock
+            local_security.write_boundary = development_boundary
+            if development_boundary is not None:
+                development_boundary.verify()
+            await asyncio.to_thread(
+                run_migrations,
+                resolved_paths.database,
+                write_boundary=development_boundary,
+            )
+            if development_boundary is not None:
+                development_boundary.verify()
+            database = Database(
+                resolved_paths.database,
+                write_boundary=development_boundary,
+            )
             app.state.database = database
             app.state.settings_repository = AppSettingsRepository(database)
             sleep_prevention = SleepPreventionManager()
@@ -94,16 +129,28 @@ def create_app(
             async def protect_upload(job_id: str) -> None:
                 if await app.state.settings_repository.prevent_sleep_enabled():
                     await sleep_prevention.acquire(job_id)
-            await cleanup_abandoned_uploads(database, resolved_paths.staging)
+            await cleanup_abandoned_uploads(
+                database,
+                resolved_paths.staging,
+                write_boundary=development_boundary,
+            )
             job_events = JobEventBroker()
             app.state.job_events = job_events
             eta_tracker = TranscriptionEtaTracker()
             app.state.eta_tracker = eta_tracker
             app.state.upload_service = UploadService(
-                database, resolved_paths, job_events, eta_tracker=eta_tracker
+                database,
+                resolved_paths,
+                job_events,
+                eta_tracker=eta_tracker,
+                write_boundary=development_boundary,
             )
             whisper_engine = MLXWhisperEngine(
-                database, resolved_paths, eta_tracker=eta_tracker
+                database,
+                resolved_paths,
+                runtime_profile=resolved_runtime_config.profile,
+                eta_tracker=eta_tracker,
+                write_boundary=development_boundary,
             )
             app.state.whisper_engine = whisper_engine
             transcription_service = TranscriptionService(
@@ -114,7 +161,10 @@ def create_app(
             await transcription_service.mark_abandoned_work_interrupted()
             app.state.transcription_service = transcription_service
             app.state.transcription_tasks = {}
-            prompt_store = PromptStore(resolved_paths.prompts)
+            prompt_store = PromptStore(
+                resolved_paths.prompts,
+                write_boundary=development_boundary,
+            )
             await asyncio.to_thread(prompt_store.initialize)
             app.state.prompt_store = prompt_store
             adapters = {
@@ -124,7 +174,9 @@ def create_app(
                 "glm": GLMAdapter(PROVIDER_CONFIGS["glm"]),
             }
             validators = {}
-            keychain_repository = KeychainRepository(MacSecurityClient())
+            keychain_repository = KeychainRepository(
+                MacSecurityClient(), service=resolved_runtime_config.keychain_service
+            )
             for provider_id, config in PROVIDER_CONFIGS.items():
                 client = httpx.AsyncClient(timeout=15.0)
                 provider_clients.append(client)
@@ -142,7 +194,11 @@ def create_app(
             analysis_client = ProviderAnalysisClient(
                 keychain_repository, analysis_http_client
             )
-            analysis_publisher = AnalysisPublisher(database, resolved_paths)
+            analysis_publisher = AnalysisPublisher(
+                database,
+                resolved_paths,
+                write_boundary=development_boundary,
+            )
             analysis_runner = SingleReportRunner(
                 database=database,
                 provider=analysis_client,
@@ -183,15 +239,19 @@ def create_app(
                 database,
                 resolved_paths,
                 RemoteQuestionAnswerer(analysis_client, coordinator),
+                read_boundary=development_boundary,
             )
             app.state.feedback_writer = FeedbackWriter(
-                database, resolved_paths.feedback
+                database,
+                resolved_paths.feedback,
+                write_boundary=development_boundary,
             )
             app.state.history_cleaner = HistoryCleaner(
                 database,
                 resolved_paths.audio,
                 resolved_paths.staging,
                 task_coordinator=analysis_tasks,
+                write_boundary=development_boundary,
             )
             yield
         finally:
@@ -216,12 +276,14 @@ def create_app(
                 await sleep_prevention.close()
             if database is not None:
                 await database.dispose()
-            instance_lock.release()
+            if instance_lock is not None:
+                instance_lock.release()
+            if development_boundary is not None:
+                development_boundary.close()
 
     app = FastAPI(title="Audio Memory", version=__version__, lifespan=lifespan)
-    local_security = LocalSessionSecurity(
-        resolved_paths.runtime / "local-web-security.sqlite3"
-    )
+    app.state.runtime_config = resolved_runtime_config
+    local_security = LocalSessionSecurity(resolved_paths.local_session)
     app.state.local_web_security = local_security
     app.add_middleware(
         LocalWebSecurityMiddleware,
@@ -243,6 +305,7 @@ def create_app(
             "version": __version__,
             "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
             "architecture": platform.machine(),
+            "profile": resolved_runtime_config.profile.value,
         }
 
     if resolved_frontend.is_dir() and (resolved_frontend / "index.html").is_file():
