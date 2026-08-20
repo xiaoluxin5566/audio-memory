@@ -751,6 +751,67 @@ class ReleaseService:
         manifest = ReleaseManifest(1, version, self.repository.head_commit, tuple(selected))
         return manifest, self.store.save_manifest(manifest)
 
+    def preview_integrated_main(
+        self, version: str, feature_ids: list[str]
+    ) -> ReleaseManifest:
+        if self.repository.current_branch != "main" or not self.repository.is_clean:
+            raise GovernanceError("最终候选必须从干净的 main 固化。")
+        if (
+            not FeatureRecord._VERSION.fullmatch(version)
+            or not feature_ids
+            or len(set(feature_ids)) != len(feature_ids)
+        ):
+            raise GovernanceError("候选版本或已集成功能列表无效。")
+        for feature_id in feature_ids:
+            FeatureRecord._validate_feature_id(feature_id)
+        head_commit = self.repository.head_commit
+        return ReleaseManifest(
+            1,
+            version,
+            head_commit,
+            tuple(ReleaseFeature(feature_id, head_commit) for feature_id in feature_ids),
+        )
+
+    def seal_integrated_main(
+        self,
+        version: str,
+        feature_ids: list[str],
+        approval_token: str | None,
+        gate_runner: Callable[[Path], bool],
+    ) -> tuple[ReleaseManifest, Path]:
+        manifest = self.preview_integrated_main(version, feature_ids)
+        if approval_token is None or approval_token != manifest.digest():
+            raise GovernanceError("最终候选未获得摘要精确确认。")
+        if not gate_runner(self.repository.top_level):
+            raise GovernanceError("最终候选全量验收失败。")
+        if (
+            self.repository.current_branch != "main"
+            or not self.repository.is_clean
+            or self.repository.head_commit != manifest.main_commit
+        ):
+            raise GovernanceError("验收期间 main 已变更，请重新生成候选摘要。")
+        path = self.store.save_manifest(manifest)
+        self.store.save_receipt(manifest, manifest.main_commit)
+        return manifest, path
+
+    def records_to_mark_released(
+        self, manifest: ReleaseManifest
+    ) -> tuple[FeatureRecord, ...]:
+        records: list[FeatureRecord] = []
+        for item in manifest.features:
+            if not self.features.store.exists(item.feature_id):
+                continue
+            record = self.features.store.load(item.feature_id)
+            if (
+                record.target_version != manifest.target_version
+                or record.status not in {"merged", "released"}
+            ):
+                raise GovernanceError(
+                    f"功能 {item.feature_id} 的发布状态无效。"
+                )
+            records.append(record)
+        return tuple(records)
+
     def integrate(
         self,
         manifest_path: Path,
@@ -863,6 +924,11 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser = subparsers.add_parser("release-prepare")
     prepare_parser.add_argument("version")
     prepare_parser.add_argument("feature_ids", nargs="+")
+    seal_parser = subparsers.add_parser("release-seal")
+    seal_parser.add_argument("version")
+    seal_parser.add_argument("feature_ids", nargs="+")
+    seal_parser.add_argument("--preview", action="store_true")
+    seal_parser.add_argument("--approve")
     integrate_parser = subparsers.add_parser("release-integrate")
     integrate_parser.add_argument("manifest", type=Path)
     integrate_parser.add_argument("--approve", required=True)
@@ -983,6 +1049,41 @@ def main(argv: list[str] | None = None) -> int:
                 "main_commit": manifest.main_commit,
                 "features": [item.to_dict() for item in manifest.features],
             }, ensure_ascii=False))
+        elif arguments.command == "release-seal":
+            release = ReleaseService(service.repository)
+            if arguments.preview:
+                manifest = release.preview_integrated_main(
+                    arguments.version, arguments.feature_ids
+                )
+                print(json.dumps({
+                    "mode": "read_only_preview",
+                    "candidate_digest": manifest.digest(),
+                    "main_commit": manifest.main_commit,
+                    "features": [item.to_dict() for item in manifest.features],
+                }, ensure_ascii=False))
+            else:
+                controller_root = Path(__file__).resolve().parent.parent
+                gate = controller_root / "scripts/quality-gate.sh"
+
+                def final_gate(checkout: Path) -> bool:
+                    environment = dict(os.environ)
+                    environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
+                    return subprocess.run(
+                        [str(gate)], cwd=checkout, env=environment, check=False
+                    ).returncode == 0
+
+                manifest, path = release.seal_integrated_main(
+                    arguments.version,
+                    arguments.feature_ids,
+                    arguments.approve,
+                    final_gate,
+                )
+                print(json.dumps({
+                    "manifest": str(path),
+                    "candidate_digest": manifest.digest(),
+                    "main_commit": manifest.main_commit,
+                    "features": [item.to_dict() for item in manifest.features],
+                }, ensure_ascii=False))
         elif arguments.command == "release-integrate":
             controller_root = Path(__file__).resolve().parent.parent
             gate = controller_root / "scripts/quality-gate.sh"
@@ -1007,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
             release = ReleaseService(service.repository)
             manifest_path = release.store.manifest_path(arguments.version)
             manifest = release.authorize_build(manifest_path, arguments.approve)
+            release_records = release.records_to_mark_released(manifest)
             environment = dict(os.environ)
             environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
             gate_result = subprocess.run(
@@ -1049,8 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tag", "-a", manifest.target_version,
                 "-m", f"Release {manifest.target_version}",
             )
-            for item in manifest.features:
-                record = release.features.store.load(item.feature_id)
+            for record in release_records:
                 release.features.store.save(replace(
                     record,
                     status="released",

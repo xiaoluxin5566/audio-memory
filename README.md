@@ -1,6 +1,6 @@
 # Audio Memory
 
-当前发布版本：`0.1.0-beta.2`。第一期仅支持 macOS Apple Silicon，属于小范围 Beta，请在重要使用前保留原始音频。
+当前发布版本：`0.1.0-beta.3`。第一期仅支持 macOS Apple Silicon，属于小范围 Beta，请在重要使用前保留原始音频。
 
 Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在本机完成音频上传、MLX Whisper 转写、说话人分段、六场景结构化分析和历史重分析；原始音频不发送给模型厂商。
 
@@ -16,8 +16,8 @@ Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在�
 面向 Beta 用户的 GitHub Release 安装方式：
 
 ```bash
-tar -xzf audio-memory-v0.1.0-beta.2-macos-arm64.tar.gz
-cd audio-memory-v0.1.0-beta.2
+tar -xzf audio-memory-v0.1.0-beta.3-macos-arm64.tar.gz
+cd audio-memory-v0.1.0-beta.3
 ./scripts/install-release.sh
 export PATH="$HOME/.local/bin:$PATH"
 audio-memory start
@@ -49,7 +49,7 @@ audio-memory version
 
 ## 模型配置与隐私
 
-应用固定支持 Kimi、DeepSeek 和 OpenAI。API Key 仅保存在 macOS Keychain；SQLite、Prompt、反馈文件和日志不保存明文 Key。音频、转写、卡片、画像和反馈位于本机 `~/Library/Application Support/AudioMemory`。
+应用支持 DeepSeek、Kimi、OpenAI 和 GLM。API Key 仅保存在 macOS Keychain；SQLite、Prompt、反馈文件和日志不保存明文 Key。音频、转写、卡片、画像和反馈位于本机 `~/Library/Application Support/AudioMemory`。
 
 历史重分析复用已保存的结构化转写，不重复运行 Whisper。待办过期后仅标红并在未完成区优先展示，不会自动完成。
 

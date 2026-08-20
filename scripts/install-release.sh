@@ -57,6 +57,48 @@ esac
 
 mkdir -p "$DATA_ROOT" "$VERSIONS_ROOT" "$DATA_ROOT/backups" "$HOME/.local/bin"
 chmod 700 "$DATA_ROOT" "$APP_ROOT" "$VERSIONS_ROOT" "$DATA_ROOT/backups" "$HOME/.local" "$HOME/.local/bin" 2>/dev/null || true
+INSTALL_LOCK="$APP_ROOT/.install.lock"
+install_lock_owner_is_active() {
+  owner="$1"
+  case "$owner" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$owner" 2>/dev/null
+}
+acquire_install_lock() {
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if run_bootstrap_python -c \
+      'import os, sys; os.symlink(sys.argv[1], sys.argv[2])' \
+      "$$" "$INSTALL_LOCK" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ -L "$INSTALL_LOCK" ] || fail "安装锁状态异常，请检查 $INSTALL_LOCK"
+    observed_owner="$(readlink "$INSTALL_LOCK" 2>/dev/null || true)"
+    if install_lock_owner_is_active "$observed_owner"; then
+      fail "另一个安装任务正在进行，请稍后重试"
+    fi
+    stale_lock="$APP_ROOT/.install.lock.stale.$$.$attempt"
+    if mv "$INSTALL_LOCK" "$stale_lock" 2>/dev/null; then
+      moved_owner="$(readlink "$stale_lock" 2>/dev/null || true)"
+      if [ "$moved_owner" != "$observed_owner" ]; then
+        mv "$stale_lock" "$INSTALL_LOCK" 2>/dev/null || true
+        fail "安装锁在检查期间已变更，请重试"
+      fi
+      rm -f "$stale_lock"
+    fi
+    attempt=$((attempt + 1))
+  done
+  fail "无法获取安装锁，请稍后重试"
+}
+acquire_install_lock
+release_install_lock() {
+  if [ -L "$INSTALL_LOCK" ] && \
+    [ "$(readlink "$INSTALL_LOCK" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$INSTALL_LOCK"
+  fi
+}
+trap release_install_lock EXIT INT TERM
 
 if [ -x "$CURRENT_LINK/scripts/audio-memory" ]; then
   AUDIO_MEMORY_APP_ROOT="$APP_ROOT" AUDIO_MEMORY_DATA_ROOT="$DATA_ROOT" \
@@ -73,9 +115,11 @@ fi
 TARGET="$VERSIONS_ROOT/$VERSION"
 TEMPORARY="$VERSIONS_ROOT/.install-$VERSION-$$"
 CURRENT_TEMP="$APP_ROOT/.current-$$"
+SETUP_MARKER="$TARGET/.release-setup-complete"
 cleanup() {
   rm -rf "$TEMPORARY"
   rm -f "$CURRENT_TEMP"
+  release_install_lock
 }
 trap cleanup EXIT INT TERM
 
@@ -87,17 +131,23 @@ if [ ! -d "$TARGET" ]; then
     "$TEMPORARY/scripts/verify-ffmpeg-runtime.py" \
     "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe" \
     "$TEMPORARY/runtime/uv/uv"
-  if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ]; then
-    AUDIO_MEMORY_PREBUILT=1 "$TEMPORARY/scripts/install.sh"
-  fi
   mv "$TEMPORARY" "$TARGET"
 fi
 
 [ "$(tr -d '[:space:]' < "$TARGET/VERSION")" = "$VERSION" ] || fail "已安装版本校验失败"
+if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ] && [ ! -f "$SETUP_MARKER" ]; then
+  AUDIO_MEMORY_PREBUILT=1 "$TARGET/scripts/install.sh" || \
+    fail "版本运行环境准备失败，当前版本未切换；重新安装会从安全断点继续"
+  SETUP_TEMP="$TARGET/.release-setup-complete.$$"
+  printf '%s\n' "$VERSION" > "$SETUP_TEMP"
+  chmod 600 "$SETUP_TEMP"
+  mv "$SETUP_TEMP" "$SETUP_MARKER"
+fi
 ln -s "$TARGET" "$CURRENT_TEMP"
 mv -h -f "$CURRENT_TEMP" "$CURRENT_LINK"
 ln -sfn "$CURRENT_LINK/scripts/audio-memory" "$CLI_TARGET"
 
+release_install_lock
 trap - EXIT INT TERM
 printf 'Audio Memory %s 已安装。\n' "$VERSION"
 printf '用户数据保留在：%s\n' "$DATA_ROOT"

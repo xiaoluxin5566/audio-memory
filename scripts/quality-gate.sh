@@ -28,8 +28,8 @@ run_backend() {
 }
 
 run_frontend() {
-  (cd "$FEATURE_ROOT/prototype" && "$NODE" --test --test-concurrency=1 tests/*.test.mjs)
   (cd "$FEATURE_ROOT/prototype" && env PATH="$FRONTEND_PATH" "$NPM" run build)
+  (cd "$FEATURE_ROOT/prototype" && "$NODE" --test --test-concurrency=1 tests/*.test.mjs)
 }
 
 run_browser() {
