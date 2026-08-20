@@ -24,11 +24,11 @@ for required in "$PYTEST" "$NODE" "$NPM" "$PLAYWRIGHT"; do
 done
 
 run_backend() {
-  (cd "$FEATURE_ROOT/backend" && "$PYTEST" -q)
+  (cd "$FEATURE_ROOT/backend" && env PYTHONPATH="$FEATURE_ROOT/backend/src" "$PYTEST" -q)
 }
 
 run_frontend() {
-  (cd "$FEATURE_ROOT/prototype" && "$NODE" --test tests/*.test.mjs)
+  (cd "$FEATURE_ROOT/prototype" && "$NODE" --test --test-concurrency=1 tests/*.test.mjs)
   (cd "$FEATURE_ROOT/prototype" && env PATH="$FRONTEND_PATH" "$NPM" run build)
 }
 
@@ -37,7 +37,7 @@ run_browser() {
 }
 
 run_runtime_isolation() {
-  (cd "$FEATURE_ROOT/backend" && "$PYTEST" -q tests/unit/test_feature_runtime.py)
+  (cd "$FEATURE_ROOT/backend" && env PYTHONPATH="$FEATURE_ROOT/backend/src" "$PYTEST" -q tests/unit/test_feature_runtime.py tests/unit/test_integration_runtime.py)
 }
 
 case "$REQUESTED_CHECK" in
