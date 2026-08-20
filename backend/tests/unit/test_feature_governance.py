@@ -495,6 +495,68 @@ def test_release_build_authorization_requires_separate_exact_confirmation(
     assert authorized == manifest
 
 
+def test_integrated_main_seal_requires_exact_digest_and_complete_gate(
+    git_repository: Path,
+) -> None:
+    (git_repository / "VERSION").write_text("0.1.0-beta.3\n", encoding="utf-8")
+    git(git_repository, "add", "VERSION")
+    git(git_repository, "commit", "-m", "set beta 3 version")
+    release = ReleaseService(GitRepository(git_repository))
+    feature_ids = ["analysis-handoff", "interrupted-controls", "toast-center"]
+
+    manifest = release.preview_integrated_main("v0.1.0-beta.3", feature_ids)
+
+    assert [item.feature_id for item in manifest.features] == feature_ids
+    assert {item.tested_commit for item in manifest.features} == {
+        git(git_repository, "rev-parse", "HEAD")
+    }
+    assert not release.store.manifest_path("v0.1.0-beta.3").exists()
+    with pytest.raises(GovernanceError, match="精确确认"):
+        release.seal_integrated_main(
+            "v0.1.0-beta.3", feature_ids, "wrong", lambda _: True
+        )
+    with pytest.raises(GovernanceError, match="全量验收失败"):
+        release.seal_integrated_main(
+            "v0.1.0-beta.3", feature_ids, manifest.digest(), lambda _: False
+        )
+    assert not release.store.manifest_path("v0.1.0-beta.3").exists()
+
+    sealed, path = release.seal_integrated_main(
+        "v0.1.0-beta.3", feature_ids, manifest.digest(), lambda _: True
+    )
+
+    assert sealed == manifest
+    assert release.store.load_manifest(path) == manifest
+    assert release.authorize_build(path, manifest.digest()) == manifest
+
+
+@pytest.mark.parametrize("fault", ["dirty", "not_main", "moved_head"])
+def test_integrated_main_seal_rejects_mutable_source(
+    git_repository: Path, fault: str
+) -> None:
+    (git_repository / "VERSION").write_text("0.1.0-beta.3\n", encoding="utf-8")
+    git(git_repository, "add", "VERSION")
+    git(git_repository, "commit", "-m", "set beta 3 version")
+    release = ReleaseService(GitRepository(git_repository))
+    feature_ids = ["analysis-handoff"]
+    manifest = release.preview_integrated_main("v0.1.0-beta.3", feature_ids)
+    if fault == "dirty":
+        (git_repository / "dirty.txt").write_text("dirty", encoding="utf-8")
+    elif fault == "not_main":
+        git(git_repository, "switch", "-c", "codex/release")
+    else:
+        (git_repository / "later.txt").write_text("later", encoding="utf-8")
+        git(git_repository, "add", "later.txt")
+        git(git_repository, "commit", "-m", "move head")
+
+    with pytest.raises(GovernanceError):
+        release.seal_integrated_main(
+            "v0.1.0-beta.3", feature_ids, manifest.digest(), lambda _: True
+        )
+
+    assert not release.store.manifest_path("v0.1.0-beta.3").exists()
+
+
 @pytest.mark.parametrize("fault", ["dirty", "wrong_version", "tag_exists"])
 def test_release_build_refuses_mutable_or_existing_version(
     git_repository: Path, fault: str

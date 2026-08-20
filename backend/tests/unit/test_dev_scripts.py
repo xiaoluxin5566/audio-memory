@@ -180,6 +180,48 @@ def test_quality_gate_prefers_feature_local_playwright_to_avoid_mixed_versions(
     assert "toolchain-playwright" not in result.stdout
 
 
+def test_frontend_quality_gate_builds_before_tests_that_inspect_dist(
+    tmp_path: Path,
+) -> None:
+    feature = tmp_path / "feature"
+    toolchain = tmp_path / "toolchain"
+    fake_bin = tmp_path / "bin"
+    log = tmp_path / "order.log"
+    (feature / "prototype").mkdir(parents=True)
+    (toolchain / "prototype/node_modules/.bin").mkdir(parents=True)
+    (toolchain / "backend/.venv/bin").mkdir(parents=True)
+    fake_bin.mkdir()
+    write_executable(
+        fake_bin / "node",
+        "printf 'test\\n' >> \"$QUALITY_ORDER_LOG\"",
+    )
+    write_executable(
+        fake_bin / "npm",
+        "printf 'build\\n' >> \"$QUALITY_ORDER_LOG\"",
+    )
+    write_executable(
+        toolchain / "prototype/node_modules/.bin/playwright", "exit 0"
+    )
+    write_executable(toolchain / "backend/.venv/bin/pytest", "exit 0")
+
+    result = subprocess.run(
+        [str(QUALITY_GATE), "frontend"],
+        cwd=feature,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "AUDIO_MEMORY_TOOLCHAIN_ROOT": str(toolchain),
+            "QUALITY_ORDER_LOG": str(log),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == ["build", "test"]
+
+
 def test_server_argv_rejects_untrusted_shared_python(tmp_path: Path) -> None:
     shared_python = tmp_path / "python"
     shared_python.write_bytes(b"not executable")
