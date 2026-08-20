@@ -278,6 +278,55 @@ async def test_invalid_file_pauses_batch_until_removed(job_client, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    [
+        JobStage.TRANSCRIBING.value,
+        JobStage.ANALYZING.value,
+        JobStage.READY_TO_COMMIT.value,
+        JobStage.INTERRUPTED.value,
+        JobStage.FAILED.value,
+    ],
+)
+async def test_non_uploading_job_file_cannot_be_deleted_through_api(
+    job_client, stage
+):
+    client, paths, database = job_client
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    staged_path = paths.staging / job_id / f"{file_id}.mp3"
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path.write_bytes(b"processing audio")
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=stage))
+        session.add(JobFile(
+            id=file_id,
+            job_id=job_id,
+            original_name="processing.mp3",
+            extension=".mp3",
+            mime_type="audio/mpeg",
+            size_bytes=16,
+            sha256="a" * 64,
+            duration_ms=1_000,
+            position=0,
+            temporary_path=str(staged_path),
+        ))
+        await session.commit()
+
+    response = await client.delete(f"/api/jobs/{job_id}/files/{file_id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "file_locked_during_processing",
+        "message": "任务进行中，不能删除音频文件",
+        "stage": stage,
+    }
+    async with database.session() as session:
+        assert await session.get(JobFile, file_id) is not None
+    assert staged_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_duplicate_audio_is_rejected(job_client, tmp_path):
     client, _, _ = job_client
     job_id = (await client.post("/api/jobs")).json()["id"]
@@ -599,6 +648,47 @@ async def test_concurrent_precreated_jobs_cannot_both_enter_transcription(
     errors = [result for result in results if isinstance(result, UploadError)]
     assert len(errors) == 1
     assert errors[0].code == "active_job_locked"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_and_delete_have_one_serialized_winner(job_client):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    staged_path = paths.staging / job_id / f"{file_id}.mp3"
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path.write_bytes(b"processing audio")
+    async with database.session() as session:
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="processing.mp3",
+            extension=".mp3", size_bytes=16, sha256="a" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(staged_path),
+        ))
+        await session.commit()
+    service = client._transport.app.state.upload_service
+
+    started, removed = await asyncio.gather(
+        service.start(job_id, provider_id="deepseek", model_id="deepseek-chat"),
+        service.remove_file(job_id, file_id),
+        return_exceptions=True,
+    )
+
+    outcomes = (started, removed)
+    assert sum(not isinstance(result, BaseException) for result in outcomes) == 1
+    errors = [result for result in outcomes if isinstance(result, UploadError)]
+    assert len(errors) == 1
+    assert errors[0].code in {"empty_batch", "file_locked_during_processing"}
+    async with database.session() as session:
+        persisted_file = await session.get(JobFile, file_id)
+        persisted_job = await session.get(AnalysisJob, job_id)
+    if errors[0].code == "file_locked_during_processing":
+        assert persisted_job.stage == JobStage.TRANSCRIBING.value
+        assert persisted_file is not None
+        assert staged_path.exists()
+    else:
+        assert persisted_job.stage == JobStage.UPLOADING.value
+        assert persisted_file is None
+        assert not staged_path.exists()
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,10 @@ export function uploadFailureState(error) {
   return { invalid: unsupported, failed: !unsupported, paused: unsupported };
 }
 
+export function canRemoveUploadFile(job, _file, starting = false) {
+  return !starting && (!job || job.stage === 'uploading');
+}
+
 export function jobProgressValue(job) {
   const live = job?.live_progress_percent;
   const durable = job?.progress_percent;

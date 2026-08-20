@@ -1,7 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState } from '../src/store.js'
+import { canRemoveUploadFile, createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState } from '../src/store.js'
+
+
+test('only uploading jobs allow individual audio removal', () => {
+  const file = { id: 'file-1', invalid: false, failed: false }
+
+  assert.equal(canRemoveUploadFile({ stage: 'uploading' }, file), true)
+  assert.equal(canRemoveUploadFile({ stage: 'uploading' }, file, true), false)
+  for (const stage of ['transcribing', 'analyzing', 'ready_to_commit', 'interrupted', 'failed']) {
+    assert.equal(canRemoveUploadFile({ stage }, file), false)
+  }
+})
 
 
 test('initial state waits for the runtime autonomous prompt list', () => {
