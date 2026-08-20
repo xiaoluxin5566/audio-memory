@@ -32,6 +32,12 @@ export function canRemoveUploadFile(job, _file, starting = false) {
   return !starting && (!job || job.stage === 'uploading');
 }
 
+export function uploadRemovalBlockMessage(job, starting = false) {
+  return canRemoveUploadFile(job, null, starting)
+    ? ''
+    : '任务进行中，不能删除音频文件';
+}
+
 export function jobProgressValue(job) {
   const live = job?.live_progress_percent;
   const durable = job?.progress_percent;

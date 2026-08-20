@@ -412,6 +412,13 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         )
     if job.provider_id is None or job.model_id is None:
         raise HTTPException(status_code=409, detail="Job has no provider snapshot")
+    try:
+        await service_from(request).ensure_resume_sources_available(job_id)
+    except UploadError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     analysis_request = await snapshot_analysis_request(
         request,
         job_id=job_id,
