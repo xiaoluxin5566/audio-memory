@@ -183,7 +183,7 @@ def test_installer_refuses_an_existing_install_lock_without_mutation(
     result = run_installer(home, data_root, release_root)
 
     assert result.returncode != 0
-    assert "安装锁包含未知文件" in result.stderr
+    assert "安装锁状态异常" in result.stderr
     assert (data_root / "app" / "current").resolve() == existing
     assert not (data_root / "app" / "versions" / "0.1.0-beta.3").exists()
 

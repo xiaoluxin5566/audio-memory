@@ -68,36 +68,24 @@ install_lock_owner_is_active() {
 acquire_install_lock() {
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if mkdir -m 700 "$INSTALL_LOCK" 2>/dev/null; then
-      printf '%s\n' "$$" > "$INSTALL_LOCK/owner"
-      chmod 600 "$INSTALL_LOCK/owner"
+    if run_bootstrap_python -c \
+      'import os, sys; os.symlink(sys.argv[1], sys.argv[2])' \
+      "$$" "$INSTALL_LOCK" >/dev/null 2>&1; then
       return 0
     fi
-    [ -d "$INSTALL_LOCK" ] && [ ! -L "$INSTALL_LOCK" ] || \
-      fail "安装锁状态异常，请检查 $INSTALL_LOCK"
-    owner_wait=1
-    while [ "$owner_wait" -le 20 ] && [ ! -e "$INSTALL_LOCK/owner" ]; do
-      sleep 0.05
-      owner_wait=$((owner_wait + 1))
-    done
-    if [ -e "$INSTALL_LOCK/owner" ] && { [ ! -f "$INSTALL_LOCK/owner" ] || [ -L "$INSTALL_LOCK/owner" ]; }; then
-      fail "安装锁持有者记录异常，请检查 $INSTALL_LOCK"
-    fi
-    unexpected_entry="$(find "$INSTALL_LOCK" -mindepth 1 -maxdepth 1 ! -name owner -print -quit 2>/dev/null || true)"
-    [ -z "$unexpected_entry" ] || fail "安装锁包含未知文件，请检查 $INSTALL_LOCK"
-    observed_owner="$(tr -d '[:space:]' < "$INSTALL_LOCK/owner" 2>/dev/null || true)"
+    [ -L "$INSTALL_LOCK" ] || fail "安装锁状态异常，请检查 $INSTALL_LOCK"
+    observed_owner="$(readlink "$INSTALL_LOCK" 2>/dev/null || true)"
     if install_lock_owner_is_active "$observed_owner"; then
       fail "另一个安装任务正在进行，请稍后重试"
     fi
     stale_lock="$APP_ROOT/.install.lock.stale.$$.$attempt"
     if mv "$INSTALL_LOCK" "$stale_lock" 2>/dev/null; then
-      moved_owner="$(tr -d '[:space:]' < "$stale_lock/owner" 2>/dev/null || true)"
+      moved_owner="$(readlink "$stale_lock" 2>/dev/null || true)"
       if [ "$moved_owner" != "$observed_owner" ]; then
         mv "$stale_lock" "$INSTALL_LOCK" 2>/dev/null || true
         fail "安装锁在检查期间已变更，请重试"
       fi
-      rm -f "$stale_lock/owner"
-      rmdir "$stale_lock"
+      rm -f "$stale_lock"
     fi
     attempt=$((attempt + 1))
   done
@@ -105,10 +93,9 @@ acquire_install_lock() {
 }
 acquire_install_lock
 release_install_lock() {
-  if [ -f "$INSTALL_LOCK/owner" ] && [ ! -L "$INSTALL_LOCK/owner" ] && \
-    [ "$(tr -d '[:space:]' < "$INSTALL_LOCK/owner" 2>/dev/null || true)" = "$$" ]; then
-    rm -f "$INSTALL_LOCK/owner"
-    rmdir "$INSTALL_LOCK" 2>/dev/null || true
+  if [ -L "$INSTALL_LOCK" ] && \
+    [ "$(readlink "$INSTALL_LOCK" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$INSTALL_LOCK"
   fi
 }
 trap release_install_lock EXIT INT TERM
