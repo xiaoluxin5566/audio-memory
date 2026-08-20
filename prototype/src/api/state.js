@@ -102,9 +102,12 @@ export function normalizeProviders(payload) {
 
 
 export function configurableProviderEntries(providers) {
-  return Object.entries(providers).filter(
-    ([providerId]) => !HIDDEN_CONFIGURATION_PROVIDERS.has(providerId),
-  )
+  const displayOrder = new Map([['deepseek', 0], ['kimi', 1]])
+  return Object.entries(providers)
+    .filter(([providerId]) => !HIDDEN_CONFIGURATION_PROVIDERS.has(providerId))
+    .sort(([left], [right]) =>
+      (displayOrder.get(left) ?? Number.MAX_SAFE_INTEGER)
+      - (displayOrder.get(right) ?? Number.MAX_SAFE_INTEGER))
 }
 
 
