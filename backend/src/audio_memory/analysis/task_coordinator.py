@@ -95,6 +95,8 @@ class AnalysisTaskCoordinator:
         self._initialized = False
         self._worker: asyncio.Task[None] | None = None
         self._current_upload_job_id: str | None = None
+        self._current_run_task: asyncio.Task[object] | None = None
+        self._cancelled_upload_job_id: str | None = None
         self._closed = False
         self._reclaim_foreign_on_initialize = reclaim_foreign_on_initialize
         self._on_upload_started = on_upload_started
@@ -629,12 +631,46 @@ class AnalysisTaskCoordinator:
             self._worker = asyncio.create_task(self._work(runner))
 
     async def cancel_new_upload(self, source_job_id: str) -> bool:
-        """Discard unpublished versions when no report worker owns the job."""
+        """Discard a new upload until its atomic publication has begun."""
         await self.initialize()
         async with self._condition:
-            if self._current_upload_job_id == source_job_id:
-                raise AlreadyRunningError("Analysis publication is still running")
             async with self.maintenance_guard():
+                if self._current_upload_job_id == source_job_id:
+                    async with self.database.session() as session:
+                        await session.execute(text("BEGIN IMMEDIATE"))
+                        version = await session.scalar(
+                            select(AnalysisVersion).where(
+                                AnalysisVersion.source_job_id == source_job_id,
+                                AnalysisVersion.batch_id.is_(None),
+                                AnalysisVersion.status == "running",
+                            )
+                        )
+                        try:
+                            checkpoints = (
+                                json.loads(version.pipeline_checkpoints_json or "{}")
+                                if version is not None
+                                else {}
+                            )
+                        except (TypeError, json.JSONDecodeError):
+                            checkpoints = {}
+                        if checkpoints.get("report_phase") not in {
+                            "generating",
+                            "auditing",
+                            "revising",
+                        }:
+                            await session.rollback()
+                            raise AlreadyRunningError(
+                                "报告正在安全发布，完成后将自动展示"
+                            )
+                        version.status = "cancelled"
+                        version.worker_owner_id = None
+                        version.lease_expires_at = None
+                        await session.commit()
+                    self._cancelled_upload_job_id = source_job_id
+                    run_task = self._current_run_task
+                    if run_task is not None:
+                        run_task.cancel()
+                        await asyncio.gather(run_task, return_exceptions=True)
                 async with self.database.session() as session:
                     removed = await session.execute(
                         delete(AnalysisVersion).where(
@@ -704,7 +740,19 @@ class AnalysisTaskCoordinator:
                     model_id=request.model_id,
                     queue_owner_id=self.owner_id,
                 ):
-                    await runner.run(version_id, self.owner_id)
+                    run_task = asyncio.create_task(
+                        runner.run(version_id, self.owner_id)
+                    )
+                    self._current_run_task = run_task
+                    try:
+                        await run_task
+                    except asyncio.CancelledError:
+                        if (
+                            asyncio.current_task().cancelling()
+                            or self._cancelled_upload_job_id
+                            != request.source_job_id
+                        ):
+                            raise
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -755,6 +803,9 @@ class AnalysisTaskCoordinator:
                             request.source_job_id,
                         )
                 self._current_upload_job_id = None
+                self._current_run_task = None
+                if self._cancelled_upload_job_id == request.source_job_id:
+                    self._cancelled_upload_job_id = None
 
     async def _heartbeat(self, version_id: str) -> None:
         while True:

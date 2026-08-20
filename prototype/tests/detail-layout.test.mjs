@@ -243,3 +243,11 @@ test('content inside each major section uses a compact vertical rhythm', () => {
   assert.match(styles, /\.markdown-report \.analysis-key-points,.markdown-report \.analysis-insight-grid,.markdown-report \.analysis-timeline\{[^}]*margin:0 0 4px/);
   assert.match(styles, /\.markdown-report \.analysis-quote\{margin:2px 0 6px/);
 });
+
+test('global toast messages are centered where users can see them', () => {
+  const toastRule = styles.match(/\.toast\{([^}]*)\}/)?.[1] || '';
+  assert.match(toastRule, /left:50%/);
+  assert.match(toastRule, /top:/);
+  assert.doesNotMatch(toastRule, /right:/);
+  assert.doesNotMatch(toastRule, /bottom:/);
+});

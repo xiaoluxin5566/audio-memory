@@ -547,14 +547,6 @@ async def cancel_job(job_id: str, request: Request) -> Response:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if job.stage == JobStage.ANALYZING.value:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "analysis_publication_in_progress",
-                "message": "报告生成已进入发布阶段，完成前不能取消",
-            },
-        )
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
     task = tasks.get(job_id)
     if task is not None:

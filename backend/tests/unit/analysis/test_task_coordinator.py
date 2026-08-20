@@ -368,6 +368,71 @@ async def test_running_upload_cannot_be_discarded_across_publication_boundary(
 
 
 @pytest.mark.asyncio
+async def test_running_upload_can_be_cancelled_before_publication_and_worker_continues(
+    tmp_path, monkeypatch
+) -> None:
+    database = Database(tmp_path / "cancel-before-publication.sqlite3")
+    await database.create_schema()
+    await seed_jobs(database, "job-cancel-audit", "job-after-cancel")
+    monkeypatch.setattr(PromptComposer, "fixed_rules_hash", lambda: "f" * 64)
+    monkeypatch.setattr(
+        PromptComposer,
+        "final_report_prompt_manifest",
+        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+    )
+    auditing = asyncio.Event()
+    cancelled = asyncio.Event()
+    next_completed = asyncio.Event()
+
+    class Runner:
+        async def run(self, version_id: str, _owner_id: str) -> None:
+            async with database.session() as session:
+                version = await session.get(AnalysisVersion, version_id)
+                assert version is not None
+                job_id = version.source_job_id
+                if job_id == "job-cancel-audit":
+                    version.pipeline_checkpoints_json = '{"report_phase":"auditing"}'
+                    await session.commit()
+            if job_id == "job-cancel-audit":
+                auditing.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            else:
+                async with database.session() as session:
+                    version = await session.get(AnalysisVersion, version_id)
+                    assert version is not None
+                    version.status = "completed"
+                    await session.commit()
+                next_completed.set()
+
+    coordinator = AnalysisTaskCoordinator(database)
+    await coordinator.start(Runner())
+    await coordinator.submit_new_upload(
+        request("job-cancel-audit", batch_id=None, priority=0)
+    )
+    await asyncio.wait_for(auditing.wait(), timeout=1)
+
+    assert await coordinator.cancel_new_upload("job-cancel-audit") is True
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    async with database.session() as session:
+        remaining = list(await session.scalars(
+            select(AnalysisVersion).where(
+                AnalysisVersion.source_job_id == "job-cancel-audit"
+            )
+        ))
+    assert remaining == []
+
+    await coordinator.submit_new_upload(
+        request("job-after-cancel", batch_id=None, priority=0)
+    )
+    await asyncio.wait_for(next_completed.wait(), timeout=1)
+    await coordinator.close()
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_instance_locked_fast_restart_reclaims_unexpired_foreign_run(
     tmp_path,
 ) -> None:
