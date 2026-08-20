@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from audio_memory.api.jobs import router
 from audio_memory.config import AppPaths
 from audio_memory.db import Database
-from audio_memory.uploads.service import UploadService
+from audio_memory.uploads.service import UploadError, UploadService
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, JobFile, Transcript
@@ -459,6 +459,146 @@ async def test_active_job_endpoint_returns_latest_recoverable_job(job_client):
     assert response.status_code == 200
     assert response.json()["id"] == latest_id
     assert response.json()["stage"] == JobStage.INTERRUPTED.value
+
+
+@pytest.mark.asyncio
+async def test_active_job_endpoint_keeps_the_prepublication_stage_locked(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.READY_TO_COMMIT.value
+        await session.commit()
+
+    response = await client.get("/api/jobs/active")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == job_id
+    assert response.json()["stage"] == JobStage.READY_TO_COMMIT.value
+    assert response.json()["analysis_phase"] == "running"
+    assert response.json()["analysis_detail_phase"] == "publishing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    [
+        JobStage.TRANSCRIBING.value,
+        JobStage.ANALYZING.value,
+        JobStage.READY_TO_COMMIT.value,
+        JobStage.INTERRUPTED.value,
+        JobStage.FAILED.value,
+    ],
+)
+async def test_create_job_is_blocked_until_the_current_job_publishes_or_is_cleared(
+    job_client, stage
+):
+    client, _, database = job_client
+    active_job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        active_job = await session.get(AnalysisJob, active_job_id)
+        active_job.stage = stage
+        await session.commit()
+
+    response = await client.post("/api/jobs")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "active_job_locked",
+        "message": "当前任务尚未生成报告，请先完成、重试或清除当前任务",
+        "job_id": active_job_id,
+        "stage": stage,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_job_is_allowed_after_the_current_job_publishes(job_client):
+    client, _, database = job_client
+    completed_job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        completed_job = await session.get(AnalysisJob, completed_job_id)
+        completed_job.stage = JobStage.COMPLETED.value
+        await session.commit()
+
+    response = await client.post("/api/jobs")
+
+    assert response.status_code == 201
+    assert response.json()["id"] != completed_job_id
+
+
+@pytest.mark.asyncio
+async def test_precreated_upload_job_cannot_bypass_an_active_transcription(
+    job_client,
+):
+    client, _, database = job_client
+    active_job_id = (await client.post("/api/jobs")).json()["id"]
+    waiting_job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        active_job = await session.get(AnalysisJob, active_job_id)
+        active_job.stage = JobStage.TRANSCRIBING.value
+        await session.commit()
+
+    response = await client.post(
+        f"/api/jobs/{waiting_job_id}/files",
+        files={"file": ("later.mp3", b"not-read", "audio/mpeg")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "active_job_locked"
+
+
+@pytest.mark.asyncio
+async def test_precreated_job_cannot_start_beside_an_active_transcription(
+    job_client,
+):
+    client, _, database = job_client
+    first_job_id = (await client.post("/api/jobs")).json()["id"]
+    second_job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        for position, job_id in enumerate((first_job_id, second_job_id)):
+            session.add(JobFile(
+                id=str(uuid4()), job_id=job_id, original_name=f"{position}.mp3",
+                extension=".mp3", size_bytes=10, sha256=str(position) * 64,
+                duration_ms=1_000, position=0, temporary_path=f"/tmp/{position}.mp3",
+            ))
+        await session.commit()
+    service = client._transport.app.state.upload_service
+    await service.start(first_job_id, provider_id="deepseek", model_id="deepseek-chat")
+
+    with pytest.raises(UploadError) as captured:
+        await service.start(
+            second_job_id, provider_id="deepseek", model_id="deepseek-chat"
+        )
+
+    assert captured.value.code == "active_job_locked"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_precreated_jobs_cannot_both_enter_transcription(
+    job_client,
+):
+    client, _, database = job_client
+    job_ids = [(await client.post("/api/jobs")).json()["id"] for _ in range(2)]
+    async with database.session() as session:
+        for position, job_id in enumerate(job_ids):
+            session.add(JobFile(
+                id=str(uuid4()), job_id=job_id, original_name=f"{position}.mp3",
+                extension=".mp3", size_bytes=10, sha256=str(position) * 64,
+                duration_ms=1_000, position=0, temporary_path=f"/tmp/{position}.mp3",
+            ))
+        await session.commit()
+    service = client._transport.app.state.upload_service
+
+    results = await asyncio.gather(
+        *(service.start(job_id, provider_id="deepseek", model_id="deepseek-chat")
+          for job_id in job_ids),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, BaseException) for result in results) == 1
+    errors = [result for result in results if isinstance(result, UploadError)]
+    assert len(errors) == 1
+    assert errors[0].code == "active_job_locked"
 
 
 @pytest.mark.asyncio

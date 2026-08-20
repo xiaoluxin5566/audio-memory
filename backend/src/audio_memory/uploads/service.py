@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.config import AppPaths, PinnedDevelopmentRoot
@@ -25,13 +25,30 @@ from audio_memory.api.events import JobEventBroker
 
 FORMAT_MESSAGE = "不支持该文件格式，请上传 MP3/AAC 格式文件"
 RUNTIME_MESSAGE = "本地音频组件不可用，请重新安装 Audio Memory"
+UPLOAD_LOCK_STAGES = {
+    JobStage.TRANSCRIBING.value,
+    JobStage.ANALYZING.value,
+    JobStage.READY_TO_COMMIT.value,
+    JobStage.INTERRUPTED.value,
+    JobStage.FAILED.value,
+}
 
 
 class UploadError(RuntimeError):
-    def __init__(self, message: str, *, code: str, file_id: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        file_id: str | None = None,
+        job_id: str | None = None,
+        stage: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.file_id = file_id
+        self.job_id = job_id
+        self.stage = stage
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +101,22 @@ class UploadService:
     async def create_job(self) -> AnalysisJob:
         job = AnalysisJob(id=str(uuid4()), stage=JobStage.UPLOADING.value)
         async with self.database.session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            locked_job = await session.scalar(
+                select(AnalysisJob)
+                .where(
+                    AnalysisJob.stage.in_(UPLOAD_LOCK_STAGES)
+                )
+                .order_by(AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc())
+                .limit(1)
+            )
+            if locked_job is not None:
+                raise UploadError(
+                    "当前任务尚未生成报告，请先完成、重试或清除当前任务",
+                    code="active_job_locked",
+                    job_id=locked_job.id,
+                    stage=locked_job.stage,
+                )
             session.add(job)
             await session.commit()
             await session.refresh(job)
@@ -171,16 +204,10 @@ class UploadService:
             )
 
     async def get_active_job(self) -> UploadJobView | None:
-        recoverable_stages = {
-            JobStage.TRANSCRIBING.value,
-            JobStage.ANALYZING.value,
-            JobStage.INTERRUPTED.value,
-            JobStage.FAILED.value,
-        }
         async with self.database.session() as session:
             job_id = await session.scalar(
                 select(AnalysisJob.id)
-                .where(AnalysisJob.stage.in_(recoverable_stages))
+                .where(AnalysisJob.stage.in_(UPLOAD_LOCK_STAGES))
                 .order_by(AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc())
                 .limit(1)
             )
@@ -197,6 +224,20 @@ class UploadService:
         job = await self._get_job(job_id)
         if job.stage != JobStage.UPLOADING.value:
             raise UploadError("This job no longer accepts files", code="job_locked")
+        async with self.database.session() as session:
+            locked_job = await session.scalar(
+                select(AnalysisJob)
+                .where(AnalysisJob.stage.in_(UPLOAD_LOCK_STAGES))
+                .order_by(AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc())
+                .limit(1)
+            )
+        if locked_job is not None:
+            raise UploadError(
+                "当前任务尚未生成报告，请先完成、重试或清除当前任务",
+                code="active_job_locked",
+                job_id=locked_job.id,
+                stage=locked_job.stage,
+            )
         if job.error_code == "unsupported_format":
             raise UploadError(FORMAT_MESSAGE, code="batch_paused")
 
@@ -267,12 +308,34 @@ class UploadService:
         )
         try:
             async with self.database.session() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                stored_job = await session.get(AnalysisJob, job_id)
+                locked_job = await session.scalar(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.stage.in_(UPLOAD_LOCK_STAGES))
+                    .order_by(
+                        AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc()
+                    )
+                    .limit(1)
+                )
+                if stored_job is None or stored_job.stage != JobStage.UPLOADING.value:
+                    raise UploadError(
+                        "This job no longer accepts files", code="job_locked"
+                    )
+                if locked_job is not None:
+                    raise UploadError(
+                        "当前任务尚未生成报告，请先完成、重试或清除当前任务",
+                        code="active_job_locked",
+                        job_id=locked_job.id,
+                        stage=locked_job.stage,
+                    )
                 session.add(record)
                 if not accepted:
-                    stored_job = await session.get(AnalysisJob, job_id)
-                    if stored_job is not None:
-                        stored_job.error_code = "unsupported_format"
+                    stored_job.error_code = "unsupported_format"
                 await session.commit()
+        except UploadError:
+            await self._remove_manifest_and_file(manifest_id, target)
+            raise
         except IntegrityError as exc:
             await self._remove_manifest_and_file(manifest_id, target)
             raise UploadError("该音频已在本批次中", code="duplicate_file") from exc
@@ -325,7 +388,8 @@ class UploadService:
 
     async def start(self, job_id: str, *, provider_id: str, model_id: str) -> UploadJobView:
         async with self.database.session() as session:
-            async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
                 job = await session.get(AnalysisJob, job_id)
                 if job is None:
                     raise LookupError("Unknown upload job")
@@ -338,9 +402,31 @@ class UploadService:
                     raise UploadError("请先上传音频文件", code="empty_batch")
                 if job.stage != JobStage.UPLOADING.value:
                     raise UploadError("This job has already started", code="job_locked")
+                locked_job = await session.scalar(
+                    select(AnalysisJob)
+                    .where(
+                        AnalysisJob.id != job_id,
+                        AnalysisJob.stage.in_(UPLOAD_LOCK_STAGES),
+                    )
+                    .order_by(
+                        AnalysisJob.updated_at.desc(), AnalysisJob.created_at.desc()
+                    )
+                    .limit(1)
+                )
+                if locked_job is not None:
+                    raise UploadError(
+                        "当前任务尚未生成报告，请先完成、重试或清除当前任务",
+                        code="active_job_locked",
+                        job_id=locked_job.id,
+                        stage=locked_job.stage,
+                    )
                 job.provider_id = provider_id
                 job.model_id = model_id
                 job.stage = JobStage.TRANSCRIBING.value
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
         await self._emit(
             job_id,
             "job.started",

@@ -47,6 +47,7 @@ test('job ETA copy follows transcription and analysis states', () => {
   assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 59 }), '预计不到 1 分钟')
   assert.equal(formatJobEta({ stage: 'transcribing', eta_state: 'ready', eta_seconds: 901 }), '预计还需约 16 分钟')
   assert.equal(formatJobEta({ stage: 'analyzing' }), '正在生成分析结果…')
+  assert.equal(formatJobEta({ stage: 'ready_to_commit' }), '正在安全发布报告…')
 })
 
 
