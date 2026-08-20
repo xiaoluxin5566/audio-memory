@@ -190,6 +190,35 @@ def _wait_owner_stopped(store: RuntimeStore, expected: RuntimeOwner) -> bool:
     return False
 
 
+def spawn_detached_supervisor(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    log_path: Path,
+) -> subprocess.Popen[bytes]:
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    log_fd = os.open(log_path, flags, 0o600)
+    try:
+        metadata = os.fstat(log_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise AcceptanceError("集成验收启动日志必须是单链接普通文件。")
+        return subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            start_new_session=True,
+        )
+    finally:
+        os.close(log_fd)
+
+
 def discover_main_worktree(repository_root: Path, *, listing: str | None = None) -> Path:
     if listing is None:
         result = subprocess.run(
@@ -340,11 +369,64 @@ def status_acceptance(
     }
 
 
+def launch_acceptance(
+    version: str,
+    *,
+    controller_root: Path,
+    git_common_dir: Path,
+) -> int:
+    validated_version = validate_version(version)
+    log_path = (
+        git_common_dir.resolve()
+        / "audio-memory-governance/runtime/integration-acceptance-launch.log"
+    )
+    child = spawn_detached_supervisor(
+        (
+            sys.executable,
+            str(controller_root / "scripts/integration_runtime.py"),
+            "supervise",
+            validated_version,
+        ),
+        cwd=controller_root,
+        environment=dict(os.environ),
+        log_path=log_path,
+    )
+    runtime_store = RuntimeStore(git_common_dir)
+    acceptance_store = AcceptanceStore(git_common_dir)
+    for _ in range(120):
+        if child.poll() is not None:
+            raise AcceptanceError(
+                f"集成验收监督进程在就绪前退出，请查看 {log_path}。"
+            )
+        status = status_acceptance(runtime_store, acceptance_store)
+        if status["running"] and _backend_ready_for_acceptance(validated_version):
+            print(f"{validated_version} 集成验收页面已启动：http://127.0.0.1:5173")
+            return 0
+        time.sleep(0.25)
+    raise AcceptanceError(f"集成验收环境未在 30 秒内就绪，请查看 {log_path}。")
+
+
+def _backend_ready_for_acceptance(version: str) -> bool:
+    try:
+        with urlopen("http://127.0.0.1:8766/api/health", timeout=2) as response:
+            payload = json.loads(response.read())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("status") == "ok"
+        and payload.get("profile") == "development"
+        and payload.get("environment_label") == f"{version} 集成验收"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audio Memory 版本集成验收环境")
     subparsers = parser.add_subparsers(dest="command", required=True)
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("version")
+    supervise_parser = subparsers.add_parser("supervise")
+    supervise_parser.add_argument("version")
     subparsers.add_parser("status")
     subparsers.add_parser("stop")
     arguments = parser.parse_args(argv)
@@ -354,6 +436,12 @@ def main(argv: list[str] | None = None) -> int:
     acceptance_store = AcceptanceStore(git_common_dir)
     try:
         if arguments.command == "start":
+            return launch_acceptance(
+                arguments.version,
+                controller_root=controller_root,
+                git_common_dir=git_common_dir,
+            )
+        if arguments.command == "supervise":
             main_root = discover_main_worktree(controller_root)
             return start_acceptance(
                 arguments.version,
