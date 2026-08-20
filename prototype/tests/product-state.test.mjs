@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { canRemoveUploadFile, createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState } from '../src/store.js'
+import { canRemoveUploadFile, createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState, uploadRemovalBlockMessage } from '../src/store.js'
 
 
 test('only uploading jobs allow individual audio removal', () => {
@@ -12,6 +12,18 @@ test('only uploading jobs allow individual audio removal', () => {
   for (const stage of ['transcribing', 'analyzing', 'ready_to_commit', 'interrupted', 'failed']) {
     assert.equal(canRemoveUploadFile({ stage }, file), false)
   }
+})
+
+test('locked audio removal keeps the button actionable and explains the block', () => {
+  assert.equal(uploadRemovalBlockMessage({ stage: 'uploading' }, false), '')
+  assert.equal(
+    uploadRemovalBlockMessage({ stage: 'transcribing' }, false),
+    '任务进行中，不能删除音频文件',
+  )
+  assert.equal(
+    uploadRemovalBlockMessage({ stage: 'uploading' }, true),
+    '任务进行中，不能删除音频文件',
+  )
 })
 
 

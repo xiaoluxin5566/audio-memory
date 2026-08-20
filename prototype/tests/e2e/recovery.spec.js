@@ -49,6 +49,37 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   expect(resumed).toBe(true)
 })
 
+test('cancelling an interrupted task clears only the current upload state', async ({ page }) => {
+  let cancelled = false
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', state: 'available', active: true }] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: cancelled ? null : {
+      id: 'job-cancel', stage: 'interrupted', error_code: 'transcription_failed',
+      provider_id: 'deepseek', model_id: 'deepseek-chat',
+      files: [{ id: 'file-1', original_name: 'unfinished.mp3', extension: '.mp3', size_bytes: 2048, upload_progress: 100 }],
+    } })
+    if (pathname === '/api/jobs/job-cancel' && request.method() === 'DELETE') {
+      cancelled = true
+      return route.fulfill({ status: 204 })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '取消任务' }).click()
+
+  await expect(page.getByText('unfinished.mp3')).toBeHidden()
+  await expect(page.getByText('拖拽音频到这里，或点击选择')).toBeVisible()
+  expect(cancelled).toBe(true)
+})
+
 for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment', 'analysis_quality_insufficient']) {
   test(`a failed ${errorCode} analysis retries without returning to Whisper`, async ({ page }) => {
     let retried = false

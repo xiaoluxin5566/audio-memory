@@ -10,14 +10,21 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import select
 
+import audio_memory.uploads.service as upload_service_module
 from audio_memory.api.jobs import router
-from audio_memory.config import AppPaths
+from audio_memory.config import AppPaths, PinnedDevelopmentRoot, RuntimeConfig
 from audio_memory.db import Database
 from audio_memory.uploads.service import UploadError, UploadService
-from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
+from audio_memory.uploads.cleanup import (
+    UnsafeCleanupPathError,
+    cleanup_abandoned_uploads,
+    move_staged_directory,
+    remove_staged_entry,
+)
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, JobFile, Transcript
+from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, JobFile, TempFileManifest, Transcript
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
 from audio_memory.prompts.composer import PromptComposer
@@ -60,6 +67,76 @@ class RetryTaskCoordinator:
         )
         self.called.set()
         return SimpleNamespace(id="resumed-version")
+
+
+class CancelTaskCoordinator:
+    async def cancel_new_upload(self, _job_id):
+        return False
+
+
+def test_development_boundary_removes_whisper_chunk_directory(tmp_path):
+    data_root = tmp_path / "project/.runtime/dev"
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_MODEL_ROOT": str(data_root / "models"),
+        },
+    )
+    boundary = PinnedDevelopmentRoot.open(config, create=True)
+    assert boundary is not None
+    try:
+        boundary.ensure_directories()
+        chunks = config.paths.staging / "job-1/file-1.whisper-chunks"
+        boundary.create_directory(chunks.parent)
+        boundary.create_directory(chunks)
+        boundary.write_text_atomic(chunks / "checkpoint.json", "{}")
+
+        remove_staged_entry(
+            chunks,
+            config.paths.staging,
+            write_boundary=boundary,
+        )
+
+        assert not chunks.exists()
+    finally:
+        boundary.close()
+
+
+def test_production_staging_move_refuses_symlinked_job_directory(tmp_path):
+    staging = tmp_path / "staging"
+    other_job = staging / "job-b"
+    other_job.mkdir(parents=True)
+    protected = other_job / "keep.mp3"
+    protected.write_bytes(b"preserve")
+    linked_job = staging / "job-a"
+    linked_job.symlink_to(other_job, target_is_directory=True)
+    quarantine = staging / ".cancelled-job-a"
+
+    with pytest.raises(UnsafeCleanupPathError):
+        move_staged_directory(linked_job, quarantine, staging)
+
+    assert linked_job.is_symlink()
+    assert protected.read_bytes() == b"preserve"
+    assert not quarantine.exists()
+
+
+def test_production_staging_cleanup_refuses_symlinked_quarantine(tmp_path):
+    staging = tmp_path / "staging"
+    other_job = staging / "job-b"
+    other_job.mkdir(parents=True)
+    protected = other_job / "keep.mp3"
+    protected.write_bytes(b"preserve")
+    quarantine = staging / ".cancelled-job-a"
+    quarantine.symlink_to(other_job, target_is_directory=True)
+
+    with pytest.raises(UnsafeCleanupPathError):
+        remove_staged_entry(quarantine, staging)
+
+    assert quarantine.is_symlink()
+    assert protected.read_bytes() == b"preserve"
 
 
 def make_audio(path: Path, codec: str) -> bytes:
@@ -144,7 +221,7 @@ async def test_extension_and_content_must_both_be_supported(job_client):
 async def test_job_api_projects_analysis_phase_from_durable_version(
     job_client, version_status
 ):
-    client, _, database = job_client
+    client, paths, database = job_client
     job_id = str(uuid4())
     async with database.session() as session:
         session.add(
@@ -324,6 +401,184 @@ async def test_non_uploading_job_file_cannot_be_deleted_through_api(
     async with database.session() as session:
         assert await session.get(JobFile, file_id) is not None
     assert staged_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_current_job_removes_chunk_directories_and_preserves_history(
+    job_client,
+):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    source = paths.staging / job_id / f"{file_id}.mp3"
+    chunks = paths.staging / job_id / f"{file_id}.whisper-chunks"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"interrupted audio")
+    chunks.mkdir()
+    (chunks / "checkpoint.json").write_text("{}")
+    historical_job_id = str(uuid4())
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        session.add(AnalysisJob(
+            id=historical_job_id,
+            stage=JobStage.COMPLETED.value,
+        ))
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="interrupted.mp3",
+            extension=".mp3", size_bytes=17, sha256="a" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(source),
+        ))
+        session.add(TempFileManifest(
+            id=str(uuid4()), task_uuid=job_id, file_path=str(chunks),
+        ))
+        await session.commit()
+
+    client._transport.app.state.transcription_tasks = {}
+    client._transport.app.state.analysis_task_coordinator = CancelTaskCoordinator()
+
+    response = await client.delete(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 204
+    async with database.session() as session:
+        assert await session.get(AnalysisJob, job_id) is None
+        assert await session.get(AnalysisJob, historical_job_id) is not None
+    assert not source.exists()
+    assert not chunks.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_current_job_finishes_without_touching_unsafe_manifest_path(
+    job_client,
+):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    source = paths.staging / job_id / f"{file_id}.mp3"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"interrupted audio")
+    protected = paths.root.parent / "must-not-delete.txt"
+    protected.write_text("preserve")
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="interrupted.mp3",
+            extension=".mp3", size_bytes=17, sha256="c" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(source),
+        ))
+        session.add(TempFileManifest(
+            id=str(uuid4()), task_uuid=job_id, file_path=str(protected),
+        ))
+        await session.commit()
+
+    await client._transport.app.state.upload_service.cancel_job(job_id)
+
+    async with database.session() as session:
+        assert await session.get(AnalysisJob, job_id) is None
+    assert protected.read_text() == "preserve"
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_failure_is_persisted_and_retried(
+    job_client, monkeypatch
+):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    file_id = str(uuid4())
+    source = paths.staging / job_id / f"{file_id}.mp3"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"interrupted audio")
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        session.add(JobFile(
+            id=file_id, job_id=job_id, original_name="interrupted.mp3",
+            extension=".mp3", size_bytes=17, sha256="e" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(source),
+        ))
+        await session.commit()
+
+    def fail_final_cleanup(*_args, **_kwargs):
+        raise PermissionError("simulated cleanup failure")
+
+    monkeypatch.setattr(
+        upload_service_module, "remove_staged_entry", fail_final_cleanup
+    )
+    await client._transport.app.state.upload_service.cancel_job(job_id)
+
+    async with database.session() as session:
+        assert await session.get(AnalysisJob, job_id) is None
+        pending = await session.scalar(
+            select(TempFileManifest).where(
+                TempFileManifest.cleanup_status == "cancelled_pending"
+            )
+        )
+        assert pending is not None
+        quarantine = Path(pending.file_path)
+    assert quarantine.exists()
+
+    cleaned = await cleanup_abandoned_uploads(database, paths.staging)
+
+    assert cleaned == 1
+    assert not quarantine.exists()
+    async with database.session() as session:
+        assert await session.get(TempFileManifest, pending.id) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_missing_source_audio_before_claiming_success(job_client):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    missing_source = paths.staging / job_id / "missing.mp3"
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        job.provider_id = "deepseek"
+        job.model_id = "deepseek-chat"
+        session.add(JobFile(
+            id=str(uuid4()), job_id=job_id, original_name="missing.mp3",
+            extension=".mp3", size_bytes=10, sha256="b" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(missing_source),
+        ))
+        await session.commit()
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/resume")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "resume_source_missing",
+        "message": "原始音频文件已缺失，请取消任务后重新上传",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_truncated_source_audio_before_claiming_success(
+    job_client,
+):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    source = paths.staging / job_id / "truncated.mp3"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"short")
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.INTERRUPTED.value
+        job.provider_id = "deepseek"
+        job.model_id = "deepseek-chat"
+        session.add(JobFile(
+            id=str(uuid4()), job_id=job_id, original_name="truncated.mp3",
+            extension=".mp3", size_bytes=10, sha256="d" * 64,
+            duration_ms=1_000, position=0, temporary_path=str(source),
+        ))
+        await session.commit()
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/resume")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "resume_source_missing"
 
 
 @pytest.mark.asyncio

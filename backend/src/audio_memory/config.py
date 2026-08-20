@@ -828,6 +828,62 @@ class PinnedDevelopmentRoot:
             os.close(destination_parent)
             os.close(source_parent)
 
+    def move_directory(self, source: Path, destination: Path) -> None:
+        self._verify_root_identity()
+        source_parts = self._relative_parts(source)
+        destination_parts = self._relative_parts(destination)
+        if not source_parts or not destination_parts:
+            raise UnsafeDevelopmentPathError(
+                "开发目录移动不能使用数据根目录。"
+            )
+        source_parent = _open_directory_at(
+            self.root_fd, source_parts[:-1], create=False
+        )
+        if source_parent is None:
+            raise FileNotFoundError(source)
+        destination_parent = _open_directory_at(
+            self.root_fd, destination_parts[:-1], create=False
+        )
+        if destination_parent is None:
+            os.close(source_parent)
+            raise FileNotFoundError(destination.parent)
+        try:
+            metadata = os.stat(
+                source_parts[-1],
+                dir_fd=source_parent,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(metadata.st_mode):
+                _unsafe_directory_error(source)
+            source_fd = os.open(
+                source_parts[-1],
+                _directory_open_flags(),
+                dir_fd=source_parent,
+            )
+            os.close(source_fd)
+            try:
+                os.stat(
+                    destination_parts[-1],
+                    dir_fd=destination_parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise UnsafeDevelopmentPathError(
+                    f"开发目录移动目标已存在：{destination}"
+                )
+            os.rename(
+                source_parts[-1],
+                destination_parts[-1],
+                src_dir_fd=source_parent,
+                dst_dir_fd=destination_parent,
+            )
+            self._verify_root_identity()
+        finally:
+            os.close(destination_parent)
+            os.close(source_parent)
+
     def clear_directory_contents(self, path: Path) -> None:
         directory_fd = self.open_directory(path, create=True)
         assert directory_fd is not None

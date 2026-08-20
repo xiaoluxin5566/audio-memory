@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,20 +13,27 @@ from fastapi import UploadFile
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from audio_memory.config import AppPaths, PinnedDevelopmentRoot
+from audio_memory.config import AppPaths, PinnedDevelopmentRoot, UnsafeDevelopmentPathError
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, JobFile, TempFileManifest, Transcript
 from audio_memory.runtime_tools import RuntimeToolUnavailable
 from audio_memory.transcription.segments import progress_percent
 from audio_memory.transcription.eta import TranscriptionEtaTracker
-from audio_memory.uploads.cleanup import remove_staged_file
+from audio_memory.uploads.cleanup import (
+    UnsafeCleanupPathError,
+    assert_staging_path,
+    move_staged_directory,
+    remove_staged_entry,
+    remove_staged_file,
+)
 from audio_memory.uploads.probe import probe_audio, supports
 from audio_memory.api.events import JobEventBroker
 
 
 FORMAT_MESSAGE = "不支持该文件格式，请上传 MP3/AAC 格式文件"
 RUNTIME_MESSAGE = "本地音频组件不可用，请重新安装 Audio Memory"
+logger = logging.getLogger(__name__)
 UPLOAD_LOCK_STAGES = {
     JobStage.TRANSCRIBING.value,
     JobStage.ANALYZING.value,
@@ -451,39 +460,124 @@ class UploadService:
 
     async def cancel_job(self, job_id: str) -> None:
         self.eta_tracker.clear(job_id)
-        async with self.database.session() as session:
-            async with session.begin():
-                job = await session.get(AnalysisJob, job_id)
-                if job is None:
-                    raise LookupError("Unknown upload job")
-                files = list(
-                    await session.scalars(
-                        select(JobFile).where(JobFile.job_id == job_id)
-                    )
-                )
-                for file in files:
-                    remove_staged_file(
-                        Path(file.temporary_path),
-                        self.paths.staging,
-                        write_boundary=self.write_boundary,
-                    )
-                manifests = list(
-                    await session.scalars(
-                        select(TempFileManifest).where(
-                            TempFileManifest.task_uuid == job_id
+        job_directory = self.paths.staging / job_id
+        quarantine = self.paths.staging / f".cancelled-{job_id}-{uuid4().hex}"
+        moved = move_staged_directory(
+            job_directory,
+            quarantine,
+            self.paths.staging,
+            write_boundary=self.write_boundary,
+        )
+        cleanup_manifest_id: str | None = None
+        try:
+            async with self.database.session() as session:
+                async with session.begin():
+                    job = await session.get(AnalysisJob, job_id)
+                    if job is None:
+                        raise LookupError("Unknown upload job")
+                    manifests = list(
+                        await session.scalars(
+                            select(TempFileManifest).where(
+                                TempFileManifest.task_uuid == job_id
+                            )
                         )
                     )
+                    if moved:
+                        marker = manifests[0] if manifests else TempFileManifest(
+                            id=str(uuid4()),
+                            task_uuid=job_id,
+                            file_path=str(quarantine),
+                        )
+                        if not manifests:
+                            session.add(marker)
+                        marker.file_path = str(quarantine)
+                        marker.cleanup_status = "cancelled_pending"
+                        cleanup_manifest_id = marker.id
+                        for manifest in manifests[1:]:
+                            await session.delete(manifest)
+                    else:
+                        for manifest in manifests:
+                            await session.delete(manifest)
+                    await session.delete(job)
+        except BaseException:
+            if moved:
+                move_staged_directory(
+                    quarantine,
+                    job_directory,
+                    self.paths.staging,
+                    write_boundary=self.write_boundary,
                 )
-                for manifest in manifests:
-                    path = Path(manifest.file_path)
-                    remove_staged_file(
-                        path,
-                        self.paths.staging,
-                        write_boundary=self.write_boundary,
-                    )
-                    await session.delete(manifest)
-                await session.delete(job)
+            raise
+
+        if moved and cleanup_manifest_id is not None:
+            try:
+                remove_staged_entry(
+                    quarantine,
+                    self.paths.staging,
+                    write_boundary=self.write_boundary,
+                )
+            except (
+                OSError,
+                UnsafeCleanupPathError,
+                UnsafeDevelopmentPathError,
+            ) as exc:
+                logger.warning(
+                    "Cancelled job cleanup remains pending job_id=%s manifest_id=%s error_type=%s",
+                    job_id,
+                    cleanup_manifest_id,
+                    type(exc).__name__,
+                )
+            else:
+                async with self.database.session() as session:
+                    async with session.begin():
+                        marker = await session.get(
+                            TempFileManifest, cleanup_manifest_id
+                        )
+                        if marker is not None:
+                            await session.delete(marker)
         await self._emit(job_id, "job.cancelled", {})
+
+    async def ensure_resume_sources_available(self, job_id: str) -> None:
+        async with self.database.session() as session:
+            files = list(
+                await session.scalars(
+                    select(JobFile).where(JobFile.job_id == job_id)
+                )
+            )
+        for file in files:
+            try:
+                available = await asyncio.to_thread(
+                    self._resume_source_matches, file
+                )
+            except (
+                OSError,
+                UnsafeCleanupPathError,
+                UnsafeDevelopmentPathError,
+            ):
+                available = False
+            if not available:
+                raise UploadError(
+                    "原始音频文件已缺失，请取消任务后重新上传",
+                    code="resume_source_missing",
+                    job_id=job_id,
+                    file_id=file.id,
+                )
+
+    def _resume_source_matches(self, file: JobFile) -> bool:
+        path = assert_staging_path(
+            Path(file.temporary_path), self.paths.staging
+        )
+        if self.write_boundary is not None:
+            fd = self.write_boundary.open_regular_file(path, os.O_RDONLY)
+        else:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            if os.fstat(handle.fileno()).st_size != file.size_bytes:
+                return False
+            digest = hashlib.sha256()
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+            return digest.hexdigest() == file.sha256
 
     async def _get_job(self, job_id: str) -> AnalysisJob:
         async with self.database.session() as session:
