@@ -1058,7 +1058,7 @@ async def test_worker_pauses_before_submission_when_persisted_compatibility_chan
             history = await session.get(ReanalysisBatch, "history-1")
             assert history is not None
             prompts = json.loads(history.prompt_snapshot_json)
-            prompts["_reanalysis"]["fixed_rule_hashes"]["analysis_schemas"] = (
+            prompts["_reanalysis"]["fixed_rule_hashes"]["report_schemas"] = (
                 "0" * 64
             )
             history.prompt_snapshot_json = json.dumps(prompts, sort_keys=True)
@@ -1105,7 +1105,7 @@ async def test_schema_change_between_worker_check_and_queue_insert_pauses_durabl
     await database.create_schema()
     await seed_history_run(database, item_statuses=("pending",))
     changed_hashes = current_fixed_rule_hashes()
-    changed_hashes["analysis_schemas"] = "9" * 64
+    changed_hashes["report_schemas"] = "9" * 64
     monkeypatch.setattr(
         coordinator_module,
         "current_fixed_rule_hashes",

@@ -19,8 +19,7 @@ from audio_memory.models import (
     JobFile,
     Transcript,
 )
-from audio_memory.prompts.autonomous_schema import AutonomousAnalysisResult
-from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES, PromptComposer
+from audio_memory.prompts.composer import PromptComposer
 from audio_memory.prompts.store import PROMPT_SCENES, PromptStore
 from audio_memory.providers.types import ProviderState, ProviderStateName
 from audio_memory.reanalysis.types import (
@@ -60,35 +59,23 @@ def canonical_hash(value: object) -> str:
 
 
 def current_fixed_rule_hashes() -> dict[str, str]:
+    prompt_filenames = (
+        "user-analysis-goal.md",
+        "direct-report-system.md",
+        "direct-report-generation.md",
+        "direct-report-audit.md",
+        "direct-report-revision.md",
+    )
     hashes = {
-        "system.md": hashlib.sha256(
-            PromptComposer._fixed_prompt("system.md").encode("utf-8")
-        ).hexdigest(),
-        "autonomous_analysis_prompt": hashlib.sha256(
-            PromptComposer._approved_prompt("Prompt A", "Prompt B").encode("utf-8")
-        ).hexdigest(),
-        "autonomous_profile_prompt": hashlib.sha256(
-            PromptComposer._approved_prompt("Prompt B", None).encode("utf-8")
-        ).hexdigest(),
+        name: hashlib.sha256(
+            PromptComposer._fixed_prompt(name).encode("utf-8")
+        ).hexdigest()
+        for name in prompt_filenames
     }
     hashes["schema_version"] = canonical_hash(
         {"schema_version": PromptComposer.SCHEMA_VERSION}
     )
-    hashes["analysis_schemas"] = canonical_hash(
-        {
-            "autonomous": AutonomousAnalysisResult.model_json_schema(),
-        }
-    )
-    hashes["analysis_parameters"] = canonical_hash(
-        {
-            name: {
-                "max_tokens": policy.max_tokens,
-                "timeout_seconds": policy.timeout_seconds,
-            }
-            for name, policy in MODEL_REQUEST_POLICIES.items()
-            if name.startswith("autonomous")
-        }
-    )
+    hashes["report_schemas"] = canonical_hash(PromptComposer.formal_report_schemas())
     return hashes
 
 

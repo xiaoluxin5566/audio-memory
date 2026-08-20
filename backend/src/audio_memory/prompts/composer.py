@@ -751,7 +751,9 @@ class PromptComposer:
         prompt_sources = (
             ("user-analysis-goal", ("user-analysis-goal.md",)),
             ("direct-report-system", ("direct-report-system.md",)),
-            ("direct-report", ("direct-report.md",)),
+            ("direct-report-generation", ("direct-report-generation.md",)),
+            ("direct-report-audit", ("direct-report-audit.md",)),
+            ("direct-report-revision", ("direct-report-revision.md",)),
         )
         manifest: list[dict[str, object]] = []
         for role, filenames in prompt_sources:
@@ -764,16 +766,24 @@ class PromptComposer:
                     "content": content,
                 }
             )
-        schema_content = cls._schema_json(DirectReportDocument.model_json_schema())
+        schema_content = cls._schema_json(cls.formal_report_schemas())
         manifest.append(
             {
-                "role": "direct-report-schema",
+                "role": "report-schemas",
                 "files": (),
                 "sha256": sha256(schema_content.encode("utf-8")).hexdigest(),
                 "content": schema_content,
             }
         )
         return tuple(manifest)
+
+    @staticmethod
+    def formal_report_schemas() -> dict[str, object]:
+        return {
+            "direct_report": DirectReportDocument.model_json_schema(),
+            "report_audit": ReportAudit.model_json_schema(),
+            "targeted_report_revision": TargetedReportRevision.model_json_schema(),
+        }
 
     @classmethod
     def autonomous_prompt_documents(cls) -> tuple[dict[str, object], ...]:
@@ -796,23 +806,6 @@ class PromptComposer:
     @classmethod
     def fixed_rules_hash(cls) -> str:
         payload = {
-            "prompts": {
-                name: cls._fixed_prompt(name)
-                for name in (
-                    "system.md",
-                    "event-map.md",
-                    "director.md",
-                    "common-scene.md",
-                )
-            },
-            "autonomous_prompts": {
-                "system": cls._autonomous_system_rules(),
-                "analysis": cls._approved_prompt("Prompt A", "Prompt B"),
-                "profile": cls._approved_prompt("Prompt B", None),
-                "day_map": cls._autonomous_day_map_rules(),
-                "native_search": cls._autonomous_search_loop_rules(),
-                "final_analysis": cls._autonomous_final_analysis_rules(),
-            },
             "final_report_prompt_manifest": cls.final_report_prompt_manifest(),
             "schema_version": cls.SCHEMA_VERSION,
             "cluster_policy": {

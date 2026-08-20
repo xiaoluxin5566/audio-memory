@@ -244,7 +244,9 @@ def test_director_composition_sends_complete_cluster_and_event_hints() -> None:
     assert "profile_data" not in request.user_data
 
 
-def test_director_rules_participate_in_fixed_rules_hash(monkeypatch) -> None:
+def test_formal_report_generation_rules_participate_in_fixed_rules_hash(
+    monkeypatch,
+) -> None:
     original = PromptComposer._fixed_prompt
     baseline = PromptComposer.fixed_rules_hash()
 
@@ -253,8 +255,8 @@ def test_director_rules_participate_in_fixed_rules_hash(monkeypatch) -> None:
         "_fixed_prompt",
         staticmethod(
             lambda name: (
-                original(name) + "\nsynthetic director rule"
-                if name == "director.md"
+                original(name) + "\nsynthetic formal report rule"
+                if name == "direct-report-generation.md"
                 else original(name)
             )
         ),

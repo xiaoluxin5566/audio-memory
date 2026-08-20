@@ -184,32 +184,41 @@ async def test_preview_counts_history_and_never_estimates_local_audio_work(
     await database.dispose()
 
 
-def test_fixed_rule_hashes_cover_only_active_autonomous_analysis(monkeypatch) -> None:
+def test_fixed_rule_hashes_cover_only_formal_report_prompts(monkeypatch) -> None:
     from audio_memory.reanalysis.preview import current_fixed_rule_hashes
-    from audio_memory.prompts.composer import MODEL_REQUEST_POLICIES
+    from audio_memory.prompts.composer import PromptComposer
 
     baseline = current_fixed_rule_hashes()
 
-    assert "autonomous_analysis_prompt" in baseline
-    assert "autonomous_profile_prompt" in baseline
+    assert {
+        "user-analysis-goal.md",
+        "direct-report-system.md",
+        "direct-report-generation.md",
+        "direct-report-audit.md",
+        "direct-report-revision.md",
+    } <= baseline.keys()
+    assert "autonomous_analysis_prompt" not in baseline
+    assert "autonomous_profile_prompt" not in baseline
     assert "event-map.md" not in baseline
     assert "director.md" not in baseline
     assert "common-scene.md" not in baseline
-    assert len(baseline["analysis_schemas"]) == 64
-    assert len(baseline["analysis_parameters"]) == 64
+    assert len(baseline["report_schemas"]) == 64
 
-    original = MODEL_REQUEST_POLICIES["autonomous-final-analysis"]
-    monkeypatch.setitem(
-        MODEL_REQUEST_POLICIES,
-        "autonomous-final-analysis",
-        type(original)(
-            max_tokens=original.max_tokens,
-            timeout_seconds=original.timeout_seconds + 1,
+    original = PromptComposer._fixed_prompt
+    monkeypatch.setattr(
+        PromptComposer,
+        "_fixed_prompt",
+        staticmethod(
+            lambda name: (
+                original(name) + "\nsynthetic audit rule"
+                if name == "direct-report-audit.md"
+                else original(name)
+            )
         ),
     )
 
-    assert current_fixed_rule_hashes()["analysis_parameters"] != baseline[
-        "analysis_parameters"
+    assert current_fixed_rule_hashes()["direct-report-audit.md"] != baseline[
+        "direct-report-audit.md"
     ]
 
 
@@ -248,7 +257,7 @@ async def test_signed_preview_token_is_canonical_tamper_evident_and_expires(
     assert verified["snapshot_hash"] == preview.snapshot_hash
     assert verified["source_batch_ids"] == ["batch-2", "batch-1", "batch-0"]
     assert verified["credential_generation"] == 4
-    assert len(verified["fixed_rule_hashes"]["analysis_schemas"]) == 64
+    assert len(verified["fixed_rule_hashes"]["report_schemas"]) == 64
     assert verified["expires_at"] == "2026-08-06T12:05:00+00:00"
 
     encoded, signature = preview.preview_token.split(".")
