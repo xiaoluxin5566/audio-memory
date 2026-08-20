@@ -1486,8 +1486,7 @@ class PromptComposer:
 
     @staticmethod
     def _approved_prompt(start: str, end: str | None = None) -> str:
-        root = Path(__file__).resolve().parents[4]
-        path = root / "docs/superpowers/specs/2026-08-11-autonomous-analysis-prompts.md"
+        path = Path(__file__).with_name("autonomous-analysis-prompts.md")
         text = path.read_text(encoding="utf-8")
         start_marker = f"## {start}"
         start_at = text.index(start_marker) + len(start_marker)

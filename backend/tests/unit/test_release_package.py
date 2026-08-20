@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import json
 
@@ -261,3 +262,27 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
     assert not any(member.issym() or member.islnk() for member in members)
     expected_hash = checksum.read_text(encoding="utf-8").split()[0]
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected_hash
+
+    extracted = tmp_path / "extracted-release"
+    with tarfile.open(archive) as handle:
+        handle.extractall(extracted, filter="data")
+    packaged_root = extracted / prefix
+    prompt_check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from audio_memory.prompts.composer import PromptComposer; "
+                "print(PromptComposer.fixed_rules_hash())"
+            ),
+        ],
+        cwd=packaged_root,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(packaged_root / "backend/src"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert prompt_check.returncode == 0, prompt_check.stdout + prompt_check.stderr
