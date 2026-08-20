@@ -73,6 +73,7 @@ fi
 TARGET="$VERSIONS_ROOT/$VERSION"
 TEMPORARY="$VERSIONS_ROOT/.install-$VERSION-$$"
 CURRENT_TEMP="$APP_ROOT/.current-$$"
+SETUP_MARKER="$TARGET/.release-setup-complete"
 cleanup() {
   rm -rf "$TEMPORARY"
   rm -f "$CURRENT_TEMP"
@@ -87,13 +88,18 @@ if [ ! -d "$TARGET" ]; then
     "$TEMPORARY/scripts/verify-ffmpeg-runtime.py" \
     "$TEMPORARY/runtime/ffmpeg/bin/ffmpeg" "$TEMPORARY/runtime/ffmpeg/bin/ffprobe" \
     "$TEMPORARY/runtime/uv/uv"
-  if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ]; then
-    AUDIO_MEMORY_PREBUILT=1 "$TEMPORARY/scripts/install.sh"
-  fi
   mv "$TEMPORARY" "$TARGET"
 fi
 
 [ "$(tr -d '[:space:]' < "$TARGET/VERSION")" = "$VERSION" ] || fail "已安装版本校验失败"
+if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ] && [ ! -f "$SETUP_MARKER" ]; then
+  AUDIO_MEMORY_PREBUILT=1 "$TARGET/scripts/install.sh" || \
+    fail "版本运行环境准备失败，当前版本未切换；重新安装会从安全断点继续"
+  SETUP_TEMP="$TARGET/.release-setup-complete.$$"
+  printf '%s\n' "$VERSION" > "$SETUP_TEMP"
+  chmod 600 "$SETUP_TEMP"
+  mv "$SETUP_TEMP" "$SETUP_MARKER"
+fi
 ln -s "$TARGET" "$CURRENT_TEMP"
 mv -h -f "$CURRENT_TEMP" "$CURRENT_LINK"
 ln -sfn "$CURRENT_LINK/scripts/audio-memory" "$CLI_TARGET"

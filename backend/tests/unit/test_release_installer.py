@@ -92,6 +92,25 @@ def run_installer(
     )
 
 
+def run_installer_with_release_setup(
+    home: Path, data_root: Path, release_root: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(INSTALLER)],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+            "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
+            "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+            "AUDIO_MEMORY_BOOTSTRAP_PYTHON": sys.executable,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_install_preserves_database_creates_backup_and_is_idempotent(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "data"
@@ -116,6 +135,31 @@ def test_install_preserves_database_creates_backup_and_is_idempotent(tmp_path: P
     assert current.resolve() == data_root / "app" / "versions" / "0.1.0-beta.1"
     assert (current / "prototype" / "dist" / "client" / "index.html").is_file()
     assert (home / ".local" / "bin" / "audio-memory").is_symlink()
+
+
+def test_release_setup_runs_in_final_version_directory(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release", "0.1.0-beta.3")
+    home.mkdir()
+    (release_root / "scripts" / "install.sh").write_text(
+        """#!/bin/bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$root" > "$root/setup-root.txt"
+""",
+        encoding="utf-8",
+    )
+    (release_root / "scripts" / "install.sh").chmod(0o755)
+
+    result = run_installer_with_release_setup(home, data_root, release_root)
+
+    target = data_root / "app" / "versions" / "0.1.0-beta.3"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (target / "setup-root.txt").read_text(encoding="utf-8").strip() == str(
+        target
+    )
+    assert (data_root / "app" / "current").resolve() == target
 
 
 def test_invalid_release_does_not_replace_current_version(tmp_path: Path) -> None:
