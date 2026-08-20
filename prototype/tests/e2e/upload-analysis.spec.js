@@ -178,6 +178,8 @@ test('active transcription disables adding audio until its report is published',
 
   await expect(page.getByText('当前任务完成并生成报告前，不能添加新的音频')).toBeVisible()
   await expect(page.locator('input[type=file]')).toBeDisabled()
+  await expect(page.getByRole('button', { name: '移除 current.mp3' })).toBeDisabled()
+  await expect(page.getByText('任务进行中，不能删除音频文件')).toBeVisible()
 })
 
 test('refresh during report publication stays locked and shows publishing progress', async ({ page }) => {
@@ -205,6 +207,8 @@ test('refresh during report publication stays locked and shows publishing progre
   await expect(page.getByText('正在发布报告')).toBeVisible()
   await expect(page.getByText('当前任务完成并生成报告前，不能添加新的音频')).toBeVisible()
   await expect(page.locator('input[type=file]')).toBeDisabled()
+  await expect(page.getByRole('button', { name: '移除 current.mp3' })).toBeDisabled()
+  await expect(page.getByText('任务进行中，不能删除音频文件')).toBeVisible()
 })
 
 test('clearing history also clears a terminal current task and unlocks uploads', async ({ page }) => {

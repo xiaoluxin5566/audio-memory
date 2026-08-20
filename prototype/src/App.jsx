@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   analysisProgressCopy,
+  canRemoveUploadFile,
   createInitialState,
   formatJobEta,
   getFeedbackFormState,
@@ -47,6 +48,7 @@ export function App() {
   const [clearOpen, setClearOpen] = useState(false);
   const [reanalysisOpen, setReanalysisOpen] = useState(false);
   const [sleepPromptOpen, setSleepPromptOpen] = useState(false);
+  const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [analysisSettings, setAnalysisSettings] = useState({ preventSleep: false, status: 'inactive', loaded: false });
   const [selectedCard, setSelectedCard] = useState(null);
   const [toast, setToast] = useState('');
@@ -224,11 +226,16 @@ export function App() {
     const provider = state.providers[state.activeProvider];
     if (provider?.state !== 'available') { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
-    const job = await api.startJob(state.job.id);
-    const sleepStatus = job.sleep_prevention_status || 'disabled';
-    setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
-    if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
-    setState((current) => ({ ...current, job: { ...job, progress: jobProgressValue(job) } }));
+    setStartingAnalysis(true);
+    try {
+      const job = await api.startJob(state.job.id);
+      const sleepStatus = job.sleep_prevention_status || 'disabled';
+      setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
+      if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
+      setState((current) => ({ ...current, job: { ...job, progress: jobProgressValue(job) } }));
+    } finally {
+      setStartingAnalysis(false);
+    }
   }
 
   async function startAnalysis() {
@@ -298,7 +305,7 @@ export function App() {
   }
 
   const currentProvider = state.providers[state.activeProvider];
-  const uploadLocked = Boolean(state.job && state.job.stage !== 'uploading');
+  const uploadLocked = startingAnalysis || Boolean(state.job && state.job.stage !== 'uploading');
   return (
     <div className="app-shell">
       <Topbar route={route} onNavigate={navigate} reanalysis={reanalysisView} onReanalyze={openReanalysis} onClear={() => setClearOpen(true)} environment={environment} />
@@ -328,9 +335,9 @@ export function App() {
                 <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
               </div>
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
-              <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
+              <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} removable={canRemoveUploadFile(state.job, file, startingAnalysis)} onRemove={() => removeFile(file.id)} />)}</div>
               {state.job && state.job.stage !== 'uploading' ? <JobPanel job={state.job} onRetry={resumeJob} onCancel={cancelJob} /> : (
-                <button className="primary full" disabled={!analysisSettings.loaded || !state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>开始分析{state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}</button>
+                <button className="primary full" disabled={startingAnalysis || !analysisSettings.loaded || !state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>{startingAnalysis ? '正在启动分析…' : `开始分析${state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}`}</button>
               )}
               <p className="privacy">音频、转写和结果保存在本机；只有转写文本会发送给当前模型厂商。</p>
             </section>
@@ -359,9 +366,9 @@ function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear, environme
   return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div>{environment?.label && <span className="runtime-environment-badge">{environment.label}</span>}</div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
 }
 
-function UploadFile({ file, onRemove }) {
-  const status = file.invalid ? '不支持的格式' : file.failed ? '上传失败' : file.progress === 100 ? '上传完成' : `上传中 ${file.progress}%`;
-  return <div className={`upload-file ${file.invalid ? 'invalid' : ''}`}><div className="file-type">{file.type}</div><div className="file-main"><b>{file.name}</b><span>{prettySize(file.size)} · {status}</span>{!file.invalid && !file.failed && file.progress < 100 && <div className="progress"><i style={{ width: `${file.progress}%` }} /></div>}</div><button className="icon-button" onClick={onRemove} aria-label={`移除 ${file.name}`}>×</button></div>;
+function UploadFile({ file, onRemove, removable = true }) {
+  const status = !removable ? '任务进行中，不能删除音频文件' : file.invalid ? '不支持的格式' : file.failed ? '上传失败' : file.progress === 100 ? '上传完成' : `上传中 ${file.progress}%`;
+  return <div className={`upload-file ${file.invalid ? 'invalid' : ''}`}><div className="file-type">{file.type}</div><div className="file-main"><b>{file.name}</b><span>{prettySize(file.size)} · {status}</span>{!file.invalid && !file.failed && file.progress < 100 && <div className="progress"><i style={{ width: `${file.progress}%` }} /></div>}</div><button className="icon-button" disabled={!removable} title={!removable ? '任务进行中，不能删除音频文件' : undefined} onClick={onRemove} aria-label={`移除 ${file.name}`}>×</button></div>;
 }
 
 function JobPanel({ job, onRetry, onCancel }) {

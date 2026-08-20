@@ -344,6 +344,11 @@ async def delete_file(job_id: str, file_id: str, request: Request) -> Response:
         await service_from(request).remove_file(job_id, file_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UploadError as exc:
+        detail = {"code": exc.code, "message": str(exc)}
+        if exc.stage is not None:
+            detail["stage"] = exc.stage
+        raise HTTPException(status_code=409, detail=detail) from exc
     return Response(status_code=204)
 
 

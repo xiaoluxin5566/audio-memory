@@ -356,14 +356,25 @@ class UploadService:
 
     async def remove_file(self, job_id: str, file_id: str) -> None:
         async with self.database.session() as session:
-            async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
                 record = await session.get(JobFile, file_id)
                 if record is None or record.job_id != job_id:
                     raise LookupError("Unknown upload file")
+                job = await session.get(AnalysisJob, job_id)
+                if job is None:
+                    raise LookupError("Unknown upload job")
+                if job.stage != JobStage.UPLOADING.value:
+                    raise UploadError(
+                        "任务进行中，不能删除音频文件",
+                        code="file_locked_during_processing",
+                        job_id=job_id,
+                        file_id=file_id,
+                        stage=job.stage,
+                    )
                 path = Path(record.temporary_path)
                 await session.delete(record)
-                job = await session.get(AnalysisJob, job_id)
-                if job is not None and job.error_code == "unsupported_format":
+                if job.error_code == "unsupported_format":
                     remaining_invalid = await session.scalar(
                         select(func.count(JobFile.id)).where(
                             JobFile.job_id == job_id,
@@ -384,6 +395,10 @@ class UploadService:
                 )
                 if manifest is not None:
                     await session.delete(manifest)
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
         await self._emit(job_id, "upload.removed", {"file_id": file_id})
 
     async def start(self, job_id: str, *, provider_id: str, model_id: str) -> UploadJobView:
