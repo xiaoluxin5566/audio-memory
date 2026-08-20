@@ -1,6 +1,6 @@
 # Audio Memory
 
-当前发布版本：`0.1.0-beta.3`。第一期仅支持 macOS Apple Silicon，属于小范围 Beta，请在重要使用前保留原始音频。
+当前发布版本：`0.1.0-beta.4`。第一期仅支持 macOS Apple Silicon，属于小范围 Beta，请在重要使用前保留原始音频。
 
 Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在本机完成音频上传、MLX Whisper 转写、说话人分段、六场景结构化分析和历史重分析；原始音频不发送给模型厂商。
 
@@ -16,8 +16,8 @@ Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在�
 面向 Beta 用户的 GitHub Release 安装方式：
 
 ```bash
-tar -xzf audio-memory-v0.1.0-beta.3-macos-arm64.tar.gz
-cd audio-memory-v0.1.0-beta.3
+tar -xzf audio-memory-v0.1.0-beta.4-macos-arm64.tar.gz
+cd audio-memory-v0.1.0-beta.4
 ./scripts/install-release.sh
 export PATH="$HOME/.local/bin:$PATH"
 audio-memory start
