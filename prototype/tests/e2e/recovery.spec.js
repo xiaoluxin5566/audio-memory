@@ -80,6 +80,76 @@ test('cancelling an interrupted task clears only the current upload state', asyn
   expect(cancelled).toBe(true)
 })
 
+test('cancelling an active analysis requires explicit confirmation', async ({ page }) => {
+  let cancelled = false
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', state: 'available', active: true }] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'active' } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: cancelled ? null : {
+      id: 'job-active-cancel', stage: 'transcribing', progress_percent: 32,
+      provider_id: 'deepseek', model_id: 'deepseek-chat',
+      files: [{ id: 'file-active', original_name: 'active.mp3', extension: '.mp3', size_bytes: 2048, upload_progress: 100 }],
+    } })
+    if (pathname === '/api/jobs/job-active-cancel' && request.method() === 'GET') {
+      return route.fulfill({ json: { id: 'job-active-cancel', stage: 'transcribing', progress_percent: 32 } })
+    }
+    if (pathname === '/api/jobs/job-active-cancel' && request.method() === 'DELETE') {
+      cancelled = true
+      return route.fulfill({ status: 204 })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '取消本次分析' }).click()
+
+  await expect(page.getByRole('heading', { name: '确认取消本次分析？' })).toBeVisible()
+  await expect(page.getByText('只会清除本次上传的音频和处理进度，不会影响历史记录。')).toBeVisible()
+  expect(cancelled).toBe(false)
+
+  await page.getByRole('button', { name: '继续分析' }).click()
+  await expect(page.getByRole('heading', { name: '确认取消本次分析？' })).toBeHidden()
+  expect(cancelled).toBe(false)
+
+  await page.getByRole('button', { name: '取消本次分析' }).click()
+  await page.getByRole('button', { name: '确认取消' }).click()
+  await expect(page.getByText('active.mp3')).toBeHidden()
+  expect(cancelled).toBe(true)
+})
+
+test('the cancel analysis action remains available during report generation', async ({ page }) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', state: 'available', active: true }] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'active' } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: {
+      id: 'job-second-analysis', stage: 'analyzing', progress_percent: 74,
+      analysis_phase: 'running', analysis_detail_phase: 'drafting',
+      provider_id: 'deepseek', model_id: 'deepseek-chat',
+      files: [{ id: 'file-second', original_name: 'second.mp3', extension: '.mp3', size_bytes: 2048, upload_progress: 100 }],
+    } })
+    if (pathname === '/api/jobs/job-second-analysis' && request.method() === 'GET') {
+      return route.fulfill({ json: { id: 'job-second-analysis', stage: 'analyzing', progress_percent: 74, analysis_phase: 'running', analysis_detail_phase: 'drafting' } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: '取消本次分析' })).toBeVisible()
+})
+
 for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment', 'analysis_quality_insufficient']) {
   test(`a failed ${errorCode} analysis retries without returning to Whisper`, async ({ page }) => {
     let retried = false
