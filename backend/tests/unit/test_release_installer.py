@@ -8,6 +8,8 @@ import subprocess
 import hashlib
 import json
 import sys
+import signal
+import time
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -173,12 +175,15 @@ def test_installer_refuses_an_existing_install_lock_without_mutation(
     (existing / "VERSION").write_text("0.1.0-beta.2\n", encoding="utf-8")
     (data_root / "app" / "current").symlink_to(existing)
     (data_root / "app" / ".install.lock").mkdir()
+    (data_root / "app" / ".install.lock" / "unexpected").write_text(
+        "unsafe", encoding="utf-8"
+    )
     home.mkdir()
 
     result = run_installer(home, data_root, release_root)
 
     assert result.returncode != 0
-    assert "另一个安装任务" in result.stderr
+    assert "安装锁包含未知文件" in result.stderr
     assert (data_root / "app" / "current").resolve() == existing
     assert not (data_root / "app" / "versions" / "0.1.0-beta.3").exists()
 
@@ -221,11 +226,65 @@ printf 'ready\n' > "$root/setup-finished.txt"
     return_codes = [process.returncode for process in processes]
 
     assert sorted(return_codes) == [0, 1], results
-    assert any("另一个安装任务" in stderr for _, stderr in results)
+    assert any("另一个安装任务" in stderr for _, stderr in results), results
     target = data_root / "app" / "versions" / "0.1.0-beta.3"
     assert (target / "setup-finished.txt").read_text(encoding="utf-8") == "ready\n"
     assert not list(target.glob(".install-*"))
     assert (data_root / "app" / "current").resolve() == target
+
+
+def test_installer_recovers_lock_after_owner_is_killed(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release", "0.1.0-beta.3")
+    home.mkdir()
+    slow_setup = """#!/bin/bash
+set -euo pipefail
+sleep 30
+"""
+    (release_root / "scripts" / "install.sh").write_text(
+        slow_setup, encoding="utf-8"
+    )
+    (release_root / "scripts" / "install.sh").chmod(0o755)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+        "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
+        "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+        "AUDIO_MEMORY_BOOTSTRAP_PYTHON": sys.executable,
+    }
+    process = subprocess.Popen(
+        ["bash", str(INSTALLER)],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    lock = data_root / "app" / ".install.lock"
+    for _ in range(100):
+        if lock.exists() or lock.is_symlink():
+            break
+        time.sleep(0.02)
+    assert lock.exists() or lock.is_symlink()
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate(timeout=5)
+
+    target = data_root / "app" / "versions" / "0.1.0-beta.3"
+    setup_script = (
+        target / "scripts" / "install.sh"
+        if target.exists()
+        else release_root / "scripts" / "install.sh"
+    )
+    setup_script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    setup_script.chmod(0o755)
+
+    retried = run_installer_with_release_setup(home, data_root, release_root)
+
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert (data_root / "app" / "current").resolve() == target
+    assert not lock.exists()
 
 
 def test_invalid_release_does_not_replace_current_version(tmp_path: Path) -> None:
