@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -18,6 +21,7 @@ from integration_runtime import (  # noqa: E402
     build_acceptance_plan,
     discover_main_worktree,
     handoff_existing_runtime,
+    spawn_detached_supervisor,
     stop_acceptance,
     validate_version,
 )
@@ -198,3 +202,36 @@ def test_stop_acceptance_cannot_terminate_feature_runtime(tmp_path: Path) -> Non
         )
 
     assert terminated == []
+
+
+def test_detached_supervisor_owns_a_new_session_and_survives_launcher_return(
+    tmp_path: Path,
+) -> None:
+    session_file = tmp_path / "session.txt"
+    log_file = tmp_path / "supervisor.log"
+    child = spawn_detached_supervisor(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(session_file)!r}).write_text(str(os.getsid(0)));"
+                "time.sleep(5)"
+            ),
+        ),
+        cwd=tmp_path,
+        environment=dict(os.environ),
+        log_path=log_file,
+    )
+    try:
+        for _ in range(50):
+            if session_file.exists():
+                break
+            time.sleep(0.02)
+
+        assert session_file.read_text() == str(child.pid)
+        assert child.poll() is None
+        assert os.getsid(child.pid) != os.getsid(0)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
