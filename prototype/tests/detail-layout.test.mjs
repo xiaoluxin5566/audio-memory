@@ -247,7 +247,8 @@ test('content inside each major section uses a compact vertical rhythm', () => {
 test('global toast messages are centered where users can see them', () => {
   const toastRule = styles.match(/\.toast\{([^}]*)\}/)?.[1] || '';
   assert.match(toastRule, /left:50%/);
-  assert.match(toastRule, /top:/);
+  assert.match(toastRule, /top:50%/);
+  assert.match(toastRule, /transform:translate\(-50%,-50%\)/);
   assert.doesNotMatch(toastRule, /right:/);
   assert.doesNotMatch(toastRule, /bottom:/);
 });
