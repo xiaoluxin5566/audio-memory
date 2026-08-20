@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -65,6 +66,7 @@ def create_app(
     paths: AppPaths | None = None,
     frontend_dir: Path | None = None,
     local_port: int | None = None,
+    environment_label: str | None = None,
 ) -> FastAPI:
     base_runtime_config = runtime_config or RuntimeConfig.from_environment(
         home=Path.home(),
@@ -79,6 +81,18 @@ def create_app(
     resolved_frontend = frontend_dir or (
         Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
     )
+    resolved_environment_label = ""
+    if (
+        resolved_runtime_config.profile is AppProfile.DEVELOPMENT
+        and environment_label is not None
+    ):
+        resolved_environment_label = environment_label.strip()
+        if (
+            not resolved_environment_label
+            or len(resolved_environment_label) > 64
+            or any(character in resolved_environment_label for character in "\r\n")
+        ):
+            raise ValueError("运行环境标签无效。")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -300,13 +314,16 @@ def create_app(
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
-        return {
+        payload = {
             "status": "ok",
             "version": __version__,
             "platform": "macOS" if platform.system() == "Darwin" else platform.system(),
             "architecture": platform.machine(),
             "profile": resolved_runtime_config.profile.value,
         }
+        if resolved_environment_label:
+            payload["environment_label"] = resolved_environment_label
+        return payload
 
     if resolved_frontend.is_dir() and (resolved_frontend / "index.html").is_file():
         assets = resolved_frontend / "assets"
@@ -322,4 +339,4 @@ def create_app(
     return app
 
 
-app = create_app()
+app = create_app(environment_label=os.environ.get("AUDIO_MEMORY_ENVIRONMENT_LABEL"))

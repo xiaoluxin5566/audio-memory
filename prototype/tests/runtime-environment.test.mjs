@@ -9,6 +9,16 @@ test('development UI marks a development backend', () => {
   })
 })
 
+test('integration acceptance UI uses the backend supplied version label', () => {
+  assert.deepEqual(runtimeEnvironment('development', {
+    profile: 'development',
+    environment_label: 'v0.1.0-beta.3 集成验收',
+  }), {
+    profile: 'development', blocked: false,
+    label: 'v0.1.0-beta.3 集成验收', message: '',
+  })
+})
+
 test('development UI blocks a production backend', () => {
   const state = runtimeEnvironment('development', { profile: 'production' })
 

@@ -115,6 +115,31 @@ async def test_health_exposes_development_profile_without_runtime_details(
     ]
 
 
+@pytest.mark.asyncio
+async def test_health_exposes_controlled_integration_acceptance_label(
+    tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
+) -> None:
+    runtime_config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={"AUDIO_MEMORY_PROFILE": "development"},
+    )
+    app = create_app(
+        runtime_config=runtime_config,
+        environment_label="v0.1.0-beta.3 集成验收",
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:8766",
+        ) as client:
+            response = await client.get("/api/health")
+
+    assert response.json()["environment_label"] == "v0.1.0-beta.3 集成验收"
+
+
 def test_create_app_rejects_development_identity_with_production_paths_before_access(
     tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
 ) -> None:

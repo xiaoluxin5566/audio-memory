@@ -11,7 +11,12 @@ export function runtimeEnvironment(expectedProfile, healthPayload) {
     ? healthPayload.profile
     : 'unknown'
   const blocked = Boolean(expectedProfile) && profile !== expectedProfile
-  const label = expectedProfile === 'development' ? '开发环境' : ''
+  const suppliedLabel = typeof healthPayload?.environment_label === 'string'
+    ? healthPayload.environment_label.trim()
+    : ''
+  const label = expectedProfile === 'development'
+    ? (suppliedLabel || '开发环境')
+    : ''
   const message = !blocked
     ? ''
     : profile === 'production'
