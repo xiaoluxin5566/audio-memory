@@ -794,6 +794,24 @@ class ReleaseService:
         self.store.save_receipt(manifest, manifest.main_commit)
         return manifest, path
 
+    def records_to_mark_released(
+        self, manifest: ReleaseManifest
+    ) -> tuple[FeatureRecord, ...]:
+        records: list[FeatureRecord] = []
+        for item in manifest.features:
+            if not self.features.store.exists(item.feature_id):
+                continue
+            record = self.features.store.load(item.feature_id)
+            if (
+                record.target_version != manifest.target_version
+                or record.status not in {"merged", "released"}
+            ):
+                raise GovernanceError(
+                    f"功能 {item.feature_id} 的发布状态无效。"
+                )
+            records.append(record)
+        return tuple(records)
+
     def integrate(
         self,
         manifest_path: Path,
@@ -1090,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
             release = ReleaseService(service.repository)
             manifest_path = release.store.manifest_path(arguments.version)
             manifest = release.authorize_build(manifest_path, arguments.approve)
+            release_records = release.records_to_mark_released(manifest)
             environment = dict(os.environ)
             environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
             gate_result = subprocess.run(
@@ -1132,8 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tag", "-a", manifest.target_version,
                 "-m", f"Release {manifest.target_version}",
             )
-            for item in manifest.features:
-                record = release.features.store.load(item.feature_id)
+            for record in release_records:
                 release.features.store.save(replace(
                     record,
                     status="released",

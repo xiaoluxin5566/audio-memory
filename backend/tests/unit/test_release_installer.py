@@ -162,6 +162,72 @@ printf '%s\n' "$root" > "$root/setup-root.txt"
     assert (data_root / "app" / "current").resolve() == target
 
 
+def test_installer_refuses_an_existing_install_lock_without_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release", "0.1.0-beta.3")
+    existing = data_root / "app" / "versions" / "0.1.0-beta.2"
+    existing.mkdir(parents=True)
+    (existing / "VERSION").write_text("0.1.0-beta.2\n", encoding="utf-8")
+    (data_root / "app" / "current").symlink_to(existing)
+    (data_root / "app" / ".install.lock").mkdir()
+    home.mkdir()
+
+    result = run_installer(home, data_root, release_root)
+
+    assert result.returncode != 0
+    assert "另一个安装任务" in result.stderr
+    assert (data_root / "app" / "current").resolve() == existing
+    assert not (data_root / "app" / "versions" / "0.1.0-beta.3").exists()
+
+
+def test_concurrent_installers_allow_only_one_writer(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    release_root = create_release(tmp_path / "release", "0.1.0-beta.3")
+    home.mkdir()
+    (release_root / "scripts" / "install.sh").write_text(
+        """#!/bin/bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+sleep 0.5
+printf 'ready\n' > "$root/setup-finished.txt"
+""",
+        encoding="utf-8",
+    )
+    (release_root / "scripts" / "install.sh").chmod(0o755)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "AUDIO_MEMORY_DATA_ROOT": str(data_root),
+        "AUDIO_MEMORY_RELEASE_ROOT": str(release_root),
+        "AUDIO_MEMORY_SKIP_FFMPEG_ARCH_CHECK": "1",
+        "AUDIO_MEMORY_BOOTSTRAP_PYTHON": sys.executable,
+    }
+
+    processes = [
+        subprocess.Popen(
+            ["bash", str(INSTALLER)],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=10) for process in processes]
+    return_codes = [process.returncode for process in processes]
+
+    assert sorted(return_codes) == [0, 1], results
+    assert any("另一个安装任务" in stderr for _, stderr in results)
+    target = data_root / "app" / "versions" / "0.1.0-beta.3"
+    assert (target / "setup-finished.txt").read_text(encoding="utf-8") == "ready\n"
+    assert not list(target.glob(".install-*"))
+    assert (data_root / "app" / "current").resolve() == target
+
+
 def test_invalid_release_does_not_replace_current_version(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_root = tmp_path / "data"

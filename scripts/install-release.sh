@@ -57,6 +57,14 @@ esac
 
 mkdir -p "$DATA_ROOT" "$VERSIONS_ROOT" "$DATA_ROOT/backups" "$HOME/.local/bin"
 chmod 700 "$DATA_ROOT" "$APP_ROOT" "$VERSIONS_ROOT" "$DATA_ROOT/backups" "$HOME/.local" "$HOME/.local/bin" 2>/dev/null || true
+INSTALL_LOCK="$APP_ROOT/.install.lock"
+if ! mkdir -m 700 "$INSTALL_LOCK" 2>/dev/null; then
+  fail "另一个安装任务正在进行，请稍后重试"
+fi
+release_install_lock() {
+  rmdir "$INSTALL_LOCK" 2>/dev/null || true
+}
+trap release_install_lock EXIT INT TERM
 
 if [ -x "$CURRENT_LINK/scripts/audio-memory" ]; then
   AUDIO_MEMORY_APP_ROOT="$APP_ROOT" AUDIO_MEMORY_DATA_ROOT="$DATA_ROOT" \
@@ -77,6 +85,7 @@ SETUP_MARKER="$TARGET/.release-setup-complete"
 cleanup() {
   rm -rf "$TEMPORARY"
   rm -f "$CURRENT_TEMP"
+  release_install_lock
 }
 trap cleanup EXIT INT TERM
 
@@ -104,6 +113,7 @@ ln -s "$TARGET" "$CURRENT_TEMP"
 mv -h -f "$CURRENT_TEMP" "$CURRENT_LINK"
 ln -sfn "$CURRENT_LINK/scripts/audio-memory" "$CLI_TARGET"
 
+release_install_lock
 trap - EXIT INT TERM
 printf 'Audio Memory %s 已安装。\n' "$VERSION"
 printf '用户数据保留在：%s\n' "$DATA_ROOT"

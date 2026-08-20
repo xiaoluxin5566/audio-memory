@@ -528,6 +528,20 @@ def test_integrated_main_seal_requires_exact_digest_and_complete_gate(
     assert sealed == manifest
     assert release.store.load_manifest(path) == manifest
     assert release.authorize_build(path, manifest.digest()) == manifest
+    assert release.records_to_mark_released(manifest) == ()
+
+
+def test_release_prevalidates_feature_records_before_creating_tag(
+    git_repository: Path,
+) -> None:
+    release, manifest, _ = integrated_candidate(git_repository)
+
+    records = release.records_to_mark_released(manifest)
+
+    assert [record.feature_id for record in records] == ["one"]
+    release.features.store.save(replace(records[0], status="in_progress"))
+    with pytest.raises(GovernanceError, match="发布状态"):
+        release.records_to_mark_released(manifest)
 
 
 @pytest.mark.parametrize("fault", ["dirty", "not_main", "moved_head"])
