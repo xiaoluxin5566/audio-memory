@@ -150,6 +150,23 @@ class SplittingProvider(PipelineProvider):
         raise AssertionError(scene_id)
 
 
+class SingleSegmentSplittingProvider(SplittingProvider):
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-chunk":
+            segment_count = int(kwargs["segment_count"])
+            self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+            self.chunk_sizes.append(segment_count)
+            if segment_count > 1:
+                raise ProviderAnalysisError(
+                    "truncated", code="model_output_truncated"
+                )
+            payload = audit_payload(mode="chunk_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = segment_count
+            payload["coverage"]["total_segment_count"] = segment_count
+            return json.dumps(payload)
+        return await super().generate(provider_id, **kwargs)
+
+
 class InterruptedSplittingProvider(SplittingProvider):
     def __init__(self, total_segments: int, *, fail_one_leaf: bool) -> None:
         super().__init__(total_segments)
@@ -315,6 +332,19 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
     assert provider.chunk_sizes[0] > 4
     assert any(size <= 4 for size in provider.chunk_sizes)
     assert staged["direct_report_v1_audit_chunk_results"]
+    assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_truncated_audit_keeps_splitting_past_normal_depth_until_single_segments(
+    tmp_path,
+) -> None:
+    provider = SingleSegmentSplittingProvider(total_segments=12)
+
+    report, staged = await run_with(tmp_path, provider, segment_count=12)
+
+    assert provider.chunk_sizes[-1] == 1
+    assert len(staged["direct_report_v1_audit_chunk_results"]) == 12
     assert report.quality_metadata.audit_status == "completed"
 
 

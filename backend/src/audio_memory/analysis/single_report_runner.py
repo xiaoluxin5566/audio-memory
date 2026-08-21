@@ -233,10 +233,7 @@ class SingleReportRunner:
                             saved_chunk_results.pop(chunk_id, None)
                     split_children = None
                     split_child_ids = None
-                    if (
-                        split_depth < policy.max_split_depth
-                        and chunk.segment_count > policy.minimum_segment_count
-                    ):
+                    if chunk.segment_count > policy.minimum_segment_count:
                         split_children = split_audit_chunk(chunk)
                         split_child_ids = [
                             audit_chunk_id(
@@ -294,7 +291,6 @@ class SingleReportRunner:
                     except ProviderAnalysisError as exc:
                         if (
                             exc.code == "model_output_truncated"
-                            and split_depth < policy.max_split_depth
                             and chunk.segment_count > policy.minimum_segment_count
                         ):
                             assert split_children is not None

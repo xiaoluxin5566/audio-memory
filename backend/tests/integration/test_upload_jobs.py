@@ -30,6 +30,7 @@ from audio_memory.prompts.store import PromptStore
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.power.sleep_prevention import SleepPreventionManager
 from audio_memory.repositories import AppSettingsRepository
+from audio_memory.analysis.task_coordinator import AlreadyRunningError
 
 
 class RetryCoordinator:
@@ -67,6 +68,14 @@ class RetryTaskCoordinator:
         )
         self.called.set()
         return SimpleNamespace(id="resumed-version")
+
+
+class AlreadyRunningRetryTaskCoordinator(RetryTaskCoordinator):
+    async def retry_failed_upload_in_place(self, **_kwargs):
+        return None
+
+    async def submit_new_upload(self, _analysis_request):
+        raise AlreadyRunningError("Analysis is already pending or running")
 
 
 class CancelTaskCoordinator:
@@ -671,6 +680,32 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
     assert task_coordinator.analysis_request.credential_generation == 8
     assert task_coordinator.analysis_request.priority == 0
     assert task_coordinator.method == "resume"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_analysis_retry_returns_current_running_state(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "model_output_truncated"
+        await session.commit()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_task_coordinator = (
+        AlreadyRunningRetryTaskCoordinator()
+    )
+    prompt_store = PromptStore(client._transport.app.state.upload_service.paths.prompts)
+    prompt_store.initialize()
+    client._transport.app.state.prompt_store = prompt_store
+    client._transport.app.state.database = database
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+
+    assert response.status_code == 202
+    assert response.json()["stage"] == JobStage.ANALYZING.value
+    assert response.json()["already_running"] is True
 
 
 @pytest.mark.asyncio

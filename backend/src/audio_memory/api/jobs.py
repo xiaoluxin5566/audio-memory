@@ -92,6 +92,18 @@ async def has_legacy_completed_unaudited_report(
     )
 
 
+async def has_active_analysis(request: Request, job_id: str) -> bool:
+    async with service_from(request).database.session() as session:
+        version_id = await session.scalar(
+            select(AnalysisVersion.id).where(
+                AnalysisVersion.source_job_id == job_id,
+                AnalysisVersion.reanalysis_batch_id.is_(None),
+                AnalysisVersion.status.in_(("pending", "running")),
+            )
+        )
+    return version_id is not None
+
+
 async def protect_job_if_enabled(request: Request, job_id: str) -> str:
     enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
     if not enabled:
@@ -448,7 +460,7 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
 
 
 @router.post("/{job_id}/retry-analysis", status_code=202)
-async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
+async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]:
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
     if job_id in tasks:
         raise HTTPException(status_code=409, detail="Analysis is already running")
@@ -456,6 +468,14 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.stage == JobStage.ANALYZING.value and await has_active_analysis(
+        request, job_id
+    ):
+        return {
+            "id": job_id,
+            "stage": JobStage.ANALYZING.value,
+            "already_running": True,
+        }
     legacy_completed_unaudited = (
         job.stage in {JobStage.COMPLETED.value, JobStage.INTERRUPTED.value}
         and await has_legacy_completed_unaudited_report(request, job_id)
@@ -489,14 +509,21 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
             },
         ) from exc
 
-    resumed_version = (
-        await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
-            source_job_id=job_id,
-            provider_id=provider.provider_id,
-            model_id=provider.model_id,
-            credential_generation=credential_generation,
+    try:
+        resumed_version = (
+            await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
+                source_job_id=job_id,
+                provider_id=provider.provider_id,
+                model_id=provider.model_id,
+                credential_generation=credential_generation,
+            )
         )
-    )
+    except AlreadyRunningError:
+        return {
+            "id": job_id,
+            "stage": JobStage.ANALYZING.value,
+            "already_running": True,
+        }
     if resumed_version is not None:
         return {"id": job_id, "stage": JobStage.ANALYZING.value}
 
@@ -527,9 +554,18 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
                     "sleep_prevention_status": sleep_status,
                 }
 
-        await request.app.state.analysis_task_coordinator.submit_new_upload(
-            analysis_request
-        )
+        try:
+            await request.app.state.analysis_task_coordinator.submit_new_upload(
+                analysis_request
+            )
+        except AlreadyRunningError:
+            submitted = True
+            return {
+                "id": job_id,
+                "stage": JobStage.ANALYZING.value,
+                "sleep_prevention_status": sleep_status,
+                "already_running": True,
+            }
         submitted = True
         return {
             "id": job_id,

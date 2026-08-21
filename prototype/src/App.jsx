@@ -6,6 +6,7 @@ import {
   getFeedbackFormState,
   jobFailureCopy,
   jobProgressValue,
+  jobRecoveryAction,
   orderCards,
   uploadFailureState,
   uploadRemovalBlockMessage,
@@ -42,6 +43,7 @@ function prettySize(bytes = 0) {
 export function App() {
   const [state, setState] = useState(() => createInitialState());
   const [environment, setEnvironment] = useState(null);
+  const [retryingJob, setRetryingJob] = useState(false);
   const providerState = useProviders();
   const [route, setRoute] = useState(ROUTES[window.location.pathname] ?? 'feed');
   const [providerOpen, setProviderOpen] = useState(false);
@@ -294,12 +296,24 @@ export function App() {
   useActiveJob(watchedJobId, onJobUpdate, onJobComplete);
 
   async function resumeJob() {
+    if (retryingJob) return;
+    setRetryingJob(true);
     try {
-      if (state.job.stage === 'failed') {
+      if (jobRecoveryAction(state.job) === 'retry-analysis') {
         const result = await api.retryAnalysis(state.job.id);
         setAnalysisSettings((current) => ({ ...current, status: result.sleep_prevention_status || current.status }));
         if (result.sleep_prevention_status === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
-        setState((current) => ({ ...current, job: { ...current.job, stage: 'analyzing', progress: 70, error_code: null } }));
+        setState((current) => ({
+          ...current,
+          job: {
+            ...current.job,
+            stage: 'analyzing',
+            analysis_phase: 'pending',
+            analysis_detail_phase: 'queued',
+            progress: 70,
+            error_code: null,
+          },
+        }));
         return;
       }
       const result = await api.resumeJob(state.job.id);
@@ -308,6 +322,8 @@ export function App() {
       setState((current) => ({ ...current, job: { ...current.job, stage: 'transcribing', progress: 0 } }));
     } catch (error) {
       setToast(error.message);
+    } finally {
+      setRetryingJob(false);
     }
   }
   async function cancelJob() {
@@ -361,7 +377,7 @@ export function App() {
               </div>
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
               <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
-              {state.job && state.job.stage !== 'uploading' ? <JobPanel job={state.job} onRetry={resumeJob} onCancel={cancelJob} onRequestActiveCancel={requestActiveJobCancellation} /> : (
+              {state.job && state.job.stage !== 'uploading' ? <JobPanel job={state.job} onRetry={resumeJob} onCancel={cancelJob} onRequestActiveCancel={requestActiveJobCancellation} retrying={retryingJob} /> : (
                 <button className="primary full" disabled={startingAnalysis || !analysisSettings.loaded || !state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>{startingAnalysis ? '正在启动分析…' : `开始分析${state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}`}</button>
               )}
               <p className="privacy">音频、转写和结果保存在本机；只有转写文本会发送给当前模型厂商。</p>
@@ -406,14 +422,14 @@ function UploadFile({ file, onRemove }) {
   return <div className={`upload-file ${file.invalid ? 'invalid' : ''}`}><div className="file-type">{file.type}</div><div className="file-main"><b>{file.name}</b><span>{prettySize(file.size)} · {status}</span>{!file.invalid && !file.failed && file.progress < 100 && <div className="progress"><i style={{ width: `${file.progress}%` }} /></div>}</div><button className="icon-button" onClick={onRemove} aria-label={`移除 ${file.name}`}>×</button></div>;
 }
 
-function JobPanel({ job, onRetry, onCancel, onRequestActiveCancel }) {
-  if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" onClick={onRetry}>继续分析</button></div></div>;
+function JobPanel({ job, onRetry, onCancel, onRequestActiveCancel, retrying }) {
+  if (job.stage === 'interrupted') return <div className="job-card warning"><b>发现未完成的分析任务</b><p>上次处理在中断前已保存进度，可以从中断位置继续。</p><div><button className="secondary" onClick={onCancel}>取消任务</button><button className="primary" disabled={retrying} onClick={onRetry}>{retrying ? '正在继续…' : '继续分析'}</button></div></div>;
   if (job.stage === 'completed') return null;
   const transcribing = job.stage === 'transcribing';
   const analysis = ['analyzing', 'ready_to_commit'].includes(job.stage) ? analysisProgressCopy(job) : null;
   if (job.stage === 'failed' || analysis?.failed) {
     const failure = jobFailureCopy(job);
-    return <div className="job-card error"><b>{analysis?.title || failure.title}</b>{job.error_code && <code>{job.error_code}</code>}<p>{analysis?.detail || failure.body}</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" onClick={onRetry}>{failure.action}</button></div></div>;
+    return <div className="job-card error"><b>{analysis?.title || failure.title}</b>{job.error_code && <code>{job.error_code}</code>}<p>{analysis?.detail || failure.body}</p><div><button className="secondary" onClick={onCancel}>放弃任务</button><button className="primary" disabled={retrying} onClick={onRetry}>{retrying ? '正在重试…' : failure.action}</button></div></div>;
   }
   const phase = transcribing ? `${job.local_phase || '准备本地转写'}${job.batch_total ? ` ${job.batch_current}/${job.batch_total}` : ''}` : analysis.title;
   const analysisStage = job.analysis_phase === 'pending' ? '等待领取' : '进行中';

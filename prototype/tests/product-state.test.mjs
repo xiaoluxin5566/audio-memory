@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { canRemoveUploadFile, createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, orderCards, uploadFailureState, uploadRemovalBlockMessage } from '../src/store.js'
+import { canRemoveUploadFile, createInitialState, formatJobEta, getFeedbackFormState, jobFailureCopy, jobModelDisplayName, jobProgressValue, jobRecoveryAction, orderCards, uploadFailureState, uploadRemovalBlockMessage } from '../src/store.js'
 
 
 test('only uploading jobs allow individual audio removal', () => {
@@ -80,6 +80,12 @@ test('report audit failure is presented as generated and retryable', () => {
     body: '已保留报告初稿和已完成的审计块，重试不会重新转写。',
     action: '继续审计',
   })
+})
+
+test('failed analysis detail retries analysis even when the top-level stage is stale', () => {
+  assert.equal(jobRecoveryAction({ stage: 'failed', analysis_phase: 'failed' }), 'retry-analysis')
+  assert.equal(jobRecoveryAction({ stage: 'analyzing', analysis_phase: 'failed' }), 'retry-analysis')
+  assert.equal(jobRecoveryAction({ stage: 'interrupted', analysis_phase: null }), 'resume-transcription')
 })
 
 test('job progress prefers bounded live progress and preserves durable fallback', () => {

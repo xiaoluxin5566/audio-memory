@@ -133,3 +133,12 @@ export function jobFailureCopy(job) {
     action: '重新分析',
   };
 }
+
+
+export function jobRecoveryAction(job) {
+  if (job?.stage === 'failed' || job?.analysis_phase === 'failed') {
+    return 'retry-analysis';
+  }
+  if (job?.stage === 'interrupted') return 'resume-transcription';
+  return null;
+}
