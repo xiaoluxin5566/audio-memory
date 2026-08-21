@@ -26,6 +26,9 @@ def test_structured_event_inherits_context_and_uses_allowlisted_fields(caplog) -
             "analysis.provider.request_started",
             status="started",
             elapsed_ms=12,
+            split_depth=4,
+            segment_count=17,
+            reason="model_output_truncated",
         )
 
     payload = json.loads(caplog.records[-1].message)
@@ -36,6 +39,9 @@ def test_structured_event_inherits_context_and_uses_allowlisted_fields(caplog) -
     assert payload["model_id"] == "deepseek-v4-pro"
     assert payload["status"] == "started"
     assert payload["elapsed_ms"] == 12
+    assert payload["split_depth"] == 4
+    assert payload["segment_count"] == 17
+    assert payload["reason"] == "model_output_truncated"
     assert payload["timestamp"].endswith("+00:00")
 
 

@@ -25,6 +25,26 @@ logger = logging.getLogger("uvicorn.error")
 ANALYSIS_SUBMISSION_TIMEOUT_SECONDS = 30.0
 
 
+def emit_duplicate_retry(job_id: str, retry_path: str) -> None:
+    emit_analysis_event(
+        logger,
+        "analysis.retry.duplicate_accepted",
+        job_id=job_id,
+        status="already_running",
+        retry_path=retry_path,
+    )
+
+
+def emit_accepted_retry(job_id: str, retry_path: str) -> None:
+    emit_analysis_event(
+        logger,
+        "analysis.retry.accepted",
+        job_id=job_id,
+        status="analyzing",
+        retry_path=retry_path,
+    )
+
+
 class FileView(BaseModel):
     id: str
     job_id: str
@@ -90,6 +110,18 @@ async def has_legacy_completed_unaudited_report(
     return isinstance(metadata, dict) and (
         metadata.get("audit_status") == "completed_unaudited"
     )
+
+
+async def has_active_analysis(request: Request, job_id: str) -> bool:
+    async with service_from(request).database.session() as session:
+        version_id = await session.scalar(
+            select(AnalysisVersion.id).where(
+                AnalysisVersion.source_job_id == job_id,
+                AnalysisVersion.reanalysis_batch_id.is_(None),
+                AnalysisVersion.status.in_(("pending", "running")),
+            )
+        )
+    return version_id is not None
 
 
 async def protect_job_if_enabled(request: Request, job_id: str) -> str:
@@ -448,7 +480,7 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
 
 
 @router.post("/{job_id}/retry-analysis", status_code=202)
-async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
+async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]:
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
     if job_id in tasks:
         raise HTTPException(status_code=409, detail="Analysis is already running")
@@ -456,6 +488,15 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.stage == JobStage.ANALYZING.value and await has_active_analysis(
+        request, job_id
+    ):
+        emit_duplicate_retry(job_id, "active_analysis_lookup")
+        return {
+            "id": job_id,
+            "stage": JobStage.ANALYZING.value,
+            "already_running": True,
+        }
     legacy_completed_unaudited = (
         job.stage in {JobStage.COMPLETED.value, JobStage.INTERRUPTED.value}
         and await has_legacy_completed_unaudited_report(request, job_id)
@@ -489,15 +530,24 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
             },
         ) from exc
 
-    resumed_version = (
-        await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
-            source_job_id=job_id,
-            provider_id=provider.provider_id,
-            model_id=provider.model_id,
-            credential_generation=credential_generation,
+    try:
+        resumed_version = (
+            await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
+                source_job_id=job_id,
+                provider_id=provider.provider_id,
+                model_id=provider.model_id,
+                credential_generation=credential_generation,
+            )
         )
-    )
+    except AlreadyRunningError:
+        emit_duplicate_retry(job_id, "failed_upload_resume")
+        return {
+            "id": job_id,
+            "stage": JobStage.ANALYZING.value,
+            "already_running": True,
+        }
     if resumed_version is not None:
+        emit_accepted_retry(job_id, "failed_upload_resume")
         return {"id": job_id, "stage": JobStage.ANALYZING.value}
 
     analysis_request = await snapshot_analysis_request(
@@ -521,16 +571,28 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str]:
             )
             if resumed_version is not None:
                 submitted = True
+                emit_accepted_retry(job_id, "autonomous_resume")
                 return {
                     "id": job_id,
                     "stage": JobStage.ANALYZING.value,
                     "sleep_prevention_status": sleep_status,
                 }
 
-        await request.app.state.analysis_task_coordinator.submit_new_upload(
-            analysis_request
-        )
+        try:
+            await request.app.state.analysis_task_coordinator.submit_new_upload(
+                analysis_request
+            )
+        except AlreadyRunningError:
+            submitted = True
+            emit_duplicate_retry(job_id, "new_upload_submission")
+            return {
+                "id": job_id,
+                "stage": JobStage.ANALYZING.value,
+                "sleep_prevention_status": sleep_status,
+                "already_running": True,
+            }
         submitted = True
+        emit_accepted_retry(job_id, "new_upload_submission")
         return {
             "id": job_id,
             "stage": JobStage.ANALYZING.value,

@@ -49,6 +49,50 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   expect(resumed).toBe(true)
 })
 
+test('a stale analyzing failure retries once instead of calling transcription resume', async ({ page }) => {
+  let retryRequests = 0
+  let resumeRequests = 0
+  let releaseRetry
+  const retryReleased = new Promise((resolve) => { releaseRetry = resolve })
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', state: 'available', active: true }] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: {
+      id: 'job-stale-analysis', stage: 'analyzing', analysis_phase: 'failed',
+      error_code: 'report_audit_pending', provider_id: 'deepseek', model_id: 'deepseek-chat',
+      files: [{ id: 'file-1', original_name: 'retained.aac', extension: '.aac', size_bytes: 2048, upload_progress: 100 }],
+    } })
+    if (pathname === '/api/jobs/job-stale-analysis/retry-analysis' && request.method() === 'POST') {
+      retryRequests += 1
+      await retryReleased
+      return route.fulfill({ status: 202, json: { id: 'job-stale-analysis', stage: 'analyzing' } })
+    }
+    if (pathname === '/api/jobs/job-stale-analysis/resume' && request.method() === 'POST') {
+      resumeRequests += 1
+      return route.fulfill({ status: 409, json: { detail: 'Only an interrupted transcription can resume' } })
+    }
+    if (pathname === '/api/jobs/job-stale-analysis' && request.method() === 'GET') {
+      return route.fulfill({ json: { id: 'job-stale-analysis', stage: 'analyzing', analysis_phase: 'failed', progress_percent: 80 } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+  const retryButton = page.getByRole('button', { name: '继续审计', exact: true })
+  await retryButton.click()
+  await expect(page.getByRole('button', { name: '正在重试…', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '正在重试…', exact: true }).click({ force: true })
+  expect(retryRequests).toBe(1)
+  expect(resumeRequests).toBe(0)
+  releaseRetry()
+  await expect(page.getByText('等待分析线程开始', { exact: true })).toBeVisible()
+})
+
 test('cancelling an interrupted task clears only the current upload state', async ({ page }) => {
   let cancelled = false
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {

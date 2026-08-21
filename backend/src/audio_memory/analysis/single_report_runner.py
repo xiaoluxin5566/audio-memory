@@ -233,10 +233,7 @@ class SingleReportRunner:
                             saved_chunk_results.pop(chunk_id, None)
                     split_children = None
                     split_child_ids = None
-                    if (
-                        split_depth < policy.max_split_depth
-                        and chunk.segment_count > policy.minimum_segment_count
-                    ):
+                    if chunk.segment_count > policy.minimum_segment_count:
                         split_children = split_audit_chunk(chunk)
                         split_child_ids = [
                             audit_chunk_id(
@@ -294,11 +291,24 @@ class SingleReportRunner:
                     except ProviderAnalysisError as exc:
                         if (
                             exc.code == "model_output_truncated"
-                            and split_depth < policy.max_split_depth
                             and chunk.segment_count > policy.minimum_segment_count
                         ):
                             assert split_children is not None
                             assert split_child_ids is not None
+                            emit_analysis_event(
+                                logging.getLogger("uvicorn.error"),
+                                "analysis.report.audit_chunk_split",
+                                analysis_version_id=version.id,
+                                provider_id=version.provider_id,
+                                model_id=version.model_id,
+                                status="retrying",
+                                reason=exc.code,
+                                split_depth=split_depth,
+                                segment_count=chunk.segment_count,
+                                child_count=len(split_children),
+                                chunk_index=chunk.index,
+                                chunk_count=chunk.total,
+                            )
                             saved_chunk_splits[chunk_id] = split_child_ids
                             async with checkpoint_lock:
                                 await self._save_checkpoint(
@@ -416,6 +426,15 @@ class SingleReportRunner:
                     report_markdown=result.report_markdown,
                 )
             except Exception as exc:
+                emit_analysis_event(
+                    logging.getLogger("uvicorn.error"),
+                    "analysis.report.audit_recovery_failed",
+                    analysis_version_id=version.id,
+                    provider_id=version.provider_id,
+                    model_id=version.model_id,
+                    status="failed",
+                    error=exc,
+                )
                 staged["direct_report_v1_audit_error"] = self._error_text(exc)
                 await self._save_checkpoint(
                     version.id,
@@ -429,6 +448,15 @@ class SingleReportRunner:
                     retriable=True,
                 ) from exc
             staged["direct_report_v1_audit"] = audit.model_dump(mode="json")
+            emit_analysis_event(
+                logging.getLogger("uvicorn.error"),
+                "analysis.report.audit_recovery_completed",
+                analysis_version_id=version.id,
+                provider_id=version.provider_id,
+                model_id=version.model_id,
+                status="completed",
+                audit_chunk_count=len(chunk_audits),
+            )
             await self._save_checkpoint(
                 version.id,
                 staged,
