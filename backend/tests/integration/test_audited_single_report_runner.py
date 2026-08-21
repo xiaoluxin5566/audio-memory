@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -337,15 +338,22 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
 
 @pytest.mark.asyncio
 async def test_truncated_audit_keeps_splitting_past_normal_depth_until_single_segments(
-    tmp_path,
+    tmp_path, caplog,
 ) -> None:
     provider = SingleSegmentSplittingProvider(total_segments=12)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     report, staged = await run_with(tmp_path, provider, segment_count=12)
 
     assert provider.chunk_sizes[-1] == 1
     assert len(staged["direct_report_v1_audit_chunk_results"]) == 12
     assert report.quality_metadata.audit_status == "completed"
+    events = [json.loads(record.message) for record in caplog.records if record.message.startswith("{")]
+    split_events = [item for item in events if item["event"] == "analysis.report.audit_chunk_split"]
+    assert split_events
+    assert all(item["reason"] == "model_output_truncated" for item in split_events)
+    assert max(item["split_depth"] for item in split_events) >= 3
+    assert all("transcript" not in item and "model_output" not in item for item in split_events)
 
 
 @pytest.mark.asyncio
@@ -438,7 +446,11 @@ async def test_report_runner_persists_and_logs_each_user_visible_phase(
     monkeypatch.setattr(
         runner_module,
         "emit_analysis_event",
-        lambda _logger, _event, **fields: logged_phases.append(fields["status"]),
+        lambda _logger, event, **fields: (
+            logged_phases.append(fields["status"])
+            if event == "analysis.report.phase_changed"
+            else None
+        ),
     )
     save_phase = runner._set_report_phase
 

@@ -21,6 +21,14 @@ _ALLOWED_FIELDS = frozenset(
         "lease_expires_at",
         "repair_type",
         "affected_count",
+        "reason",
+        "split_depth",
+        "segment_count",
+        "child_count",
+        "chunk_index",
+        "chunk_count",
+        "audit_chunk_count",
+        "retry_path",
     }
 )
 _CONTEXT: ContextVar[dict[str, str | int | float | bool]] = ContextVar(

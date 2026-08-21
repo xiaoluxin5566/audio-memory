@@ -25,6 +25,26 @@ logger = logging.getLogger("uvicorn.error")
 ANALYSIS_SUBMISSION_TIMEOUT_SECONDS = 30.0
 
 
+def emit_duplicate_retry(job_id: str, retry_path: str) -> None:
+    emit_analysis_event(
+        logger,
+        "analysis.retry.duplicate_accepted",
+        job_id=job_id,
+        status="already_running",
+        retry_path=retry_path,
+    )
+
+
+def emit_accepted_retry(job_id: str, retry_path: str) -> None:
+    emit_analysis_event(
+        logger,
+        "analysis.retry.accepted",
+        job_id=job_id,
+        status="analyzing",
+        retry_path=retry_path,
+    )
+
+
 class FileView(BaseModel):
     id: str
     job_id: str
@@ -471,6 +491,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
     if job.stage == JobStage.ANALYZING.value and await has_active_analysis(
         request, job_id
     ):
+        emit_duplicate_retry(job_id, "active_analysis_lookup")
         return {
             "id": job_id,
             "stage": JobStage.ANALYZING.value,
@@ -519,12 +540,14 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
             )
         )
     except AlreadyRunningError:
+        emit_duplicate_retry(job_id, "failed_upload_resume")
         return {
             "id": job_id,
             "stage": JobStage.ANALYZING.value,
             "already_running": True,
         }
     if resumed_version is not None:
+        emit_accepted_retry(job_id, "failed_upload_resume")
         return {"id": job_id, "stage": JobStage.ANALYZING.value}
 
     analysis_request = await snapshot_analysis_request(
@@ -548,6 +571,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
             )
             if resumed_version is not None:
                 submitted = True
+                emit_accepted_retry(job_id, "autonomous_resume")
                 return {
                     "id": job_id,
                     "stage": JobStage.ANALYZING.value,
@@ -560,6 +584,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
             )
         except AlreadyRunningError:
             submitted = True
+            emit_duplicate_retry(job_id, "new_upload_submission")
             return {
                 "id": job_id,
                 "stage": JobStage.ANALYZING.value,
@@ -567,6 +592,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
                 "already_running": True,
             }
         submitted = True
+        emit_accepted_retry(job_id, "new_upload_submission")
         return {
             "id": job_id,
             "stage": JobStage.ANALYZING.value,

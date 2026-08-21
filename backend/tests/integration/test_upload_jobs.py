@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import asyncio
+import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -683,8 +685,9 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
 
 
 @pytest.mark.asyncio
-async def test_duplicate_analysis_retry_returns_current_running_state(job_client):
+async def test_duplicate_analysis_retry_returns_current_running_state(job_client, caplog):
     client, _, database = job_client
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     job_id = (await client.post("/api/jobs")).json()["id"]
     async with database.session() as session:
         job = await session.get(AnalysisJob, job_id)
@@ -706,6 +709,10 @@ async def test_duplicate_analysis_retry_returns_current_running_state(job_client
     assert response.status_code == 202
     assert response.json()["stage"] == JobStage.ANALYZING.value
     assert response.json()["already_running"] is True
+    events = [json.loads(record.message) for record in caplog.records if record.message.startswith("{")]
+    duplicate = [item for item in events if item["event"] == "analysis.retry.duplicate_accepted"]
+    assert duplicate[-1]["job_id"] == job_id
+    assert duplicate[-1]["retry_path"] == "new_upload_submission"
 
 
 @pytest.mark.asyncio
