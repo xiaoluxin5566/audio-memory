@@ -42,6 +42,8 @@ class KeychainRepository:
         "deepseek": "provider:deepseek",
         "openai": "provider:openai",
         "glm": "provider:glm",
+        "volcano_asr": "asr_provider:volcano",
+        "beta_installation": "installation:beta",
     }
 
     def __init__(self, client: SecurityClient, service: str = SERVICE) -> None:
