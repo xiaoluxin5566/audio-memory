@@ -31,6 +31,7 @@ async function installApi(page, { rejectDeepSeek = false } = {}) {
     if (url.pathname === '/api/providers' && request.method() === 'GET') {
       return route.fulfill({ json: providers })
     }
+    if (url.pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (url.pathname === '/api/providers/deepseek/key' && request.method() === 'PUT') {
       if (rejectDeepSeek) {
         return route.fulfill({
@@ -60,14 +61,14 @@ test('successful first configuration becomes current and closes the modal', asyn
   await page.goto('/')
 
   await expect(page.getByRole('heading', { name: '先上传音频' })).toBeVisible()
-  await page.getByRole('button', { name: '去配置' }).click()
+  await page.locator('section').filter({ hasText: '模型与 API Key' }).getByRole('button', { name: '去配置' }).click()
   await page.getByRole('button', { name: 'DeepSeek' }).click()
   await page.getByLabel('API Key').fill('visible-test-key')
   await page.getByRole('button', { name: '保存并校验' }).click()
 
   await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeHidden()
-  await expect(page.locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
-  await expect(page.getByText('连接可用', { exact: false })).toBeVisible()
+  await expect(page.locator('section').filter({ hasText: '模型与 API Key' }).locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
+  await expect(page.locator('section').filter({ hasText: '模型与 API Key' }).getByText('连接可用', { exact: false })).toBeVisible()
   expect(calls).toContain('PUT /api/providers/deepseek/key')
   expect(calls).toContain('POST /api/providers/deepseek/activate')
   expect(calls.indexOf('PUT /api/providers/deepseek/key')).toBeLessThan(calls.indexOf('POST /api/providers/deepseek/activate'))
@@ -76,7 +77,7 @@ test('successful first configuration becomes current and closes the modal', asyn
 test('failed configuration keeps the visible key until the modal is closed', async ({ page }) => {
   const calls = await installApi(page, { rejectDeepSeek: true })
   await page.goto('/')
-  await page.getByRole('button', { name: '去配置' }).click()
+  await page.locator('section').filter({ hasText: '模型与 API Key' }).getByRole('button', { name: '去配置' }).click()
   await page.getByRole('button', { name: 'DeepSeek' }).click()
 
   const keyField = page.getByLabel('API Key')
@@ -105,6 +106,7 @@ test('startup validation refreshes automatically without manual revalidation', a
         last_validated_at: providerReads <= 2 ? null : '2026-08-05T10:00:00Z',
       }] } })
     }
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/providers/validate-configured' && request.method() === 'POST') {
       return route.fulfill({ json: { providers: [{
         provider_id: 'deepseek', display_name: 'DeepSeek', active: true,

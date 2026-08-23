@@ -206,6 +206,12 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify({ model_id: modelId }),
   }),
+  asr: () => apiRequest('/asr'),
+  saveAsrKey: (apiKey) => apiRequest('/asr/key', {
+    method: 'PUT', body: JSON.stringify({ api_key: apiKey }),
+  }),
+  validateAsr: () => apiRequest('/asr/validate', { method: 'POST' }),
+  readiness: () => apiRequest('/readiness'),
   analysisSettings: () => apiRequest('/settings/analysis'),
   updateAnalysisSettings: (preventSleep) => apiRequest('/settings/analysis', {
     method: 'PUT', body: JSON.stringify({ prevent_sleep: preventSleep }),

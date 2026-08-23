@@ -49,7 +49,9 @@ export function App() {
   const [providerOpen, setProviderOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [reanalysisOpen, setReanalysisOpen] = useState(false);
-  const [sleepPromptOpen, setSleepPromptOpen] = useState(false);
+  const [interruptionNoticeOpen, setInterruptionNoticeOpen] = useState(false);
+  const [asrOpen, setAsrOpen] = useState(false);
+  const [asrState, setAsrState] = useState({ state: 'initializing', displayName: '火山语音', resourceId: 'volc.seedasr.auc' });
   const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [removalBlockedOpen, setRemovalBlockedOpen] = useState(false);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
@@ -90,6 +92,12 @@ export function App() {
     });
     return () => { cancelled = true; };
   }, []);
+  const refreshAsr = useCallback(async () => {
+    const value = await api.asr();
+    setAsrState({ state: value.state, displayName: value.display_name, resourceId: value.resource_id, errorCode: value.error_code });
+    return value;
+  }, []);
+  useEffect(() => { refreshAsr().catch(() => setAsrState((current) => ({ ...current, state: 'unavailable' }))); }, [refreshAsr]);
 
   useEffect(() => {
     refreshContent().catch(() => setToast('无法读取本地历史，请确认服务已启动'));
@@ -188,6 +196,7 @@ export function App() {
       setProviderOpen(true);
       return;
     }
+    if (asrState.state !== 'available') { setAsrOpen(true); return; }
     const files = [...fileList];
     if (!files.length) return;
     let jobId = state.job?.id;
@@ -242,6 +251,7 @@ export function App() {
       setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
       if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
       setState((current) => ({ ...current, job: { ...job, progress: jobProgressValue(job) } }));
+      setInterruptionNoticeOpen(true);
     } finally {
       setStartingAnalysis(false);
     }
@@ -252,7 +262,6 @@ export function App() {
     if (provider?.state !== 'available') { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
     if (!analysisSettings.loaded) return;
-    if (!analysisSettings.preventSleep) { setSleepPromptOpen(true); return; }
     await executeStartAnalysis();
   }
 
@@ -260,17 +269,12 @@ export function App() {
     try {
       const settings = await api.updateAnalysisSettings(enabled);
       setAnalysisSettings({ preventSleep: Boolean(settings.prevent_sleep), status: settings.sleep_prevention_status || 'inactive', loaded: true });
+      if (!enabled) setToast('请尽量打开，电脑若自动休眠会暂停分析');
       return true;
     } catch (error) {
       setToast(error.message);
       return false;
     }
-  }
-
-  async function enableSleepPreventionAndStart() {
-    if (!await updatePreventSleep(true)) return;
-    setSleepPromptOpen(false);
-    await executeStartAnalysis();
   }
 
   const onJobUpdate = useCallback((job) => {
@@ -361,6 +365,11 @@ export function App() {
               {currentProvider.state === 'available' && <div className="status-success"><i />连接可用 · {currentProvider.lastChecked || '刚刚'} 校验</div>}
               {currentProvider.error && <div className="inline-error"><b>{currentProvider.error}</b></div>}
             </section>
+            <section className="panel provider-panel">
+              <div className="panel-title"><strong>语音转写 API</strong><span className={asrState.state === 'available' ? 'ok-text' : ''}>{asrState.state === 'available' ? '已配置' : '未配置'}</span></div>
+              <div className="provider-summary"><div><b>{asrState.displayName}</b><small>仅支持火山语音 · 豆包录音文件识别 2.0</small></div><button className="secondary compact" onClick={() => setAsrOpen(true)}>{asrState.state === 'available' ? '修改' : '去配置'}</button></div>
+              {asrState.state === 'available' && <div className="status-success"><i />连接可用 · {asrState.resourceId}</div>}
+            </section>
             <section className="panel sleep-setting-panel">
               <label className="sleep-setting-row">
                 <span><strong>分析期间保持电脑唤醒</strong><small>锁屏或长时间不操作时，转写和报告生成仍可继续</small></span>
@@ -371,16 +380,16 @@ export function App() {
             </section>
             <section className="panel upload-panel">
               <div className="panel-title"><strong>上传音频</strong><span>{state.upload.files.length ? `${state.upload.files.length} 个文件` : ''}</span></div>
-              <div className={`drop-zone ${currentProvider.state !== 'available' || uploadLocked ? 'disabled' : ''}`} onClick={() => uploadLocked ? undefined : currentProvider.state === 'available' ? fileInput.current?.click() : setProviderOpen(true)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!uploadLocked) addFiles(event.dataTransfer.files); }}>
+              <div className={`drop-zone ${currentProvider.state !== 'available' || asrState.state !== 'available' || uploadLocked ? 'disabled' : ''}`} onClick={() => uploadLocked ? undefined : currentProvider.state !== 'available' ? setProviderOpen(true) : asrState.state !== 'available' ? setAsrOpen(true) : fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!uploadLocked) addFiles(event.dataTransfer.files); }}>
                 <b>{uploadLocked ? '当前任务完成并生成报告前，不能添加新的音频' : '拖拽音频到这里，或点击选择'}</b><span>{uploadLocked ? '可重试或清除当前任务' : '支持 MP3、AAC'}</span>
-                <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
+                <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available' || asrState.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
               </div>
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
               <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
               {state.job && state.job.stage !== 'uploading' ? <JobPanel job={state.job} onRetry={resumeJob} onCancel={cancelJob} onRequestActiveCancel={requestActiveJobCancellation} retrying={retryingJob} /> : (
                 <button className="primary full" disabled={startingAnalysis || !analysisSettings.loaded || !state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)} onClick={startAnalysis}>{startingAnalysis ? '正在启动分析…' : `开始分析${state.upload.files.length ? ` ${state.upload.files.length} 个文件` : ''}`}</button>
               )}
-              <p className="privacy">音频、转写和结果保存在本机；只有转写文本会发送给当前模型厂商。</p>
+              <p className="privacy">音频会通过加密临时链接发送至火山语音转写，转写完成后自动删除；转写文本会发送给当前分析模型。</p>
             </section>
           </aside>
           <main className="feed-area">
@@ -390,8 +399,9 @@ export function App() {
       )}
       {route === 'history' && <History state={state} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
+      {asrOpen && <AsrModal state={asrState} refresh={refreshAsr} onClose={() => setAsrOpen(false)} onToast={setToast} />}
       {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
-      {sleepPromptOpen && <SleepPreventionPrompt onEnable={enableSleepPreventionAndStart} onContinue={async () => { setSleepPromptOpen(false); await executeStartAnalysis(); }} onClose={() => setSleepPromptOpen(false)} />}
+      {interruptionNoticeOpen && <AnalysisInterruptionNotice onClose={() => setInterruptionNoticeOpen(false)} />}
       {removalBlockedOpen && <RemovalBlockedModal onClose={() => setRemovalBlockedOpen(false)} />}
       {cancelConfirmOpen && <CancelAnalysisModal cancelling={cancellingJob} onClose={() => setCancelConfirmOpen(false)} onConfirm={cancelJob} />}
       {clearOpen && <ClearModal onClose={() => setClearOpen(false)} onConfirm={async () => { await api.clearHistory(); reanalysis.clearState(); setState((current) => ({ ...current, feed: [], todos: [], history: [], job: null, upload: { files: [], error: '', paused: false } })); setAnalysisSettings((current) => ({ ...current, status: 'inactive' })); await refreshContent(); setSelectedCard(null); setClearOpen(false); setToast('所有历史已清除'); navigate('feed'); }} />}
@@ -401,8 +411,8 @@ export function App() {
   );
 }
 
-function SleepPreventionPrompt({ onEnable, onContinue, onClose }) {
-  return <div className="modal-backdrop"><section className="modal sleep-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="sleep-prompt-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><div className="sleep-mark">☾</div><h1 id="sleep-prompt-title">分析期间保持电脑唤醒？</h1><p>电脑进入休眠后，转写和报告生成会暂停。开启后，即使锁屏或长时间不操作，分析仍会继续；屏幕仍可正常关闭。</p><div className="modal-actions"><button className="secondary" onClick={onContinue}>暂不开启</button><button className="primary" onClick={onEnable}>开启并继续</button></div></section></div>;
+function AnalysisInterruptionNotice({ onClose }) {
+  return <div className="modal-backdrop"><section className="modal sleep-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="interruption-notice-title"><div className="sleep-mark">☾</div><h1 id="interruption-notice-title">分析已经开始</h1><p>关闭当前页面、退出应用或重启电脑，会中断正在进行的云端转写和分析；再次打开应用后会从已保存的进度继续。电脑自动休眠会暂停处理，建议保持“分析期间保持电脑唤醒”开启。</p><div className="modal-actions"><button className="primary" onClick={onClose}>知道了</button></div></section></div>;
 }
 
 function RemovalBlockedModal({ onClose }) {
@@ -632,6 +642,41 @@ function EvidencePlayback({ evidence = [] }) {
 
 function History({ state }) {
   return <main className="page-container"><div className="page-heading"><h1>音频历史</h1><p>已完成分析的音频会自动保存在本机。</p></div>{state.history.length === 0 ? <div className="page-empty"><h2>还没有历史音频</h2><p>完成一次整批分析后，音频会出现在这里。</p></div> : state.history.map((batch) => <section className="history-day" key={batch.id}><div className="date-divider"><b>{batch.date}</b></div><div className="history-batch"><div className="history-batch-title"><b>{batch.uploadedAt} 上传</b><span>{batch.files.length} 个音频</span></div><div className="audio-list">{batch.files.map((file, index) => <div className="audio-row" key={`${file.name}-${index}`}><div className="audio-type">{file.type}</div><div><b>{file.name}</b><span>{file.size} · {file.duration}</span></div><div className="audio-time"><b>{file.time}</b><span>本地文件</span></div></div>)}</div></div></section>)}</main>;
+}
+
+function AsrModal({ state, refresh, onClose, onToast }) {
+  const [key, setKey] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  async function save() {
+    setSaving(true);
+    setError('');
+    try {
+      await api.saveAsrKey(key.trim());
+      await refresh();
+      onToast('火山语音 API 已配置并校验通过');
+      onClose();
+    } catch (failure) {
+      setError(failure.message || '校验失败，请检查 API Key');
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function revalidate() {
+    setSaving(true);
+    setError('');
+    try {
+      await api.validateAsr();
+      await refresh();
+      onToast('火山语音连接可用');
+      onClose();
+    } catch (failure) {
+      setError(failure.message || '连接不可用，请更新 API Key');
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="modal-backdrop"><section className="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="asr-modal-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><h1 id="asr-modal-title">配置火山语音转写</h1><p>仅支持火山语音“豆包录音文件识别 2.0”。API Key 保存在本机系统钥匙串，保存时会立即校验。</p><div className="provider-state-line"><b>{state.state === 'available' ? 'Key 已安全保存' : '尚未配置'}</b><span>资源：{state.resourceId}</span></div><label>火山语音 API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={state.state === 'available' ? '已保存，填写新 Key 可覆盖' : '填写火山语音 API Key'} autoFocus autoComplete="off" spellCheck="false" /></label>{error && <div className="validation error">{error}</div>}<div className="modal-actions provider-actions"><button className="secondary" disabled={saving} onClick={onClose}>取消</button>{state.state === 'available' && <button className="secondary" disabled={saving} onClick={revalidate}>重新校验</button>}<button className="primary" disabled={saving || !key.trim()} onClick={save}>{saving ? '正在校验…' : '保存并校验'}</button></div></section></div>;
 }
 
 function ProviderModal({ state, refresh, onClose, onToast }) {

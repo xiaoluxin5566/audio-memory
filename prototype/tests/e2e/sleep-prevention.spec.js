@@ -24,6 +24,7 @@ async function installApi(page, { initiallyEnabled = false, initialStatus = 'ina
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: providers })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
@@ -67,43 +68,37 @@ async function uploadOneFile(page) {
 }
 
 
-test('disabled protection asks before analysis and can be enabled permanently', async ({ page }) => {
+test('disabled protection still starts and shows interruption notice', async ({ page }) => {
   const calls = await installApi(page)
   await uploadOneFile(page)
 
   await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
 
-  await expect(page.getByRole('dialog', { name: '分析期间保持电脑唤醒？' })).toBeVisible()
-  expect(calls.startCalls()).toBe(0)
-  await page.getByRole('button', { name: '开启并继续' }).click()
-
-  await expect(page.getByRole('switch', { name: '分析期间保持电脑唤醒' })).toBeChecked()
-  expect(calls.updateCalls()).toBe(1)
+  await expect(page.getByRole('dialog', { name: '分析已经开始' })).toBeVisible()
+  await expect(page.getByRole('switch', { name: '分析期间保持电脑唤醒' })).not.toBeChecked()
+  expect(calls.updateCalls()).toBe(0)
   expect(calls.startCalls()).toBe(1)
 })
 
 
-test('enabled protection starts analysis without another prompt', async ({ page }) => {
+test('enabled protection starts analysis and shows the same interruption notice', async ({ page }) => {
   const calls = await installApi(page, { initiallyEnabled: true })
   await uploadOneFile(page)
 
   await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
 
-  await expect(page.getByRole('dialog', { name: '分析期间保持电脑唤醒？' })).toBeHidden()
+  await expect(page.getByRole('dialog', { name: '分析已经开始' })).toBeVisible()
   expect(calls.startCalls()).toBe(1)
 })
 
 
-test('user can continue one analysis without enabling protection', async ({ page }) => {
-  const calls = await installApi(page)
-  await uploadOneFile(page)
-
-  await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
-  await page.getByRole('button', { name: '暂不开启' }).click()
-
+test('turning protection off explains that automatic sleep pauses analysis', async ({ page }) => {
+  const calls = await installApi(page, { initiallyEnabled: true })
+  await page.goto('/')
+  await page.getByRole('switch', { name: '分析期间保持电脑唤醒' }).click()
   await expect(page.getByRole('switch', { name: '分析期间保持电脑唤醒' })).not.toBeChecked()
-  expect(calls.updateCalls()).toBe(0)
-  expect(calls.startCalls()).toBe(1)
+  await expect(page.getByText('请尽量打开，电脑若自动休眠会暂停分析', { exact: true })).toBeVisible()
+  expect(calls.updateCalls()).toBe(1)
 })
 
 

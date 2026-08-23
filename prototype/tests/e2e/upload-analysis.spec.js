@@ -55,6 +55,7 @@ async function installJobApi(page) {
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') {
       if (completed) completedFeedReads += 1
       if (completedFeedReads === 1) {
@@ -99,6 +100,7 @@ test('completed batch retries a transient feed refresh before clearing the job',
   await expect(page.getByText('上传完成')).toBeVisible()
 
   await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
+  await page.getByRole('button', { name: '知道了' }).click()
   await expect.poll(completedFeedReads).toBeGreaterThan(1)
   await expect(page.getByRole('heading', { name: '产品方案评审' })).toBeVisible()
   await expect(page.getByText('meeting.mp3')).toBeHidden()
@@ -115,6 +117,7 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
@@ -156,6 +159,7 @@ test('active transcription disables adding audio until its report is published',
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const { pathname } = new URL(route.request().url())
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
@@ -188,6 +192,7 @@ test('refresh during report publication stays locked and shows publishing progre
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const { pathname } = new URL(route.request().url())
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
@@ -222,6 +227,7 @@ test('clearing history also clears a terminal current task and unlocks uploads',
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history' && request.method() === 'DELETE') {
       cleared = true

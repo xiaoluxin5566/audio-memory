@@ -44,11 +44,16 @@ button{cursor:pointer}
 .sleep-setting-row span{min-width:0}
 .sleep-setting-row strong{display:block;font-size:12px}
 .sleep-setting-row small{display:block;color:var(--muted);font-size:9px;line-height:1.5;margin-top:4px}
-.sleep-setting-row input{appearance:none;width:34px;height:20px;border:0;border-radius:99px;background:#cbd1d8;position:relative;flex:0 0 auto;transition:.18s}
+.sleep-setting-row input{appearance:none;width:34px;height:20px;border:0;border-radius:99px;background:#cbd1d8;position:relative;flex:0 0 auto;transition:.18s;outline:2px solid transparent;outline-offset:2px}
 .sleep-setting-row input:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(28,35,47,.25);transition:.18s}
 .sleep-setting-row input:checked{background:var(--brand)}
 .sleep-setting-row input:checked:before{transform:translateX(14px)}
+.sleep-setting-row input:focus-visible{outline-color:var(--brand)}
+.sleep-setting-row input:active:before{transform:scale(.9)}
+.sleep-setting-row input:checked:active:before{transform:translateX(14px) scale(.9)}
 .sleep-setting-row input:disabled{opacity:.65;cursor:not-allowed}
+@media(hover:hover){.sleep-setting-row input:not(:disabled):hover{box-shadow:0 0 0 3px rgba(82,105,216,.12)}}
+@media(prefers-reduced-motion:reduce){.sleep-setting-row input,.sleep-setting-row input:before{transition:none}}
 .sleep-protection-active{display:flex;align-items:center;gap:6px;color:var(--success);font-size:9px;margin-top:9px}
 .sleep-protection-active i{width:6px;height:6px;border-radius:50%;background:#47a168}
 .sleep-protection-error{color:var(--danger);font-size:9px;line-height:1.5;margin-top:9px}
