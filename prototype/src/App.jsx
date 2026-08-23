@@ -22,6 +22,7 @@ import { getReanalysisView, isActiveReanalysis } from './api/state.js';
 import { buildReportEventMap } from './reportPresentation.js';
 import './styles.css';
 
+const VOLCANO_ASR_API_KEY_URL = 'https://console.volcengine.com/speech/new/setting/apikeys';
 const ROUTES = { '/': 'feed', '/history': 'history' };
 const ROUTE_PATHS = { feed: '/', history: '/history' };
 const sceneClass = { analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
@@ -368,6 +369,7 @@ export function App() {
             <section className="panel provider-panel">
               <div className="panel-title"><strong>语音转写 API</strong><span className={asrState.state === 'available' ? 'ok-text' : ''}>{asrState.state === 'available' ? '已配置' : '未配置'}</span></div>
               <div className="provider-summary"><div><b>{asrState.displayName}</b><small>仅支持火山语音 · 豆包录音文件识别 2.0</small></div><button className="secondary compact" onClick={() => setAsrOpen(true)}>{asrState.state === 'available' ? '修改' : '去配置'}</button></div>
+              <a className="provider-help-link" href={VOLCANO_ASR_API_KEY_URL} target="_blank" rel="noreferrer">申请或管理 API Key <span aria-hidden="true">↗</span></a>
               {asrState.state === 'available' && <div className="status-success"><i />连接可用 · {asrState.resourceId}</div>}
             </section>
             <section className="panel sleep-setting-panel">
@@ -676,7 +678,7 @@ function AsrModal({ state, refresh, onClose, onToast }) {
       setSaving(false);
     }
   }
-  return <div className="modal-backdrop"><section className="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="asr-modal-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><h1 id="asr-modal-title">配置火山语音转写</h1><p>仅支持火山语音“豆包录音文件识别 2.0”。API Key 保存在本机系统钥匙串，保存时会立即校验。</p><div className="provider-state-line"><b>{state.state === 'available' ? 'Key 已安全保存' : '尚未配置'}</b><span>资源：{state.resourceId}</span></div><label>火山语音 API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={state.state === 'available' ? '已保存，填写新 Key 可覆盖' : '填写火山语音 API Key'} autoFocus autoComplete="off" spellCheck="false" /></label>{error && <div className="validation error">{error}</div>}<div className="modal-actions provider-actions"><button className="secondary" disabled={saving} onClick={onClose}>取消</button>{state.state === 'available' && <button className="secondary" disabled={saving} onClick={revalidate}>重新校验</button>}<button className="primary" disabled={saving || !key.trim()} onClick={save}>{saving ? '正在校验…' : '保存并校验'}</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="asr-modal-title"><button className="modal-close" onClick={onClose} aria-label="关闭">×</button><h1 id="asr-modal-title">配置火山语音转写</h1><p>仅支持火山语音“豆包录音文件识别 2.0”。API Key 保存在本机系统钥匙串，保存时会立即校验。</p><div className="provider-key-help"><span>登录火山引擎后，可创建或复制 API Key。</span><a className="provider-help-link" href={VOLCANO_ASR_API_KEY_URL} target="_blank" rel="noreferrer">申请或管理 API Key <span aria-hidden="true">↗</span></a></div><div className="provider-state-line"><b>{state.state === 'available' ? 'Key 已安全保存' : '尚未配置'}</b><span>资源：{state.resourceId}</span></div><label>火山语音 API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={state.state === 'available' ? '已保存，填写新 Key 可覆盖' : '填写火山语音 API Key'} autoFocus autoComplete="off" spellCheck="false" /></label>{error && <div className="validation error">{error}</div>}<div className="modal-actions provider-actions"><button className="secondary" disabled={saving} onClick={onClose}>取消</button>{state.state === 'available' && <button className="secondary" disabled={saving} onClick={revalidate}>重新校验</button>}<button className="primary" disabled={saving || !key.trim()} onClick={save}>{saving ? '正在校验…' : '保存并校验'}</button></div></section></div>;
 }
 
 function ProviderModal({ state, refresh, onClose, onToast }) {

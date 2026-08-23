@@ -74,6 +74,21 @@ test('successful first configuration becomes current and closes the modal', asyn
   expect(calls.indexOf('PUT /api/providers/deepseek/key')).toBeLessThan(calls.indexOf('POST /api/providers/deepseek/activate'))
 })
 
+test('volcano ASR setup links directly to the official API key page', async ({ page }) => {
+  await installApi(page)
+  await page.goto('/')
+
+  const setupUrl = 'https://console.volcengine.com/speech/new/setting/apikeys'
+  const moduleLink = page.getByRole('link', { name: '申请或管理 API Key' }).first()
+  await expect(moduleLink).toHaveAttribute('href', setupUrl)
+  await expect(moduleLink).toHaveAttribute('target', '_blank')
+  await expect(moduleLink).toHaveAttribute('rel', 'noreferrer')
+
+  await moduleLink.locator('xpath=ancestor::section').getByRole('button', { name: '修改' }).click()
+  await expect(page.getByText('登录火山引擎后，可创建或复制 API Key。')).toBeVisible()
+  await expect(page.getByRole('dialog').getByRole('link', { name: '申请或管理 API Key' })).toHaveAttribute('href', setupUrl)
+})
+
 test('failed configuration keeps the visible key until the modal is closed', async ({ page }) => {
   const calls = await installApi(page, { rejectDeepSeek: true })
   await page.goto('/')
