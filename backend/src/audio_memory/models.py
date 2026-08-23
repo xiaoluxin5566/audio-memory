@@ -106,6 +106,40 @@ class JobFile(Base):
     temporary_path: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class AsrFileTask(Base):
+    __tablename__ = "asr_file_tasks"
+    __table_args__ = (
+        UniqueConstraint("job_file_id", name="uq_asr_file_task_job_file"),
+        UniqueConstraint("request_id", name="uq_asr_file_task_request"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_file_id: Mapped[str] = mapped_column(
+        ForeignKey("job_files.id", ondelete="CASCADE"), nullable=False
+    )
+    relative_source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    storage_object_id: Mapped[str | None] = mapped_column(String(120))
+    storage_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending"
+    )
+    remote_task_id: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[str | None] = mapped_column(String(40))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    result_json: Mapped[str | None] = mapped_column(Text)
+    materialized_at: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False, default=utc_now)
+    updated_at: Mapped[str] = mapped_column(
+        String(40), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class Transcript(Base):
     __tablename__ = "transcripts"
     __table_args__ = (
