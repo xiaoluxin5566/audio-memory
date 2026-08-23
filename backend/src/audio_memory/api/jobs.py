@@ -82,6 +82,21 @@ def service_from(request: Request) -> UploadService:
     return request.app.state.upload_service
 
 
+async def ensure_pipeline_ready(request: Request) -> None:
+    readiness = getattr(request.app.state, "pipeline_readiness", None)
+    if readiness is None:
+        return
+    result = await readiness.check()
+    if not result.ready:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "configuration_required",
+                "missing": list(result.missing),
+            },
+        )
+
+
 async def has_legacy_completed_unaudited_report(
     request: Request, job_id: str
 ) -> bool:
@@ -308,6 +323,7 @@ async def snapshot_analysis_request(
 
 @router.post("", status_code=201)
 async def create_job(request: Request) -> JobView:
+    await ensure_pipeline_ready(request)
     try:
         job = await service_from(request).create_job()
     except UploadError as exc:
@@ -343,6 +359,7 @@ async def upload_file(
     file_modified: int | None = Form(None),
     timezone: str | None = Form(None),
 ) -> FileView | JSONResponse:
+    await ensure_pipeline_ready(request)
     try:
         uploaded = await service_from(request).upload(
             job_id,

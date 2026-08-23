@@ -23,6 +23,8 @@ from audio_memory.config import (
 from audio_memory.db import Database, run_migrations
 from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
+from audio_memory.api.asr import router as asr_router
+from audio_memory.api.readiness import router as readiness_router
 from audio_memory.api.jobs import router as jobs_router
 from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
@@ -34,6 +36,9 @@ from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
 from audio_memory.providers.types import PROVIDER_CONFIGS
 from audio_memory.providers.validation import ProviderValidationService
+from audio_memory.asr.client import VolcanoAsrClient, VolcanoCredentialValidator
+from audio_memory.asr.credentials import AsrCredentialCoordinator
+from audio_memory.readiness import PipelineReadiness
 from audio_memory.repositories import AppSettingsRepository, ProviderMetadataRepository
 from audio_memory.power.sleep_prevention import SleepPreventionManager
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
@@ -55,6 +60,7 @@ from audio_memory.content.feedback import FeedbackWriter
 from audio_memory.content.clear import HistoryCleaner
 from audio_memory.security.local_session import LocalSessionSecurity
 from audio_memory.security.middleware import LocalWebSecurityMiddleware
+from audio_memory.security.upload_readiness import ReadinessUploadMiddleware
 from audio_memory.reanalysis.preview import ReanalysisPreviewBuilder
 from audio_memory.reanalysis.service import ReanalysisService
 from audio_memory.reanalysis.worker import ReanalysisWorker
@@ -203,6 +209,19 @@ def create_app(
                 metadata=ProviderMetadataRepository(database),
             )
             app.state.provider_coordinator = coordinator
+            asr_http_client = httpx.AsyncClient(timeout=15.0)
+            provider_clients.append(asr_http_client)
+            asr_coordinator = AsrCredentialCoordinator(
+                keychain=keychain_repository,
+                validator=VolcanoCredentialValidator(
+                    VolcanoAsrClient(asr_http_client)
+                ),
+            )
+            app.state.asr_coordinator = asr_coordinator
+            app.state.pipeline_readiness = PipelineReadiness(
+                analysis=coordinator,
+                asr=asr_coordinator,
+            )
             analysis_http_client = httpx.AsyncClient(timeout=120.0)
             provider_clients.append(analysis_http_client)
             analysis_client = ProviderAnalysisClient(
@@ -220,6 +239,7 @@ def create_app(
                 generation_source=coordinator,
             )
             await coordinator.initialize()
+            await asr_coordinator.validate_saved()
             analysis_tasks = AnalysisTaskCoordinator(
                 database,
                 reclaim_foreign_on_initialize=True,
@@ -304,7 +324,10 @@ def create_app(
         security=local_security,
         allowed_port=resolved_port,
     )
+    app.add_middleware(ReadinessUploadMiddleware)
     app.include_router(providers_router)
+    app.include_router(asr_router)
+    app.include_router(readiness_router)
     app.include_router(jobs_router)
     app.include_router(events_router)
     app.include_router(prompts_router)

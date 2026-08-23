@@ -111,9 +111,10 @@ async def test_health_exposes_development_profile_without_runtime_details(
     assert fake_mac_security_client[0].service_accounts == [
         ("Audio Memory Dev", "provider:kimi"),
         ("Audio Memory Dev", "provider:deepseek"),
-        ("Audio Memory Dev", "provider:openai"),
-        ("Audio Memory Dev", "provider:glm"),
-    ]
+            ("Audio Memory Dev", "provider:openai"),
+            ("Audio Memory Dev", "provider:glm"),
+            ("Audio Memory Dev", "asr_provider:volcano"),
+        ]
 
 
 @pytest.mark.asyncio

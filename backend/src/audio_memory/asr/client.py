@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from audio_memory.asr.types import AsrValidationResult
 from audio_memory.asr.types import ASR_PROVIDER_CONFIGS, AsrProviderId
 
 
@@ -137,3 +138,21 @@ class VolcanoAsrClient:
             raise AsrProviderError("provider_unavailable", retriable=True)
         raise AsrProviderError("protocol_error", retriable=False)
 
+
+@dataclass(slots=True)
+class VolcanoCredentialValidator:
+    """Validate credentials with a query for a guaranteed-unknown task ID."""
+
+    client: VolcanoAsrClient
+
+    async def validate(self, candidate: bytes) -> AsrValidationResult:
+        task_id = "00000000-0000-4000-8000-000000000000"
+        try:
+            await self.client.poll(api_key=candidate, task_id=task_id)
+        except AsrProviderError as exc:
+            if exc.code == "invalid_audio":
+                # A provider-level unknown-task response proves authentication was
+                # accepted without creating a billable transcription task.
+                return AsrValidationResult(ok=True)
+            return AsrValidationResult(ok=False, error_code=exc.code)
+        return AsrValidationResult(ok=True)
