@@ -42,7 +42,7 @@ class ObjectRegistration:
 
 
 class ObjectRegistry(Protocol):
-    def register(self, registration: ObjectRegistration) -> None: ...
+    def register(self, registration: ObjectRegistration) -> ObjectRegistration: ...
 
     def owned(self, object_id: str, installation_id: str) -> ObjectRegistration | None: ...
 
@@ -82,8 +82,9 @@ class MemoryObjectRegistry:
     def __init__(self) -> None:
         self._objects: dict[str, ObjectRegistration] = {}
 
-    def register(self, registration: ObjectRegistration) -> None:
+    def register(self, registration: ObjectRegistration) -> ObjectRegistration:
         self._objects[registration.object_id] = registration
+        return registration
 
     def owned(
         self, object_id: str, installation_id: str
@@ -152,7 +153,7 @@ def create_broker_app(
             size_bytes=payload.size_bytes,
             sha256=payload.sha256,
         )
-        registry.register(
+        registration = registry.register(
             ObjectRegistration(
                 object_id=object_id,
                 installation_id=installation.installation_id,
@@ -160,7 +161,7 @@ def create_broker_app(
             )
         )
         return UploadOutput(
-            object_id=object_id,
+            object_id=registration.object_id,
             upload_url=str(signed["url"]),
             upload_headers=dict(signed["headers"]),  # type: ignore[arg-type]
             expires_at=signed["expires_at"],  # type: ignore[arg-type]
@@ -194,4 +195,3 @@ def create_broker_app(
         registry.remove(object_id, installation.installation_id)
 
     return app
-
