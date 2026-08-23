@@ -398,7 +398,7 @@ async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_
 
 
 @pytest.mark.asyncio
-async def test_transient_provider_failure_gets_only_one_extra_attempt() -> None:
+async def test_transient_provider_failure_gets_two_extra_attempts() -> None:
     calls = 0
 
     async def handle(request: httpx.Request) -> httpx.Response:
@@ -419,4 +419,33 @@ async def test_transient_provider_failure_gets_only_one_extra_attempt() -> None:
             )
 
     assert raised.value.code == "provider_unavailable"
-    assert calls == 2
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_failure_can_recover_on_third_attempt() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "recovered"}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.generate_markdown(
+            "deepseek",
+            system="rules",
+            user="data",
+            scene_id="direct-report",
+            max_tokens=16_384,
+            timeout_seconds=120,
+        )
+
+    assert result == "recovered"
+    assert calls == 3

@@ -494,7 +494,7 @@ class ProviderAnalysisClient:
                 pause_batch=True,
             )
         last_error: ProviderAnalysisError | None = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 return await self._request(
                     provider_id,
@@ -513,7 +513,7 @@ class ProviderAnalysisClient:
                 )
             except ProviderAnalysisError as exc:
                 last_error = exc
-                if not exc.retriable or attempt == 1:
+                if not exc.retriable or attempt == 2:
                     raise
                 await asyncio.sleep(0.25 * (2**attempt))
         raise last_error or ProviderAnalysisError("Provider request failed")
