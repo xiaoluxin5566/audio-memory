@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 import re
 from urllib.parse import quote, urlsplit
 
@@ -91,6 +92,31 @@ class ManagedOssClient:
             expires_at=self._datetime(body.get("expires_at")),
         )
 
+    async def upload_file(self, ticket: UploadTicket, source: Path) -> None:
+        async def chunks():
+            with source.open("rb") as stream:
+                while chunk := await asyncio.to_thread(stream.read, 1024 * 1024):
+                    yield chunk
+
+        try:
+            response = await self.http_client.put(
+                ticket.upload_url,
+                headers=ticket.upload_headers,
+                content=chunks(),
+            )
+        except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+            raise StorageAuthorizationError("storage_timeout", retriable=True) from exc
+        except httpx.RequestError as exc:
+            raise StorageAuthorizationError(
+                "storage_unavailable", retriable=True
+            ) from exc
+        if response.status_code in {401, 403}:
+            raise StorageAuthorizationError("upload_ticket_expired", retriable=True)
+        if response.status_code == 429 or response.status_code >= 500:
+            raise StorageAuthorizationError("storage_unavailable", retriable=True)
+        if response.status_code >= 400:
+            raise StorageAuthorizationError("storage_upload_rejected", retriable=False)
+
     async def delete(self, object_id: str) -> None:
         safe_id = quote(self._object_id(object_id), safe="")
         await self._request("DELETE", f"/v1/objects/{safe_id}")
@@ -169,4 +195,3 @@ class ManagedOssClient:
         if parsed.tzinfo is None:
             raise StorageAuthorizationError("storage_protocol_error", retriable=False)
         return parsed
-

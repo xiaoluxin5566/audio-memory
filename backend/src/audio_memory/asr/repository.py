@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+import json
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
-from audio_memory.models import AsrFileTask, utc_now
+from audio_memory.models import AsrFileTask, Transcript, utc_now
+from audio_memory.transcription.segments import TranscriptSegment
 
 
 class AsrRepository:
@@ -110,6 +112,43 @@ class AsrRepository:
             task.updated_at = utc_now()
             await session.commit()
 
+    async def materialize(
+        self, task_id: str, segments: list[TranscriptSegment]
+    ) -> None:
+        async with self.database.session() as session:
+            task = await self._require(session, task_id)
+            if task.materialized_at is not None:
+                return
+            if task.status != "completed" or task.result_json is None:
+                raise ValueError("only completed tasks can be materialized")
+            for segment in segments:
+                if segment.file_id != task.job_file_id:
+                    raise ValueError("segment file mismatch")
+                session.add(
+                    Transcript(
+                        id=str(uuid4()),
+                        job_file_id=segment.file_id,
+                        segment_index=segment.index,
+                        start_ms=segment.start_ms,
+                        end_ms=segment.end_ms,
+                        text=segment.text,
+                        words_json=json.dumps(segment.words, ensure_ascii=False),
+                        speaker_id=getattr(segment, "speaker_id", None) or "unknown",
+                        risk_classified=False,
+                        is_reliable=True,
+                        reliability_weight=1.0,
+                    )
+                )
+            task.materialized_at = utc_now()
+            task.updated_at = utc_now()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                refreshed = await session.get(AsrFileTask, task_id)
+                if refreshed is None or refreshed.materialized_at is None:
+                    raise
+
     async def mark_storage_deleted(self, task_id: str) -> None:
         async with self.database.session() as session:
             task = await self._require(session, task_id)
@@ -118,6 +157,16 @@ class AsrRepository:
             if task.materialized_at is None:
                 raise ValueError("storage cannot be deleted before materialization")
             task.storage_status = "deleted"
+            task.updated_at = utc_now()
+            await session.commit()
+
+    async def mark_submission_unknown(self, task_id: str, error_code: str) -> None:
+        async with self.database.session() as session:
+            task = await self._require(session, task_id)
+            if task.remote_task_id is not None or task.status == "completed":
+                return
+            task.status = "submission_unknown"
+            task.error_code = error_code
             task.updated_at = utc_now()
             await session.commit()
 
@@ -133,4 +182,3 @@ class AsrRepository:
         path = PurePosixPath(value)
         if path.is_absolute() or not value or ".." in path.parts:
             raise ValueError("source path must be relative to the runtime data root")
-

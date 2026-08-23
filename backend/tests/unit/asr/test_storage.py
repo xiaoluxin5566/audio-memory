@@ -6,8 +6,10 @@ import pytest
 from audio_memory.asr.storage import (
     ManagedOssClient,
     StorageAuthorizationError,
+    UploadTicket,
     UploadRequest,
 )
+from datetime import UTC, datetime
 
 
 def upload_request() -> UploadRequest:
@@ -116,3 +118,31 @@ def test_broker_must_use_https() -> None:
             installation_token=b"token",
         )
 
+
+@pytest.mark.asyncio
+async def test_upload_streams_original_file_with_ticket_headers(
+    respx_mock, tmp_path
+) -> None:
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"original-audio")
+    route = respx_mock.put(
+        "https://bucket.oss-cn-beijing.aliyuncs.com/random?sig=x"
+    ).mock(return_value=httpx.Response(200))
+    ticket = UploadTicket(
+        object_id="obj_7f4c",
+        upload_url="https://bucket.oss-cn-beijing.aliyuncs.com/random?sig=x",
+        upload_headers={"Content-Type": "audio/mpeg", "x-oss-meta-sha256": "abc"},
+        expires_at=datetime(2026, 8, 23, 13, tzinfo=UTC),
+    )
+    async with httpx.AsyncClient() as http_client:
+        client = ManagedOssClient(
+            http_client=http_client,
+            broker_base_url="https://broker.example",
+            installation_token=b"install-secret",
+        )
+        await client.upload_file(ticket, source)
+
+    request = route.calls[0].request
+    assert request.content == b"original-audio"
+    assert request.headers["Content-Type"] == "audio/mpeg"
+    assert request.headers["x-oss-meta-sha256"] == "abc"
