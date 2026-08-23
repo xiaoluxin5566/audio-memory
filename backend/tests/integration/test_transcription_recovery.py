@@ -16,7 +16,13 @@ from audio_memory.db import Database
 from audio_memory.api.jobs import run_pipeline, track_transcription
 from audio_memory.diarization.alignment import AlignedTranscriptSegment, Word
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, AnalysisVersion, JobFile, Transcript
+from audio_memory.models import (
+    AnalysisJob,
+    AnalysisVersion,
+    AsrFileTask,
+    JobFile,
+    Transcript,
+)
 from audio_memory.transcription.checkpoints import TranscriptionService
 from audio_memory.transcription.engine import MLXWhisperEngine, SelectiveRefiner
 from audio_memory.transcription.eta import TranscriptionEtaTracker
@@ -703,6 +709,54 @@ async def test_startup_marks_paid_work_interrupted_without_auto_resume(tmp_path:
     assert stages.count(JobStage.INTERRUPTED.value) == 1
     assert stages.count(JobStage.ANALYZING.value) == 1
     assert stages.count(JobStage.COMPLETED.value) == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_preserves_cloud_work_with_durable_remote_task(tmp_path: Path) -> None:
+    database = Database(tmp_path / "startup-cloud.sqlite3")
+    await database.create_schema()
+    job_id = str(uuid4())
+    file_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        session.add(
+            JobFile(
+                id=file_id,
+                job_id=job_id,
+                original_name="cloud.mp3",
+                extension=".mp3",
+                size_bytes=10,
+                sha256="e" * 64,
+                duration_ms=1000,
+                position=0,
+                temporary_path=str(tmp_path / "cloud.mp3"),
+            )
+        )
+        await session.commit()
+        session.add(
+            AsrFileTask(
+                id=str(uuid4()),
+                job_id=job_id,
+                job_file_id=file_id,
+                relative_source_path="uploads/cloud.mp3",
+                sha256="e" * 64,
+                request_id=str(uuid4()),
+                storage_status="uploaded",
+                storage_object_id="temporary/cloud.mp3",
+                remote_task_id="volcano-task-1",
+                status="submitted",
+            )
+        )
+        await session.commit()
+
+    changed = await TranscriptionService(database).mark_abandoned_work_interrupted()
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+
+    assert changed == 0
+    assert job is not None
+    assert job.stage == JobStage.TRANSCRIBING.value
     await database.dispose()
 
 

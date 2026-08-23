@@ -87,3 +87,29 @@ async def test_confirmed_states_are_monotonic_and_idempotent(tmp_path) -> None:
     assert restored.materialized_at is not None
     await database.dispose()
 
+
+@pytest.mark.asyncio
+async def test_recoverable_jobs_only_lists_transcribing_cloud_work(tmp_path) -> None:
+    database, job_id, file_id = await seeded_database(tmp_path)
+    repository = AsrRepository(database)
+    await repository.ensure_file_task(
+        job_id=job_id,
+        job_file_id=file_id,
+        relative_source_path="audio/job/file.mp3",
+        sha256="a" * 64,
+    )
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        assert job is not None
+        job.stage = "transcribing"
+        await session.commit()
+
+    assert await repository.recoverable_job_ids() == [job_id]
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        assert job is not None
+        job.stage = "failed"
+        await session.commit()
+    assert await repository.recoverable_job_ids() == []
+    await database.dispose()

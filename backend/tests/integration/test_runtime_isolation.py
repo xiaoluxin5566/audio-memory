@@ -519,7 +519,7 @@ async def test_development_lifecycle_keeps_complete_temp_boundary_unchanged(
         "Audio Memory",
         "Audio Memory Dev",
     }
-    assert sum(event["event"] == "client_created" for event in provider_events) == 10
+    assert sum(event["event"] == "client_created" for event in provider_events) == 12
     provider_calls = sum(
         event["event"] == "provider_call" for event in provider_events
     )

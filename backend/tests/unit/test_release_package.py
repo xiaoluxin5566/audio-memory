@@ -176,6 +176,7 @@ def test_release_archive_uses_case_insensitive_runtime_whitelist(
         f"{prefix}/backend/pyproject.toml",
         f"{prefix}/backend/src/audio_memory/main.py",
         f"{prefix}/backend/migrations/versions/0014_app_settings.py",
+        f"{prefix}/backend/migrations/versions/0015_asr_file_tasks.py",
         f"{prefix}/prototype/dist/client/index.html",
         f"{prefix}/scripts/audio-memory",
         f"{prefix}/scripts/backup_data.py",

@@ -212,11 +212,38 @@ async def run_pipeline(
     resume: bool = False,
     sleep_protected: bool = False,
 ) -> None:
-    transcription = request.app.state.transcription_service
-    engine = request.app.state.whisper_engine
     submitted = False
     pipeline_started_at = time.monotonic()
     try:
+        if hasattr(request.app.state, "cloud_asr_coordinator"):
+            cloud_asr = request.app.state.cloud_asr_coordinator
+            if cloud_asr is None:
+                async with request.app.state.database.session() as session:
+                    job = await session.get(AnalysisJob, job_id)
+                    if job is not None:
+                        job.stage = JobStage.FAILED.value
+                        job.error_code = "managed_storage_unavailable"
+                        await session.commit()
+                raise RuntimeError("managed OSS installation credential unavailable")
+            await cloud_asr.run_job(
+                job_id=job_id,
+                analysis_request=analysis_request,
+                analysis_submitter=request.app.state.analysis_task_coordinator,
+            )
+            submitted = True
+            emit_analysis_event(
+                logger,
+                "transcription.completed",
+                job_id=job_id,
+                provider_id=getattr(analysis_request, "provider_id", None),
+                model_id=getattr(analysis_request, "model_id", None),
+                elapsed_ms=round((time.monotonic() - pipeline_started_at) * 1000),
+                status="completed",
+            )
+            return
+
+        transcription = request.app.state.transcription_service
+        engine = request.app.state.whisper_engine
         if resume:
             await transcription.resume_job(job_id, engine)
         else:
@@ -319,6 +346,48 @@ async def snapshot_analysis_request(
         profile_snapshot=profile,
         priority=0,
     )
+
+
+async def recover_cloud_asr_jobs(app) -> list[str]:
+    cloud_asr = getattr(app.state, "cloud_asr_coordinator", None)
+    if cloud_asr is None:
+        return []
+    request = Request({"type": "http", "app": app})
+    recovered: list[str] = []
+    for job_id in await cloud_asr.repository.recoverable_job_ids():
+        try:
+            job = await service_from(request).get_job(job_id)
+            if job.provider_id is None or job.model_id is None:
+                raise ValueError("cloud ASR job has no analysis provider snapshot")
+            analysis_request = await snapshot_analysis_request(
+                request,
+                job_id=job_id,
+                provider_id=job.provider_id,
+                model_id=job.model_id,
+                credential_generation=(
+                    await app.state.provider_coordinator.credential_generation(
+                        job.provider_id
+                    )
+                ),
+            )
+            sleep_status = await protect_job_if_enabled(request, job_id)
+            track_transcription(
+                request,
+                job_id,
+                run_pipeline(
+                    request,
+                    job_id,
+                    analysis_request,
+                    sleep_protected=sleep_status == "active",
+                ),
+            )
+            recovered.append(job_id)
+        except Exception:
+            logger.exception(
+                "Cloud ASR startup recovery could not be scheduled job_id=%s",
+                job_id,
+            )
+    return recovered
 
 
 @router.post("", status_code=201)

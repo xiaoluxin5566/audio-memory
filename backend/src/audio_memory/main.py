@@ -25,7 +25,7 @@ from audio_memory.instance_lock import InstanceLock
 from audio_memory.api.providers import router as providers_router
 from audio_memory.api.asr import router as asr_router
 from audio_memory.api.readiness import router as readiness_router
-from audio_memory.api.jobs import router as jobs_router
+from audio_memory.api.jobs import recover_cloud_asr_jobs, router as jobs_router
 from audio_memory.api.events import JobEventBroker, router as events_router
 from audio_memory.api.prompts import router as prompts_router
 from audio_memory.api.content import router as content_router
@@ -37,7 +37,13 @@ from audio_memory.providers.keychain import KeychainRepository, MacSecurityClien
 from audio_memory.providers.types import PROVIDER_CONFIGS
 from audio_memory.providers.validation import ProviderValidationService
 from audio_memory.asr.client import VolcanoAsrClient, VolcanoCredentialValidator
-from audio_memory.asr.credentials import AsrCredentialCoordinator
+from audio_memory.asr.coordinator import VolcanoAsrCoordinator
+from audio_memory.asr.credentials import (
+    INSTALLATION_KEYCHAIN_ID,
+    AsrCredentialCoordinator,
+)
+from audio_memory.asr.repository import AsrRepository
+from audio_memory.asr.storage import ManagedOssClient
 from audio_memory.readiness import PipelineReadiness
 from audio_memory.repositories import AppSettingsRepository, ProviderMetadataRepository
 from audio_memory.power.sleep_prevention import SleepPreventionManager
@@ -64,6 +70,11 @@ from audio_memory.security.upload_readiness import ReadinessUploadMiddleware
 from audio_memory.reanalysis.preview import ReanalysisPreviewBuilder
 from audio_memory.reanalysis.service import ReanalysisService
 from audio_memory.reanalysis.worker import ReanalysisWorker
+
+
+DEFAULT_OSS_BROKER_URL = (
+    "https://audio-mker-beta-biibosxxnu.cn-beijing.fcapp.run"
+)
 
 
 def create_app(
@@ -218,6 +229,23 @@ def create_app(
                 ),
             )
             app.state.asr_coordinator = asr_coordinator
+            installation = keychain_repository.read(INSTALLATION_KEYCHAIN_ID)
+            app.state.cloud_asr_coordinator = None
+            if installation.secret is not None:
+                storage_http_client = httpx.AsyncClient(timeout=120.0)
+                provider_clients.append(storage_http_client)
+                app.state.cloud_asr_coordinator = VolcanoAsrCoordinator(
+                    database=database,
+                    runtime_root=resolved_paths.root,
+                    repository=AsrRepository(database),
+                    storage=ManagedOssClient(
+                        http_client=storage_http_client,
+                        broker_base_url=DEFAULT_OSS_BROKER_URL,
+                        installation_token=installation.secret,
+                    ),
+                    volcano=VolcanoAsrClient(asr_http_client),
+                    keychain=keychain_repository,
+                )
             app.state.pipeline_readiness = PipelineReadiness(
                 analysis=coordinator,
                 asr=asr_coordinator,
@@ -287,6 +315,7 @@ def create_app(
                 task_coordinator=analysis_tasks,
                 write_boundary=development_boundary,
             )
+            await recover_cloud_asr_jobs(app)
             yield
         finally:
             reanalysis_worker = getattr(app.state, "reanalysis_worker", None)

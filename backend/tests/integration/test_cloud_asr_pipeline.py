@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select
 
-from audio_memory.asr.client import VolcanoPollResult
+from audio_memory.api.jobs import recover_cloud_asr_jobs
+from audio_memory.asr.client import AsrProviderError, VolcanoPollResult
 from audio_memory.asr.coordinator import VolcanoAsrCoordinator
 from audio_memory.asr.repository import AsrRepository
 from audio_memory.asr.storage import ReadTicket, UploadTicket
@@ -81,6 +84,56 @@ class Volcano:
                 }
             },
         )
+
+
+class VolcanoFailsTwice(Volcano):
+    async def submit(self, *, api_key: bytes, request) -> str:
+        self.submits += 1
+        if self.submits < 3:
+            raise AsrProviderError("service_unavailable", retriable=True)
+        return request.request_id
+
+
+class VolcanoPollsUntilCancelled(Volcano):
+    def __init__(self) -> None:
+        super().__init__()
+        self.poll_started = asyncio.Event()
+
+    async def poll(self, *, api_key: bytes, task_id: str) -> VolcanoPollResult:
+        self.polls += 1
+        self.poll_started.set()
+        await asyncio.Future()
+
+
+class AnalysisSubmitter:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    async def submit_new_upload(self, request: object) -> str:
+        self.requests.append(request)
+        return "analysis-version"
+
+
+class UploadService:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def get_job(self, job_id: str) -> AnalysisJob:
+        async with self.database.session() as session:
+            job = await session.get(AnalysisJob, job_id)
+            if job is None:
+                raise LookupError(job_id)
+            return job
+
+
+class Settings:
+    async def prevent_sleep_enabled(self) -> bool:
+        return False
+
+
+class ProviderCoordinator:
+    async def credential_generation(self, provider_id: str) -> int:
+        return 1
 
 
 async def seeded(tmp_path):
@@ -167,4 +220,145 @@ async def test_existing_remote_task_is_polled_without_upload_or_resubmit(tmp_pat
 
     assert (storage.created, storage.uploaded, storage.read_urls) == (0, 0, 0)
     assert (volcano.submits, volcano.polls) == (0, 1)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_job_pipeline_materializes_all_files_before_submitting_analysis_once(
+    tmp_path,
+) -> None:
+    database, runtime_root, repository, _task = await seeded(tmp_path)
+    storage, volcano = Storage(), Volcano()
+    coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=storage,
+        volcano=volcano,
+        keychain=Keychain(),
+    )
+    submitter = AnalysisSubmitter()
+    analysis_request = object()
+
+    assert (
+        await coordinator.run_job(
+            job_id=(await repository.get(_task.id)).job_id,
+            analysis_request=analysis_request,
+            analysis_submitter=submitter,
+        )
+        == "analyzing"
+    )
+    assert (
+        await coordinator.run_job(
+            job_id=(await repository.get(_task.id)).job_id,
+            analysis_request=analysis_request,
+            analysis_submitter=submitter,
+        )
+        == "analyzing"
+    )
+
+    assert submitter.requests == [analysis_request]
+    assert (storage.created, storage.uploaded, storage.deleted) == (1, 1, 1)
+    assert (volcano.submits, volcano.polls) == (1, 1)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_job_pipeline_retries_remote_failure_twice_without_reuploading(
+    tmp_path,
+) -> None:
+    database, runtime_root, repository, task = await seeded(tmp_path)
+    storage, volcano = Storage(), VolcanoFailsTwice()
+    coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=storage,
+        volcano=volcano,
+        keychain=Keychain(),
+        retry_base_seconds=0,
+    )
+
+    assert (
+        await coordinator.run_job(
+            job_id=(await repository.get(task.id)).job_id,
+            analysis_request=object(),
+            analysis_submitter=AnalysisSubmitter(),
+        )
+        == "analyzing"
+    )
+    assert volcano.submits == 3
+    assert (storage.created, storage.uploaded) == (1, 1)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_app_shutdown_keeps_cloud_job_recoverable(tmp_path) -> None:
+    database, runtime_root, repository, task = await seeded(tmp_path)
+    volcano = VolcanoPollsUntilCancelled()
+    coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=Storage(),
+        volcano=volcano,
+        keychain=Keychain(),
+    )
+    running = asyncio.create_task(
+        coordinator.run_job(
+            job_id=(await repository.get(task.id)).job_id,
+            analysis_request=object(),
+            analysis_submitter=AnalysisSubmitter(),
+        )
+    )
+    await volcano.poll_started.wait()
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, (await repository.get(task.id)).job_id)
+    assert job is not None
+    assert job.stage == "transcribing"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_requeues_durable_cloud_job(tmp_path) -> None:
+    database, runtime_root, repository, task = await seeded(tmp_path)
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, (await repository.get(task.id)).job_id)
+        assert job is not None
+        job.provider_id = "deepseek"
+        job.model_id = "deepseek-chat"
+        await session.commit()
+    submitter = AnalysisSubmitter()
+    app = FastAPI()
+    app.state.database = database
+    app.state.upload_service = UploadService(database)
+    app.state.settings_repository = Settings()
+    app.state.provider_coordinator = ProviderCoordinator()
+    app.state.analysis_task_coordinator = submitter
+    app.state.transcription_tasks = {}
+    app.state.cloud_asr_coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=Storage(),
+        volcano=Volcano(),
+        keychain=Keychain(),
+        poll_interval_seconds=0,
+    )
+
+    recovered = await recover_cloud_asr_jobs(app)
+    running = list(app.state.transcription_tasks.values())
+    await asyncio.gather(*running)
+
+    assert recovered == [(await repository.get(task.id)).job_id]
+    assert len(submitter.requests) == 1
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, recovered[0])
+    assert job is not None
+    assert job.stage == "analyzing"
     await database.dispose()

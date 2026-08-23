@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audio_memory.asr.client import (
@@ -16,14 +18,22 @@ from audio_memory.asr.client import (
 from audio_memory.asr.credentials import ASR_KEYCHAIN_ID
 from audio_memory.asr.normalizer import normalize_volcano_result
 from audio_memory.asr.repository import AsrRepository
-from audio_memory.asr.storage import ManagedOssClient, UploadRequest
+from audio_memory.asr.storage import (
+    ManagedOssClient,
+    StorageAuthorizationError,
+    UploadRequest,
+)
 from audio_memory.db import Database
-from audio_memory.models import JobFile
+from audio_memory.models import AnalysisJob, JobFile
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
 
 
 class AsrKeychain(Protocol):
     def read(self, credential_id: str) -> KeychainReadResult: ...
+
+
+class AnalysisSubmitter(Protocol):
+    async def submit_new_upload(self, request: object) -> str: ...
 
 
 @dataclass(slots=True)
@@ -34,6 +44,75 @@ class VolcanoAsrCoordinator:
     storage: ManagedOssClient
     volcano: VolcanoAsrClient
     keychain: AsrKeychain
+    submit_concurrency: int = 2
+    poll_interval_seconds: float = 2.0
+    max_attempts: int = 3
+    retry_base_seconds: float = 1.0
+
+    async def run_job(
+        self,
+        *,
+        job_id: str,
+        analysis_request: object,
+        analysis_submitter: AnalysisSubmitter,
+    ) -> str:
+        job, files = await self._job_and_files(job_id)
+        if job.stage in {"analyzing", "ready_to_commit", "completed"}:
+            return job.stage
+        if job.stage != "transcribing":
+            raise ValueError("cloud ASR job must be transcribing")
+
+        tasks = []
+        for file in files:
+            source = Path(file.temporary_path).resolve()
+            try:
+                relative_source = source.relative_to(self.runtime_root.resolve())
+            except ValueError as exc:
+                raise ValueError("ASR source escaped the runtime root") from exc
+            tasks.append(
+                await self.repository.ensure_file_task(
+                    job_id=job_id,
+                    job_file_id=file.id,
+                    relative_source_path=relative_source.as_posix(),
+                    sha256=file.sha256,
+                )
+            )
+
+        semaphore = asyncio.Semaphore(self.submit_concurrency)
+
+        async def complete(task_id: str) -> None:
+            async with semaphore:
+                await self._complete_with_retry(task_id)
+
+        try:
+            await asyncio.gather(*(complete(task.id) for task in tasks))
+            await analysis_submitter.submit_new_upload(analysis_request)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._mark_job_failed(job_id)
+            raise
+        await self._mark_job_analyzing(job_id)
+        return "analyzing"
+
+    async def _complete_with_retry(self, task_id: str) -> None:
+        failures = 0
+        while True:
+            try:
+                status = await self.advance_task(task_id)
+            except (AsrProviderError, StorageAuthorizationError) as exc:
+                if not exc.retriable or failures + 1 >= self.max_attempts:
+                    raise
+                failures += 1
+                await asyncio.sleep(
+                    min(self.retry_base_seconds * 2 ** (failures - 1), 4)
+                )
+                continue
+            if status == "completed":
+                return
+            if status == "submission_unknown":
+                raise AsrProviderError("submission_unknown", retriable=False)
+            await asyncio.sleep(self.poll_interval_seconds)
 
     async def advance_task(self, task_id: str) -> str:
         task = await self.repository.get(task_id)
@@ -119,6 +198,42 @@ class VolcanoAsrCoordinator:
         async with self.database.session() as session:
             return await self._require_file(session, file_id)
 
+    async def _job_and_files(
+        self, job_id: str
+    ) -> tuple[AnalysisJob, list[JobFile]]:
+        async with self.database.session() as session:
+            job = await session.get(AnalysisJob, job_id)
+            if job is None:
+                raise LookupError(job_id)
+            files = list(
+                await session.scalars(
+                    select(JobFile)
+                    .where(JobFile.job_id == job_id)
+                    .order_by(JobFile.position)
+                )
+            )
+            if not files:
+                raise ValueError("cloud ASR job has no files")
+            return job, files
+
+    async def _mark_job_analyzing(self, job_id: str) -> None:
+        async with self.database.session() as session:
+            job = await session.get(AnalysisJob, job_id)
+            if job is None:
+                raise LookupError(job_id)
+            if job.stage == "transcribing":
+                job.stage = "analyzing"
+                job.error_code = None
+                await session.commit()
+
+    async def _mark_job_failed(self, job_id: str) -> None:
+        async with self.database.session() as session:
+            job = await session.get(AnalysisJob, job_id)
+            if job is not None and job.stage == "transcribing":
+                job.stage = "failed"
+                job.error_code = "cloud_asr_failed"
+                await session.commit()
+
     @staticmethod
     async def _require_file(session: AsyncSession, file_id: str) -> JobFile:
         file = await session.get(JobFile, file_id)
@@ -151,4 +266,3 @@ class VolcanoAsrCoordinator:
     @staticmethod
     def _content_type(extension: str) -> str:
         return {".mp3": "audio/mpeg", ".aac": "audio/aac"}[extension]
-

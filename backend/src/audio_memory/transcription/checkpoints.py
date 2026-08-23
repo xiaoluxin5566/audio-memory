@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 
 from audio_memory.db import Database
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, JobFile, Transcript
+from audio_memory.models import AnalysisJob, AsrFileTask, JobFile, Transcript
 from audio_memory.transcription.segments import TranscriptSegment
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_service import (
@@ -92,7 +92,12 @@ class TranscriptionService:
         async with self.database.session() as session:
             result = await session.execute(
                 update(AnalysisJob)
-                .where(AnalysisJob.stage == JobStage.TRANSCRIBING.value)
+                .where(
+                    AnalysisJob.stage == JobStage.TRANSCRIBING.value,
+                    ~select(AsrFileTask.id)
+                    .where(AsrFileTask.job_id == AnalysisJob.id)
+                    .exists(),
+                )
                 .values(stage=JobStage.INTERRUPTED.value)
             )
             await session.commit()

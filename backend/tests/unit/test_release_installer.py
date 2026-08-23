@@ -424,7 +424,7 @@ def test_doctor_uses_the_release_python_for_packaged_checks() -> None:
 
     assert "check '模型清单' python3" not in doctor
     assert "check 'Whisper 模型清单' \"$PYTHON_BIN\"" in doctor
-    assert "check '本地数据库已迁移至 0014' \"$PYTHON_BIN\"" in doctor
+    assert "check '本地数据库已迁移至 0015' \"$PYTHON_BIN\"" in doctor
 
 
 def test_tampered_ffmpeg_runtime_does_not_replace_current_version(tmp_path: Path) -> None:

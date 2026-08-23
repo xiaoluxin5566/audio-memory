@@ -75,7 +75,7 @@ if [ "${AUDIO_MEMORY_DOCTOR_CORE_ONLY:-0}" != "1" ]; then
 fi
 
 if [ -f "$APP_DATA/audio-memory.sqlite3" ]; then
-  check '本地数据库已迁移至 0014' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
+  check '本地数据库已迁移至 0015' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" database "$APP_DATA/audio-memory.sqlite3"
   check '历史重分析状态已恢复' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" recovery "$APP_DATA/audio-memory.sqlite3"
   check '分析队列状态一致' "$PYTHON_BIN" "$PROJECT_ROOT/scripts/doctor_checks.py" queue "$APP_DATA/audio-memory.sqlite3"
   if command -v sqlite3 >/dev/null 2>&1; then

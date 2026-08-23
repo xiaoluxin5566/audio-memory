@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
-from audio_memory.models import AsrFileTask, Transcript, utc_now
+from audio_memory.models import AnalysisJob, AsrFileTask, Transcript, utc_now
 from audio_memory.transcription.segments import TranscriptSegment
 
 
@@ -61,6 +61,17 @@ class AsrRepository:
             if task is None:
                 raise LookupError(task_id)
             return task
+
+    async def recoverable_job_ids(self) -> list[str]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(AnalysisJob.id)
+                .join(AsrFileTask, AsrFileTask.job_id == AnalysisJob.id)
+                .where(AnalysisJob.stage == "transcribing")
+                .distinct()
+                .order_by(AnalysisJob.created_at, AnalysisJob.id)
+            )
+            return list(rows)
 
     async def mark_storage_uploaded(self, task_id: str, object_id: str) -> None:
         async with self.database.session() as session:
