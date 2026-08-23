@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在不改变 Beta 5 正式报告链路的前提下，为 Beta 6 新上传任务增加只支持火山的云端 ASR、双配置上传门禁、分片级重试和重启续跑。
+**Goal:** 在不改变 Beta 5 正式报告链路的前提下，为 Beta 6 新上传任务增加产品托管阿里 OSS 临时中转、火山标准版 ASR、双配置上传门禁、文件级重试和重启续跑。
 
-**Architecture:** 分析模型配置与 ASR 配置保持两个独立 bounded context。新的持久化 `AsrCoordinator` 以火山为本期唯一 provider，负责原文件提交、轮询、结果规范化和恢复，并继续通过现有 `TranscriptionService`/`Transcript` 契约向 `SingleReportRunner` 提供逐字稿；UI 只编排配置、上传与统一恢复动作。
+**Architecture:** 分析模型配置与 ASR 配置保持两个独立 bounded context。最小 OSS 授权服务签发单对象、短时效权限，客户端直传私有 Bucket 且不持有产品长期 AccessKey。新的持久化 `AsrCoordinator` 以火山为本期唯一 provider，负责 OSS 对象生命周期、火山提交、轮询、结果规范化和恢复，并继续通过现有 `TranscriptionService`/`Transcript` 契约向 `SingleReportRunner` 提供逐字稿；UI 只编排配置、上传与统一恢复动作。
 
 **Tech Stack:** Python 3.12、FastAPI、httpx、SQLAlchemy/Alembic、SQLite、macOS Keychain、React 19、Vite、Node test runner、Playwright。
 
@@ -16,7 +16,8 @@
 - 实施基线必须是 tag `v0.1.0-beta.5`，不得直接在当前脏工作树开发。
 - 使用 `superpowers:using-git-worktrees` 创建 `codex/` 前缀的隔离分支与 worktree。
 - 只运行开发环境；不得写入正式端口、正式数据库、正式数据目录或正式 Keychain service。
-- ASR 仅支持火山，资源 ID 固定为 `volc.seedasr.auc`，用户不配置 TOS。
+- ASR 仅支持火山，资源 ID 固定为 `volc.seedasr.auc`；用户不配置 OSS/TOS。
+- 产品 OSS 长期 AccessKey 不得进入客户端代码、安装包、本地 Keychain、SQLite 或日志；没有可用的一次性授权服务时不得发布。
 - 上传格式仅 MP3/AAC；单文件小于 5 小时且小于 512MB 时原文件直传，超限直接拒绝；Beta 6 不自动切分或转码。
 - ASR 与分析远程调用均为首次调用加最多 2 次自动重试。
 - 已确认成功的分片和分析检查点不得重复调用。
@@ -70,19 +71,20 @@ Commit: `test: lock beta6 work to development runtime`
 
 ---
 
-### Task 2: 用真实开发 Key 验证火山接口前提
+### Task 2: 用真实开发配置验证 OSS 与火山接口前提
 
 **Files:**
 - Create: `docs/benchmark-evidence/2026-08-23-volcano-api-capability-probe.md`
 - Create: `backend/experiments/volcano_api_capability_probe.py`
+- Create: `backend/experiments/oss_upload_capability_probe.py`
 
 **Interfaces:**
-- Consumes: development-only Volcano API Key、固定资源 ID `volc.seedasr.auc`、产品内置的极短 MP3 探针。
-- Produces: 已验证的认证、request ID、提交后查询、限流契约；后续 ASR 编码必须以该证据为准。
+- Consumes: development-only Volcano API Key、固定资源 ID `volc.seedasr.auc`、开发 OSS Bucket 与产品内置的极短 MP3 探针。
+- Produces: 已验证的 OSS 限权上传/签名读取/删除、火山认证、request ID、提交后查询和限流契约；后续编码必须以该证据为准。
 
 - [ ] **Step 1: 编写只使用开发环境的探针脚本**
 
-脚本从开发 Keychain 读取 Key，不接受命令行明文 Key，不打印 header 或正文。分别记录：是否存在独立认证接口、无效 Key 的稳定错误码、有效 Key 提交的 task ID、同一 request ID 重复提交行为、能否按 request ID 或 task ID 查询、响应中的限流信息。
+脚本从开发密钥存储读取凭证，不接受命令行明文 Key，不打印 header、签名 URL 或正文。先验证 OSS 单对象上传、签名 URL 可被外部下载、删除与 24 小时生命周期；再记录火山的独立认证能力、稳定错误码、task ID、同一 request ID 重复提交行为、查询能力和限流信息。
 
 - [ ] **Step 2: 先执行单次极短音频验证**
 
@@ -281,7 +283,7 @@ Expected: 表或模型不存在。
 
 - [ ] **Step 3: 实现最小持久化模型**
 
-`AsrFileTask` 保存 `relative_source_path/sha256/request_id/remote_task_id/status/attempt_count/next_attempt_at/error_code/result_json/materialized_at`。路径必须相对于运行环境数据根；数据库不保存供应商原始错误消息、Key、HTTP header 或未脱敏 response。
+`AsrFileTask` 保存 `relative_source_path/sha256/request_id/storage_object_id/storage_status/remote_task_id/status/attempt_count/next_attempt_at/error_code/result_json/materialized_at`。`storage_object_id` 是脱敏随机对象标识，不存储签名 URL。路径必须相对于运行环境数据根；数据库不保存供应商原始错误消息、Key、HTTP header 或未脱敏 response。
 
 - [ ] **Step 4: 实现原子状态转换**
 
@@ -354,6 +356,7 @@ Commit: `feat: validate direct asr files and normalize results`
 ### Task 7: 实现火山提交、轮询、重试与重启恢复
 
 **Files:**
+- Create: `backend/src/audio_memory/asr/storage.py`
 - Create: `backend/src/audio_memory/asr/client.py`
 - Create: `backend/src/audio_memory/asr/coordinator.py`
 - Modify: `backend/src/audio_memory/main.py`
@@ -364,12 +367,12 @@ Commit: `feat: validate direct asr files and normalize results`
 - Create: `backend/tests/integration/test_cloud_asr_recovery.py`
 
 **Interfaces:**
-- Consumes: `AsrRepository`, planner, normalizer, ASR Keychain credential, `AnalysisTaskCoordinator.submit_new_upload()`.
+- Consumes: `AsrRepository`, OSS temporary-authorization client, planner, normalizer, ASR Keychain credential, `AnalysisTaskCoordinator.submit_new_upload()`.
 - Produces: `VolcanoAsrCoordinator.run_job(job_id)`, `resume_job(job_id)`, and startup `AsrRecoveryService.resume_incomplete()`.
 
-- [ ] **Step 1: 写客户端错误分类和重试上限测试**
+- [ ] **Step 1: 写 OSS 权限和客户端错误分类测试**
 
-参数化覆盖 timeout/429/5xx 为 retryable，401/403/quota/invalid format 为 terminal，并断言总尝试次数最大为 3：
+先断言客户端只能获取限定 object key 的短期上传权限，不能列举 Bucket、覆盖其他对象或读取长期 AccessKey。再参数化覆盖 timeout/429/5xx 为 retryable，401/403/quota/invalid format 为 terminal，并断言总尝试次数最大为 3：
 
 ```python
 assert fake_transport.calls_for(file_task.id) == 3
@@ -386,13 +389,13 @@ Run: `cd backend && uv run pytest tests/unit/asr/test_client.py tests/integratio
 
 Expected: FAIL。
 
-- [ ] **Step 4: 实现火山 client**
+- [ ] **Step 4: 实现 OSS 临时存储 client 和火山 client**
 
-client 只接收 `api_key`、provider 配置、原文件和稳定 request ID。`submit()` 返回 task ID；`poll()` 返回 pending/completed/result。request ID 只按 Task 2 的真实证据实现，不宣称未验证的幂等。日志通过现有 observability helper 记录脱敏事件。
+storage client 只调用产品授权服务的“获取单对象上传权限/获取短时读 URL/删除”契约，不接收 OSS 长期 AccessKey。火山 client 只接收 `api_key`、provider 配置、短时读 URL 和稳定 request ID。`submit()` 返回 task ID；`poll()` 返回 pending/completed/result。request ID 只按 Task 2 的真实证据实现，不宣称未验证的幂等。日志通过现有 observability helper 记录脱敏事件。
 
 - [ ] **Step 5: 实现 coordinator 与退避**
 
-每个文件最多 3 次总尝试，成功状态不可回退。提交队列用 semaphore 将并发固定为 2，轮询使用独立队列；429 优先遵循 `Retry-After`，否则指数退避，本地排队不增加 attempt。全部 materialized 后调用现有 risk/safety 必要的结构校验，但不得启动本地 Whisper；然后推进 `analyzing` 并提交现有 `AnalysisRequest`。
+每个文件的 OSS 上传和 ASR 最多各 3 次总尝试，成功状态不可回退。已上传对象不重复上传，已提交 task ID 不重复提交。提交队列用 semaphore 将并发固定为 2，轮询使用独立队列；429 优先遵循 `Retry-After`，否则指数退避，本地排队不增加 attempt。全部 materialized 后调用现有 risk/safety 必要的结构校验，但不得启动本地 Whisper；然后推进 `analyzing` 并提交现有 `AnalysisRequest`。OSS 删除失败进入独立清理队列，不重复 ASR。
 
 - [ ] **Step 6: 接入启动恢复**
 
@@ -510,7 +513,7 @@ Expected: 新流程用例 FAIL。
 
 - [ ] **Step 7: 更新隐私文案**
 
-明确说明：“音频发送至火山语音进行转写；转写文本发送至当前分析模型。音频、逐字稿和报告副本保存在本机。”
+明确说明：“音频会临时上传至 Audio Memory 管理的阿里云 OSS，供火山语音转写，转写完成后删除；转写文本发送至当前分析模型。本机保留原始音频、逐字稿和报告副本。”
 
 - [ ] **Step 8: 运行测试并提交**
 
