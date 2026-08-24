@@ -91,18 +91,27 @@ class AuditScores(_StrictModel):
     expression_structure: int = Field(ge=0, le=10)
     total: int = Field(ge=0, le=100)
 
-    @model_validator(mode="after")
-    def total_is_dimension_sum(self) -> "AuditScores":
-        expected = (
-            self.factual_accuracy
-            + self.important_coverage
-            + self.analysis_depth
-            + self.actionability
-            + self.expression_structure
+    @model_validator(mode="before")
+    @classmethod
+    def recompute_total_from_dimensions(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        dimension_names = (
+            "factual_accuracy",
+            "important_coverage",
+            "analysis_depth",
+            "actionability",
+            "expression_structure",
         )
-        if self.total != expected:
-            raise ValueError("score total must equal the sum of dimensions")
-        return self
+        dimensions = [value.get(name) for name in dimension_names]
+        if not all(
+            isinstance(item, int) and not isinstance(item, bool)
+            for item in dimensions
+        ):
+            return value
+        normalized = dict(value)
+        normalized["total"] = sum(dimensions)
+        return normalized
 
 
 class AuditDeduction(_StrictModel):
