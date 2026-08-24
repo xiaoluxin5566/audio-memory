@@ -19,6 +19,8 @@ from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, AnalysisVersion, JobFile, Transcript
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.providers.keychain import KeychainRepository, MacSecurityClient
+from audio_memory.config import WHISPER_MODEL_ID
+from audio_memory.transcription.engine import _transcribe_worker
 
 
 CASES = (
@@ -27,7 +29,7 @@ CASES = (
     ("kimi", "kimi-k3"),
 )
 
-SEGMENTS = (
+BASE_SEGMENTS = (
     "今天讨论语音记忆产品的测试计划，目标是确认报告链路稳定，不涉及真实用户数据。",
     "团队决定先验证模型凭证，然后用相同输入比较三个模型。",
     "小李负责整理测试结果，截止时间是明天下午三点。",
@@ -41,6 +43,31 @@ SEGMENTS = (
     "如果某个模型失败，需要记录稳定错误类型和失败阶段，不能只说模型不可用。",
     "最终结论需要分别说明 Flash、Pro 和 Kimi 是否通过，不用平均结果掩盖单模型失败。",
 )
+
+
+def build_segments(segment_count: int) -> tuple[str, ...]:
+    if segment_count < 1:
+        raise ValueError("segment_count must be positive")
+    return tuple(
+        f"{BASE_SEGMENTS[index % len(BASE_SEGMENTS)]}（测试轮次 {index // len(BASE_SEGMENTS) + 1}）"
+        for index in range(segment_count)
+    )
+
+
+def transcribe_audio(audio_path: Path) -> tuple[str, ...]:
+    result = _transcribe_worker(
+        str(audio_path),
+        WHISPER_MODEL_ID,
+        language="zh",
+    )
+    segments = tuple(
+        str(item.get("text", "")).strip()
+        for item in result
+        if str(item.get("text", "")).strip()
+    )
+    if not segments:
+        raise ValueError("audio transcription returned no text")
+    return segments
 
 
 class GenerationSource:
@@ -57,17 +84,22 @@ class Publisher:
         return {"version_id": version_id}
 
 
-async def seed(database: Database, provider_id: str, model_id: str) -> None:
+async def seed(
+    database: Database,
+    provider_id: str,
+    model_id: str,
+    segments: tuple[str, ...],
+) -> None:
     async with database.session() as session:
         session.add(AnalysisJob(id="job-1", stage="analyzing"))
         session.add(JobFile(
             id="file-1", job_id="job-1", original_name="fixed-test.txt",
             extension=".txt", size_bytes=1, sha256="a" * 64,
-            duration_ms=len(SEGMENTS) * 10_000, recording_started_at=None,
+            duration_ms=len(segments) * 10_000, recording_started_at=None,
             recording_time_source="unknown", timezone="Asia/Shanghai",
             position=0, temporary_path="/private/tmp/fixed-test.txt",
         ))
-        for index, text in enumerate(SEGMENTS):
+        for index, text in enumerate(segments):
             session.add(Transcript(
                 id=f"transcript-{index}", job_file_id="file-1",
                 segment_index=index, speaker_id="speaker_1",
@@ -92,10 +124,15 @@ async def seed(database: Database, provider_id: str, model_id: str) -> None:
         await session.commit()
 
 
-async def run_case(root: Path, provider_id: str, model_id: str) -> dict[str, object]:
+async def run_case(
+    root: Path,
+    provider_id: str,
+    model_id: str,
+    segments: tuple[str, ...],
+) -> dict[str, object]:
     database = Database(root / f"{provider_id}-{model_id}.sqlite3")
     await database.create_schema()
-    await seed(database, provider_id, model_id)
+    await seed(database, provider_id, model_id, segments)
     publisher = Publisher()
     started = time.perf_counter()
     async with httpx.AsyncClient() as http:
@@ -114,6 +151,7 @@ async def run_case(root: Path, provider_id: str, model_id: str) -> dict[str, obj
             return {
                 "provider_id": provider_id,
                 "model_id": model_id,
+                "segment_count": len(segments),
                 "passed": False,
                 "elapsed_seconds": round(time.perf_counter() - started, 2),
                 "error_type": type(exc).__name__,
@@ -133,11 +171,11 @@ async def run_case(root: Path, provider_id: str, model_id: str) -> dict[str, obj
         and observed_models == {model_id}
         and "direct-report" in observed_scenes
         and "direct-report-audit-chunk" in observed_scenes
-        and "direct-report-audit-merge" in observed_scenes
     )
     return {
         "provider_id": provider_id,
         "model_id": model_id,
+        "segment_count": len(segments),
         "passed": passed,
         "elapsed_seconds": round(time.perf_counter() - started, 2),
         "report_version": metadata.report_version,
@@ -152,12 +190,29 @@ async def run_case(root: Path, provider_id: str, model_id: str) -> dict[str, obj
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--segment-count", type=int, default=len(BASE_SEGMENTS))
+    parser.add_argument("--audio", type=Path)
+    parser.add_argument(
+        "--model-id",
+        action="append",
+        choices=[model_id for _, model_id in CASES],
+        help="Run only selected model IDs; may be repeated.",
+    )
     args = parser.parse_args()
+    segments = (
+        transcribe_audio(args.audio)
+        if args.audio is not None
+        else build_segments(args.segment_count)
+    )
     args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="audio-memory-three-model-") as temp:
         results = []
-        for provider_id, model_id in CASES:
-            result = await run_case(Path(temp), provider_id, model_id)
+        selected_cases = tuple(
+            item for item in CASES
+            if not args.model_id or item[1] in set(args.model_id)
+        )
+        for provider_id, model_id in selected_cases:
+            result = await run_case(Path(temp), provider_id, model_id, segments)
             results.append(result)
             print(json.dumps({
                 key: value for key, value in result.items()

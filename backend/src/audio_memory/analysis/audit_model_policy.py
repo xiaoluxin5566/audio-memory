@@ -34,6 +34,14 @@ _POLICIES = {
         max_transcript_tokens=24_000,
         max_parallel_chunks=4,
     ),
+    "deepseek-flash": AuditModelPolicy(
+        policy_name="deepseek-v4-flash-output-bounded-v1",
+        context_window_tokens=128_000,
+        reserved_output_tokens=32_768,
+        safety_ratio=0.78,
+        max_transcript_tokens=3_000,
+        max_parallel_chunks=4,
+    ),
     "kimi": AuditModelPolicy(
         policy_name="kimi-long-context",
         context_window_tokens=256_000,
@@ -62,6 +70,8 @@ def resolve_audit_model_policy(
     model = model_id.strip().lower()
     if provider == "glm" or model.startswith("glm-"):
         return _POLICIES["glm"]
+    if model == "deepseek-v4-flash":
+        return _POLICIES["deepseek-flash"]
     if provider == "deepseek" or model.startswith("deepseek-"):
         return _POLICIES["deepseek"]
     if provider == "kimi" or model.startswith("kimi-"):

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import pytest
 
 from audio_memory.analysis.audit_model_policy import resolve_audit_model_policy
 from audio_memory.analysis.segmented_report_audit import (
     audit_chunk_id,
+    merge_chunk_audits_deterministically,
     parallel_map_audit_chunks,
     partition_transcript_for_audit,
+    promote_single_chunk_audit,
     split_audit_chunk,
     validate_atomic_audit_issues,
 )
@@ -165,6 +168,94 @@ def test_split_audit_chunk_preserves_order_and_refuses_single_segment() -> None:
     ]
     with pytest.raises(ValueError, match="single-segment"):
         split_audit_chunk(left.__class__(1, 1, (left.segments[0],)))
+
+
+def test_single_complete_chunk_audit_is_promoted_without_model_merge() -> None:
+    chunk_audit = ReportAudit.model_validate({
+        "audit_mode": "chunk_v1_audit",
+        "rubric_version": 1,
+        "passed": True,
+        "scores": {
+            "factual_accuracy": 28,
+            "important_coverage": 23,
+            "analysis_depth": 18,
+            "actionability": 13,
+            "expression_structure": 9,
+            "total": 91,
+        },
+        "deductions": [],
+        "coverage": {
+            "full_transcript_reviewed": False,
+            "reviewed_segment_count": 488,
+            "total_segment_count": 488,
+            "unreviewed_ranges": [],
+            "summary": "该块已完整审查。",
+        },
+        "issues": [],
+        "value_opportunities": [],
+        "unresolved_issue_ids": [],
+        "summary": "通过。",
+    })
+
+    promoted = promote_single_chunk_audit(
+        chunk_audit, total_segment_count=488
+    )
+
+    assert promoted.audit_mode == "full_v1_audit"
+    assert promoted.coverage.full_transcript_reviewed is True
+    assert promoted.coverage.reviewed_segment_count == 488
+    assert promoted.coverage.total_segment_count == 488
+    assert promoted.scores == chunk_audit.scores
+    assert promoted.summary == chunk_audit.summary
+
+
+def test_multiple_chunk_audits_are_merged_with_unique_ids_and_conservative_scores() -> None:
+    first_payload = {
+        "audit_mode": "chunk_v1_audit", "rubric_version": 1, "passed": False,
+        "scores": {"factual_accuracy": 20, "important_coverage": 23,
+                   "analysis_depth": 18, "actionability": 13,
+                   "expression_structure": 9, "total": 83},
+        "deductions": [],
+        "coverage": {"full_transcript_reviewed": False,
+                     "reviewed_segment_count": 2, "total_segment_count": 2,
+                     "unreviewed_ranges": [], "summary": "first"},
+        "issues": [{
+            "issue_id": "issue_001", "severity": "major",
+            "issue_type": "important_omission", "section_id": "section_002",
+            "related_section_ids": [], "problem": "wrong", "importance": "important",
+            "required_change": "fix", "affected_claims": ["claim"],
+            "evidence_segment_ids": ["seg_0_0"],
+            "evidence_excerpts": [{"segment_id": "seg_0_0", "text": "evidence"}],
+            "context_excerpts": [], "allow_deletion_or_compression": False,
+        }],
+        "value_opportunities": [], "unresolved_issue_ids": ["issue_001"],
+        "summary": "first",
+    }
+    second_payload = deepcopy(first_payload)
+    second_payload["scores"]["factual_accuracy"] = 28
+    second_payload["scores"]["total"] = 91
+    second_payload["coverage"]["reviewed_segment_count"] = 3
+    second_payload["coverage"]["total_segment_count"] = 3
+    second_payload["issues"][0]["evidence_segment_ids"] = ["seg_0_2"]
+    second_payload["issues"][0]["evidence_excerpts"] = [
+        {"segment_id": "seg_0_2", "text": "other evidence"}
+    ]
+
+    merged = merge_chunk_audits_deterministically(
+        (ReportAudit.model_validate(first_payload), ReportAudit.model_validate(second_payload)),
+        total_segment_count=5,
+    )
+
+    assert merged.audit_mode == "full_v1_audit"
+    assert merged.coverage.reviewed_segment_count == 5
+    assert merged.scores.factual_accuracy == 20
+    assert merged.scores.total == 83
+    assert [item.issue_id for item in merged.issues] == [
+        "issue_chunk001_001", "issue_chunk002_001"
+    ]
+    assert merged.unresolved_issue_ids == [
+        "issue_chunk001_001", "issue_chunk002_001"
+    ]
 
 
 def test_merged_audit_rejects_one_issue_covering_multiple_locations() -> None:

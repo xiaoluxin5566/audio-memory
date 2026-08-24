@@ -57,6 +57,113 @@ def split_audit_chunk(
     )
 
 
+def promote_single_chunk_audit(
+    audit: ReportAudit, *, total_segment_count: int
+) -> ReportAudit:
+    """Promote a complete one-chunk audit to the equivalent full audit."""
+    if audit.audit_mode != "chunk_v1_audit":
+        raise ValueError("only a chunk V1 audit can be promoted")
+    if (
+        audit.coverage.reviewed_segment_count != total_segment_count
+        or audit.coverage.total_segment_count != total_segment_count
+        or audit.coverage.unreviewed_ranges
+    ):
+        raise ValueError("single chunk audit does not cover the full transcript")
+    payload = audit.model_dump(mode="json")
+    payload["audit_mode"] = "full_v1_audit"
+    payload["coverage"] = {
+        **payload["coverage"],
+        "full_transcript_reviewed": True,
+    }
+    return ReportAudit.model_validate(payload)
+
+
+def merge_chunk_audits_deterministically(
+    audits: Sequence[ReportAudit], *, total_segment_count: int
+) -> ReportAudit:
+    """Build a conservative full audit without another provider request."""
+    if len(audits) < 2:
+        raise ValueError("deterministic merge requires multiple chunk audits")
+    if any(item.audit_mode != "chunk_v1_audit" for item in audits):
+        raise ValueError("deterministic merge only accepts chunk V1 audits")
+    reviewed = sum(item.coverage.reviewed_segment_count or 0 for item in audits)
+    if reviewed != total_segment_count:
+        raise ValueError("chunk audits do not cover the full transcript")
+
+    dimensions = (
+        "factual_accuracy",
+        "important_coverage",
+        "analysis_depth",
+        "actionability",
+        "expression_structure",
+    )
+    scores = {
+        name: min(getattr(item.scores, name) for item in audits)
+        for name in dimensions
+    }
+    issues: list[dict[str, object]] = []
+    unresolved_issue_ids: list[str] = []
+    opportunities: list[dict[str, object]] = []
+    deductions: list[dict[str, object]] = []
+    for chunk_index, audit in enumerate(audits, start=1):
+        unresolved = set(audit.unresolved_issue_ids)
+        for issue_index, issue in enumerate(audit.issues, start=1):
+            if len(issues) >= 100:
+                break
+            payload = issue.model_dump(mode="json")
+            original_id = issue.issue_id
+            payload["issue_id"] = (
+                f"issue_chunk{chunk_index:03d}_{issue_index:03d}"
+            )
+            issues.append(payload)
+            if original_id in unresolved:
+                unresolved_issue_ids.append(str(payload["issue_id"]))
+        for opportunity_index, opportunity in enumerate(
+            audit.value_opportunities, start=1
+        ):
+            if len(opportunities) >= 100:
+                break
+            payload = opportunity.model_dump(mode="json")
+            payload["opportunity_id"] = (
+                f"opportunity_chunk{chunk_index:03d}_{opportunity_index:03d}"
+            )
+            opportunities.append(payload)
+        remaining = 100 - len(deductions)
+        if remaining > 0:
+            deductions.extend(
+                item.model_dump(mode="json")
+                for item in audit.deductions[:remaining]
+            )
+
+    total = sum(scores.values())
+    unresolved_by_id = {
+        str(item["issue_id"]): item for item in issues
+        if str(item["issue_id"]) in unresolved_issue_ids
+    }
+    has_material = any(
+        item["severity"] in {"critical", "major"}
+        for item in unresolved_by_id.values()
+    )
+    return ReportAudit.model_validate({
+        "audit_mode": "full_v1_audit",
+        "rubric_version": 1,
+        "passed": total >= 75 and not has_material,
+        "scores": {**scores, "total": total},
+        "deductions": deductions,
+        "coverage": {
+            "full_transcript_reviewed": True,
+            "reviewed_segment_count": total_segment_count,
+            "total_segment_count": total_segment_count,
+            "unreviewed_ranges": [],
+            "summary": f"已完整合并 {len(audits)} 个分块审核。",
+        },
+        "issues": issues,
+        "value_opportunities": opportunities,
+        "unresolved_issue_ids": unresolved_issue_ids,
+        "summary": "已按最保守分项分数合并全量审核。",
+    })
+
+
 def partition_transcript_for_audit(
     transcript: Sequence[dict[str, object]],
     *,

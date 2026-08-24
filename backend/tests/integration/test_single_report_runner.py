@@ -180,10 +180,9 @@ async def test_single_report_runner_calls_provider_once_with_profile_and_full_tr
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert provider.calls[0]["method"] == "markdown"
     assert provider.calls[1]["method"] == "audit"
-    assert provider.calls[2]["method"] == "audit"
     assert "seg_0_0" in str(provider.calls[1]["user"])
     assert "AI 硬件从业者" in str(provider.calls[0]["user"])
     assert "speaker_1" in str(provider.calls[0]["user"])
@@ -305,7 +304,7 @@ async def test_single_report_runner_reuses_generated_checkpoint_after_publish_fa
     )
     await second.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert len(second_publisher.reports) == 1
     await database.dispose()
 
@@ -342,9 +341,8 @@ async def test_markdown_mode_supplements_failed_draft_before_publish(tmp_path) -
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert provider.calls[1]["scene_id"] == "direct-report-audit-chunk"
-    assert provider.calls[2]["scene_id"] == "direct-report-audit-merge"
     assert "初稿工作分析" in str(provider.calls[1]["user"])
     assert "初稿工作分析，保留这一句" in publisher.reports[0].report_markdown
     async with database.session() as session:
@@ -480,7 +478,7 @@ async def test_markdown_mode_runs_one_quality_repair_review_before_failing(tmp_p
 
     await runner.run("version-1", "worker-1")
 
-    assert [call["method"] for call in provider.calls] == ["markdown", "audit", "audit"]
+    assert [call["method"] for call in provider.calls] == ["markdown", "audit"]
     assert len(publisher.reports) == 1
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
@@ -541,7 +539,7 @@ async def test_invalid_annotations_fall_back_to_complete_markdown(tmp_path) -> N
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert publisher.reports[0].report_markdown.startswith(valid_markdown())
     assert "本次报告：" in publisher.reports[0].report_markdown
     assert publisher.reports[0].report_annotations is None

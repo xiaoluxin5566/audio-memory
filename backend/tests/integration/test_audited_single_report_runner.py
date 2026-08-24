@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 
@@ -106,11 +107,19 @@ class PipelineProvider:
 
     async def generate(self, provider_id: str, **kwargs: object) -> str:
         self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+        chunk_value = self.v1_audit
+        if not isinstance(chunk_value, Exception):
+            chunk_value = deepcopy(chunk_value)
+            chunk_value["audit_mode"] = "chunk_v1_audit"
+            chunk_value["coverage"] = {
+                **chunk_value["coverage"],
+                "full_transcript_reviewed": False,
+                "reviewed_segment_count": int(kwargs["segment_count"]),
+                "total_segment_count": int(kwargs["segment_count"]),
+                "unreviewed_ranges": [],
+            }
         value = {
-            "direct-report-audit-chunk": (
-                self.v1_audit if isinstance(self.v1_audit, Exception)
-                else audit_payload(mode="chunk_v1_audit", issue=bool(self.v1_audit["issues"]))
-            ),
+            "direct-report-audit-chunk": chunk_value,
             "direct-report-audit-merge": self.v1_audit,
             "direct-report-revision": self.revision,
             "direct-report-audit-final": self.final_audit,
@@ -216,6 +225,21 @@ class InvalidEvidenceOnceProvider(PipelineProvider):
         return await super().generate(provider_id, **kwargs)
 
 
+class InvalidChunkUntilSmallProvider(SplittingProvider):
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-chunk":
+            segment_count = int(kwargs["segment_count"])
+            self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+            self.chunk_sizes.append(segment_count)
+            if segment_count > 4:
+                return "The audit is not JSON."
+            payload = audit_payload(mode="chunk_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = segment_count
+            payload["coverage"]["total_segment_count"] = segment_count
+            return json.dumps(payload)
+        return await super().generate(provider_id, **kwargs)
+
+
 class InvalidMergeAuditOnceProvider(PipelineProvider):
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
@@ -227,6 +251,31 @@ class InvalidMergeAuditOnceProvider(PipelineProvider):
             if self.merge_attempts == 1:
                 self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
                 return "The merged audit follows in JSON."
+        return await super().generate(provider_id, **kwargs)
+
+
+class InvalidMergeAuditOnceSplittingProvider(SplittingProvider):
+    def __init__(self, total_segments: int) -> None:
+        super().__init__(total_segments)
+        self.merge_attempts = 0
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-merge":
+            self.merge_attempts += 1
+            if self.merge_attempts == 1:
+                self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+                return "The merged audit follows in JSON."
+        return await super().generate(provider_id, **kwargs)
+
+
+class WrongMergeCoverageSplittingProvider(SplittingProvider):
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-merge":
+            self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+            payload = audit_payload(mode="full_v1_audit", issue=False)
+            payload["coverage"]["reviewed_segment_count"] = 2
+            payload["coverage"]["total_segment_count"] = 2
+            return json.dumps(payload)
         return await super().generate(provider_id, **kwargs)
 
 
@@ -244,7 +293,12 @@ class Publisher:
         return {"version_id": version_id}
 
 
-async def seed(database: Database, *, segment_count: int = 1) -> None:
+async def seed(
+    database: Database,
+    *,
+    segment_count: int = 1,
+    model_id: str = "deepseek-v4-pro",
+) -> None:
     async with database.session() as session:
         session.add(AnalysisJob(id="job-1", stage="analyzing"))
         session.add(JobFile(
@@ -264,7 +318,7 @@ async def seed(database: Database, *, segment_count: int = 1) -> None:
             ))
         session.add(AnalysisVersion(
             id="version-1", source_job_id="job-1", provider_id="deepseek",
-            model_id="deepseek-v4-pro", credential_generation=1,
+            model_id=model_id, credential_generation=1,
             prompt_snapshot_json=json.dumps({"user-analysis-goal": {"content": "Analyze the day.", "version": 1}}),
             profile_snapshot_json="[]", fixed_rules_hash=PromptComposer.fixed_rules_hash(),
             staged_results_json="{}", status="running", worker_owner_id="worker-1",
@@ -297,7 +351,11 @@ def audit_with_major_and_minor() -> dict[str, object]:
         "importance": "It is harder to execute.",
         "required_change": "Add a tomorrow deadline.",
         "affected_claims": ["Verify the role and company."],
-        "evidence_segment_ids": [], "evidence_excerpts": [],
+        "evidence_segment_ids": ["report_section_003"],
+        "evidence_excerpts": [{
+            "segment_id": "report_section_003",
+            "text": "Verify the role and company.",
+        }],
         "context_excerpts": [], "allow_deletion_or_compression": False,
     })
     payload["unresolved_issue_ids"].append("issue_002")
@@ -316,11 +374,15 @@ def revision_for_all_issues() -> dict[str, object]:
 
 
 async def run_with(
-    tmp_path, provider: PipelineProvider, *, segment_count: int = 1
+    tmp_path,
+    provider: PipelineProvider,
+    *,
+    segment_count: int = 1,
+    model_id: str = "deepseek-v4-pro",
 ):
     database = Database(tmp_path / "report.sqlite3")
     await database.create_schema()
-    await seed(database, segment_count=segment_count)
+    await seed(database, segment_count=segment_count, model_id=model_id)
     publisher = Publisher()
     runner = SingleReportRunner(
         database=database,
@@ -352,11 +414,9 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
 
 @pytest.mark.asyncio
 async def test_invalid_merged_audit_is_retried_once(tmp_path) -> None:
-    provider = InvalidMergeAuditOnceProvider(
-        v1_audit=audit_payload(mode="full_v1_audit", issue=False)
-    )
+    provider = InvalidMergeAuditOnceSplittingProvider(total_segments=12)
 
-    report, staged = await run_with(tmp_path, provider)
+    report, staged = await run_with(tmp_path, provider, segment_count=12)
 
     assert provider.merge_attempts == 2
     merge_calls = [
@@ -439,7 +499,39 @@ async def test_invalid_chunk_evidence_retries_only_that_chunk_once(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_clean_segmented_v1_audit_publishes_v1_after_merge(tmp_path) -> None:
+async def test_repeated_invalid_chunk_is_split_until_smaller_chunks_validate(
+    tmp_path,
+) -> None:
+    provider = InvalidChunkUntilSmallProvider(total_segments=12)
+
+    report, staged = await run_with(tmp_path, provider, segment_count=12)
+
+    assert provider.chunk_sizes.count(12) == 2
+    assert any(size <= 4 for size in provider.chunk_sizes)
+    assert len(staged["direct_report_v1_audit_chunk_results"]) >= 4
+    assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_flash_merges_multiple_valid_chunks_without_provider_merge(tmp_path) -> None:
+    provider = SplittingProvider(total_segments=12)
+
+    report, staged = await run_with(
+        tmp_path,
+        provider,
+        segment_count=12,
+        model_id="deepseek-v4-flash",
+    )
+
+    assert len(staged["direct_report_v1_audit_chunks"]) > 1
+    assert "direct-report-audit-merge" not in {
+        call["scene_id"] for call in provider.calls
+    }
+    assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_clean_single_chunk_v1_audit_publishes_without_merge(tmp_path) -> None:
     provider = PipelineProvider(
         v1_audit=audit_payload(mode="full_v1_audit", issue=False)
     )
@@ -447,7 +539,7 @@ async def test_clean_segmented_v1_audit_publishes_v1_after_merge(tmp_path) -> No
     report, staged = await run_with(tmp_path, provider)
 
     assert [call["scene_id"] for call in provider.calls] == [
-        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge"
+        "direct-report", "direct-report-audit-chunk"
     ]
     assert report.report_markdown.startswith(V1.strip())
     assert "本次报告：" in report.report_markdown
@@ -507,13 +599,10 @@ async def test_report_runner_persists_and_logs_each_user_visible_phase(
 async def test_merged_audit_rejects_coverage_that_does_not_match_transcript(
     tmp_path,
 ) -> None:
-    payload = audit_payload(mode="full_v1_audit", issue=False)
-    payload["coverage"]["reviewed_segment_count"] = 2
-    payload["coverage"]["total_segment_count"] = 2
-    provider = PipelineProvider(v1_audit=payload)
+    provider = WrongMergeCoverageSplittingProvider(total_segments=12)
 
     with pytest.raises(ProviderAnalysisError) as captured:
-        await run_with(tmp_path, provider)
+        await run_with(tmp_path, provider, segment_count=12)
 
     assert captured.value.code == "report_audit_pending"
     assert captured.value.retriable is True
@@ -530,12 +619,12 @@ async def test_material_issue_runs_bounded_revision_and_final_audit(tmp_path) ->
     report, staged = await run_with(tmp_path, provider)
 
     assert [call["scene_id"] for call in provider.calls] == [
-        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge",
+        "direct-report", "direct-report-audit-chunk",
         "direct-report-revision", "direct-report-audit-final",
     ]
     assert "considering joining a startup" in report.report_markdown
+    assert "untrusted_transcript" not in str(provider.calls[2]["user"])
     assert "untrusted_transcript" not in str(provider.calls[3]["user"])
-    assert "untrusted_transcript" not in str(provider.calls[4]["user"])
     assert report.quality_metadata.report_version == "v2"
     assert report.quality_metadata.quality_score_scope == "v2_final_audit"
     assert staged["direct_report_v2_final_audit"]["scores"]["total"] == 91
@@ -555,7 +644,7 @@ async def test_revision_authorizes_every_audit_issue_section_regardless_of_sever
 
     assert report.quality_metadata.report_version == "v2"
     assert "company tomorrow" in report.report_markdown
-    revision_request = str(provider.calls[3]["user"])
+    revision_request = str(provider.calls[2]["user"])
     assert '"section_id":"section_002"' in revision_request
     assert '"section_id":"section_003"' in revision_request
 
@@ -577,7 +666,7 @@ async def test_minor_only_audit_issues_still_run_revision(tmp_path) -> None:
     report, _ = await run_with(tmp_path, provider)
 
     assert [call["scene_id"] for call in provider.calls] == [
-        "direct-report", "direct-report-audit-chunk", "direct-report-audit-merge",
+        "direct-report", "direct-report-audit-chunk",
         "direct-report-revision", "direct-report-audit-final",
     ]
     assert report.quality_metadata.report_version == "v2"
@@ -595,6 +684,23 @@ async def test_v1_audit_transport_failure_remains_retryable(tmp_path) -> None:
     assert [call["scene_id"] for call in provider.calls] == [
         "direct-report", "direct-report-audit-chunk"
     ]
+
+
+@pytest.mark.asyncio
+async def test_flash_audit_failure_publishes_complete_v1_as_unaudited(tmp_path) -> None:
+    provider = PipelineProvider(v1_audit=RuntimeError("audit timeout"))
+
+    report, staged = await run_with(
+        tmp_path,
+        provider,
+        model_id="deepseek-v4-flash",
+    )
+
+    assert report.report_markdown.startswith(V1.strip())
+    assert report.quality_metadata.report_version == "v1"
+    assert report.quality_metadata.audit_status == "completed_unaudited"
+    assert report.quality_metadata.quality_score is None
+    assert staged["direct_report_v1_audit_error"]["type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio
