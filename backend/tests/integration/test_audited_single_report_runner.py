@@ -99,11 +99,12 @@ class PipelineProvider:
         self.v1_audit = v1_audit
         self.revision = revision
         self.final_audit = final_audit
+        self.v1_markdown = V1
         self.calls: list[dict[str, object]] = []
 
     async def generate_markdown(self, provider_id: str, **kwargs: object) -> str:
         self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
-        return V1
+        return self.v1_markdown
 
     async def generate(self, provider_id: str, **kwargs: object) -> str:
         self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
@@ -701,6 +702,17 @@ async def test_flash_audit_failure_publishes_complete_v1_as_unaudited(tmp_path) 
     assert report.quality_metadata.audit_status == "completed_unaudited"
     assert report.quality_metadata.quality_score is None
     assert staged["direct_report_v1_audit_error"]["type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_flash_audit_failure_does_not_publish_incomplete_v1(tmp_path) -> None:
+    provider = PipelineProvider(v1_audit=RuntimeError("audit timeout"))
+    provider.v1_markdown = "# Incomplete report\n\nOnly a fragment."
+
+    with pytest.raises(ProviderAnalysisError) as failure:
+        await run_with(tmp_path, provider, model_id="deepseek-v4-flash")
+
+    assert failure.value.code == "report_incomplete"
 
 
 @pytest.mark.asyncio

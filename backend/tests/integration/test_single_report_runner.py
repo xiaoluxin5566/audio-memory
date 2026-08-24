@@ -106,7 +106,12 @@ class FakePublisher:
         return {"version_id": version_id}
 
 
-async def seed(database: Database) -> None:
+async def seed(
+    database: Database,
+    *,
+    provider_id: str = "deepseek",
+    model_id: str = "deepseek-v4-pro",
+) -> None:
     async with database.session() as session:
         session.add(AnalysisJob(id="job-1", stage="analyzing"))
         session.add(
@@ -128,8 +133,8 @@ async def seed(database: Database) -> None:
         )
         session.add(
             AnalysisVersion(
-                id="version-1", source_job_id="job-1", provider_id="deepseek",
-                model_id="deepseek-v4-pro", credential_generation=1,
+                id="version-1", source_job_id="job-1", provider_id=provider_id,
+                model_id=model_id, credential_generation=1,
                 prompt_snapshot_json=json.dumps({"user-analysis-goal": {"content": "重点看工作。", "version": 1}}),
                 profile_snapshot_json=json.dumps([{"dimension": "职业", "value": "AI 硬件从业者"}]),
                 fixed_rules_hash=PromptComposer.fixed_rules_hash(),
@@ -228,6 +233,35 @@ async def test_single_report_runner_retries_truncated_initial_report_compactly(t
     staged = json.loads(version.staged_results_json)
     assert "压缩重写后" in staged["direct_report_initial_markdown"]
     assert "分析质量" not in staged["direct_report_initial_markdown"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_report_runner_does_not_compact_retry_kimi_truncation(tmp_path) -> None:
+    database = Database(tmp_path / "kimi-truncated-initial-report.sqlite3")
+    await database.create_schema()
+    await seed(database, provider_id="moonshot", model_id="kimi-k2.5")
+    provider = FakeProvider(
+        markdown_responses=[
+            ProviderAnalysisError(
+                "Provider output was truncated", code="model_output_truncated"
+            ),
+            valid_markdown("Kimi must not consume this response."),
+        ]
+    )
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=FakePublisher(),
+        generation_source=FakeGenerationSource(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as failure:
+        await runner.run("version-1", "worker-1")
+
+    assert failure.value.code == "model_output_truncated"
+    markdown_calls = [call for call in provider.calls if call["method"] == "markdown"]
+    assert [call["scene_id"] for call in markdown_calls] == ["direct-report"]
     await database.dispose()
 
 

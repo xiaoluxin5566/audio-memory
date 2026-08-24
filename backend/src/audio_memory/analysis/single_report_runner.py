@@ -114,7 +114,11 @@ class SingleReportRunner:
             try:
                 raw_report = await self._generate_markdown(version, request)
             except ProviderAnalysisError as exc:
-                if exc.code != "model_output_truncated":
+                is_deepseek_model = (
+                    version.provider_id.strip().lower() == "deepseek"
+                    and version.model_id.strip().lower().startswith("deepseek-")
+                )
+                if exc.code != "model_output_truncated" or not is_deepseek_model:
                     raise
                 emit_analysis_event(
                     logging.getLogger("uvicorn.error"),
@@ -486,6 +490,14 @@ class SingleReportRunner:
                     duration_ms=int((time.monotonic() - started) * 1_000),
                 )
                 if version.model_id.strip().lower() == "deepseek-v4-flash":
+                    if not v1_quality.passed:
+                        raise ProviderAnalysisError(
+                            "Report generation completed but deterministic "
+                            "completeness checks failed: "
+                            + ", ".join(v1_quality.failures),
+                            code="report_incomplete",
+                            retriable=True,
+                        ) from exc
                     return await self._publish_report(
                         version,
                         staged,
