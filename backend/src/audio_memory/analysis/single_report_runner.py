@@ -157,6 +157,28 @@ class SingleReportRunner:
         v1_quality = evaluate_direct_markdown_quality(
             result.report_markdown, transcript_chars=len(markdown)
         )
+        if (
+            version.model_id.strip().lower() == "deepseek-v4-flash"
+            and not v1_quality.passed
+        ):
+            for key in list(staged):
+                if key in {
+                    "direct_report_v1_markdown",
+                    "direct_report_initial_markdown",
+                } or key.startswith("direct_report_v1_audit"):
+                    staged.pop(key, None)
+            await self._save_checkpoint(
+                version.id,
+                staged,
+                worker_owner_id,
+                duration_ms=0,
+            )
+            raise ProviderAnalysisError(
+                "Report generation completed but deterministic completeness "
+                "checks failed: " + ", ".join(v1_quality.failures),
+                code="report_incomplete",
+                retriable=True,
+            )
 
         audit_payload = staged.get("direct_report_v1_audit")
         audit = None

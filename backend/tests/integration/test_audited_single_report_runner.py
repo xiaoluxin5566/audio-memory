@@ -705,14 +705,40 @@ async def test_flash_audit_failure_publishes_complete_v1_as_unaudited(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_flash_audit_failure_does_not_publish_incomplete_v1(tmp_path) -> None:
+async def test_flash_incomplete_v1_is_invalidated_before_retry(tmp_path) -> None:
+    database = Database(tmp_path / "incomplete-flash-report.sqlite3")
+    await database.create_schema()
+    await seed(database, model_id="deepseek-v4-flash")
     provider = PipelineProvider(v1_audit=RuntimeError("audit timeout"))
     provider.v1_markdown = "# Incomplete report\n\nOnly a fragment."
+    publisher = Publisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=publisher,
+        generation_source=GenerationSource(),
+    )
 
     with pytest.raises(ProviderAnalysisError) as failure:
-        await run_with(tmp_path, provider, model_id="deepseek-v4-flash")
+        await runner.run("version-1", "worker-1")
 
     assert failure.value.code == "report_incomplete"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+        staged = json.loads(version.staged_results_json)
+    assert "direct_report_v1_markdown" not in staged
+    assert "direct_report_initial_markdown" not in staged
+
+    provider.v1_markdown = V1
+    await runner.run("version-1", "worker-1")
+
+    markdown_calls = [
+        call for call in provider.calls if call["scene_id"] == "direct-report"
+    ]
+    assert len(markdown_calls) == 2
+    assert publisher.reports[0].report_markdown.startswith(V1.strip())
+    assert publisher.reports[0].quality_metadata.audit_status == "completed_unaudited"
+    await database.dispose()
 
 
 @pytest.mark.asyncio
