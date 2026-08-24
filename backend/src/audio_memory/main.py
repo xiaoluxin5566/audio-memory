@@ -245,6 +245,7 @@ def create_app(
                     ),
                     volcano=VolcanoAsrClient(asr_http_client),
                     keychain=keychain_repository,
+                    transcript_finalizer=transcription_service.risk_gate,
                 )
             app.state.pipeline_readiness = PipelineReadiness(
                 analysis=coordinator,

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
 from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, AnalysisVersion
+from audio_memory.models import AnalysisJob, AnalysisVersion, AsrFileTask
 from audio_memory.observability import emit_analysis_event
 from audio_memory.prompts.composer import PromptComposer
 from audio_memory.transcript_safety import safe_active_profile_facts
@@ -76,6 +76,7 @@ class JobView(BaseModel):
     sleep_prevention_status: str | None = None
     analysis_phase: str | None = None
     analysis_detail_phase: str | None = None
+    transcription_mode: str = "local"
 
 
 def service_from(request: Request) -> UploadService:
@@ -148,6 +149,47 @@ async def protect_job_if_enabled(request: Request, job_id: str) -> str:
 
 async def job_view_with_sleep_status(request: Request, job) -> JobView:
     view = JobView.model_validate(job, from_attributes=True)
+    async with service_from(request).database.session() as session:
+        asr_tasks = list(
+            await session.scalars(
+                select(AsrFileTask)
+                .where(AsrFileTask.job_id == job.id)
+                .order_by(AsrFileTask.created_at, AsrFileTask.id)
+            )
+        )
+    if asr_tasks:
+        view.transcription_mode = "cloud"
+        scores = []
+        completed = 0
+        for task in asr_tasks:
+            if task.materialized_at is not None:
+                scores.append(100)
+                completed += 1
+            elif task.status == "completed":
+                scores.append(90)
+                completed += 1
+            elif task.status in {"submitted", "submission_unknown"}:
+                scores.append(40)
+            elif task.storage_status == "uploaded":
+                scores.append(15)
+            else:
+                scores.append(0)
+        progress = round(sum(scores) / len(scores))
+        view.progress_percent = progress
+        view.live_progress_percent = float(progress)
+        view.batch_current = completed
+        view.batch_total = len(asr_tasks)
+        if all(task.status == "completed" for task in asr_tasks):
+            view.local_phase = "整理云端转写结果"
+        elif any(
+            task.status in {"submitted", "submission_unknown"}
+            for task in asr_tasks
+        ):
+            view.local_phase = "云端转写中"
+        elif any(task.storage_status == "uploaded" for task in asr_tasks):
+            view.local_phase = "正在提交云端转写"
+        else:
+            view.local_phase = "正在上传到云端"
     if job.stage == JobStage.READY_TO_COMMIT.value:
         view.analysis_phase = "running"
         view.analysis_detail_phase = "publishing"

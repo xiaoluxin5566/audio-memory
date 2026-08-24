@@ -49,6 +49,37 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
   expect(resumed).toBe(true)
 })
 
+test('cloud transcription uses cloud copy and durable progress', async ({ page }) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/health') return route.fulfill({ json: { status: 'ok', profile: 'development' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', model_id: 'deepseek-v4-pro', state: 'available', active: true }] } })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available' } })
+    if (pathname === '/api/jobs/active' || pathname === '/api/jobs/cloud-job') return route.fulfill({ json: {
+      id: 'cloud-job', stage: 'transcribing', transcription_mode: 'cloud',
+      progress_percent: 43, live_progress_percent: 43, local_phase: '云端转写中',
+      batch_current: 1, batch_total: 3, eta_state: 'unavailable', files: [],
+    } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: false, status: 'inactive' } })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204 })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: { providers: [] } })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/')
+
+  await expect(page.getByText('云端转写中 1/3')).toBeVisible()
+  await expect(page.getByText('43%')).toBeVisible()
+  await expect(page.locator('.stage-row').filter({ hasText: '云端转写' })).toBeVisible()
+  await expect(page.getByText('本地转写与时间轴校验')).toBeHidden()
+  await expect(page.getByText('快速转写（Beta）', { exact: false })).toBeHidden()
+})
+
 test('a stale analyzing failure retries once instead of calling transcription resume', async ({ page }) => {
   let retryRequests = 0
   let resumeRequests = 0

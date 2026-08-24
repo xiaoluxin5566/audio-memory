@@ -18,6 +18,7 @@ VOLCANO_QUERY_ENDPOINT = (
 )
 _SUCCESS = "20000000"
 _PROCESSING = frozenset({"20000001", "20000002"})
+_SILENT_AUDIO = "20000003"
 
 
 class AsrProviderError(RuntimeError):
@@ -84,6 +85,11 @@ class VolcanoAsrClient:
             raise AsrProviderError("protocol_error", retriable=False) from exc
         if not isinstance(payload, dict):
             raise AsrProviderError("protocol_error", retriable=False)
+        if status == _SILENT_AUDIO:
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise AsrProviderError("protocol_error", retriable=False)
+            payload = {**payload, "result": {**result, "utterances": []}}
         return VolcanoPollResult(completed=True, payload=payload)
 
     async def _post(
@@ -130,7 +136,9 @@ class VolcanoAsrClient:
             raise AsrProviderError("request_rejected", retriable=False)
 
         status = response.headers.get("X-Api-Status-Code")
-        if status == _SUCCESS or (allow_processing and status in _PROCESSING):
+        if status == _SUCCESS or (
+            allow_processing and status in _PROCESSING | {_SILENT_AUDIO}
+        ):
             return status
         if status is not None and status.startswith("450"):
             raise AsrProviderError("invalid_audio", retriable=False)

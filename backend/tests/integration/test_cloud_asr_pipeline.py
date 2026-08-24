@@ -18,6 +18,7 @@ from audio_memory.asr.storage import ReadTicket, UploadTicket
 from audio_memory.db import Database
 from audio_memory.models import AnalysisJob, JobFile, Transcript
 from audio_memory.providers.keychain import KeychainReadResult, KeychainStatus
+from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 
 
 class Keychain:
@@ -236,6 +237,7 @@ async def test_job_pipeline_materializes_all_files_before_submitting_analysis_on
         storage=storage,
         volcano=volcano,
         keychain=Keychain(),
+        transcript_finalizer=TranscriptionRiskGateService(database),
     )
     submitter = AnalysisSubmitter()
     analysis_request = object()
@@ -260,6 +262,10 @@ async def test_job_pipeline_materializes_all_files_before_submitting_analysis_on
     assert submitter.requests == [analysis_request]
     assert (storage.created, storage.uploaded, storage.deleted) == (1, 1, 1)
     assert (volcano.submits, volcano.polls) == (1, 1)
+    async with database.session() as session:
+        transcript = await session.scalar(select(Transcript))
+    assert transcript is not None
+    assert transcript.risk_classified is True
     await database.dispose()
 
 

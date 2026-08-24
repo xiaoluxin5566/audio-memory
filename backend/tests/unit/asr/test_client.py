@@ -104,6 +104,27 @@ async def test_poll_processing_status_is_not_an_error(respx_mock, status: str) -
 
 
 @pytest.mark.asyncio
+async def test_poll_silent_audio_returns_completed_empty_transcript(respx_mock) -> None:
+    respx_mock.post(VOLCANO_QUERY_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"X-Api-Status-Code": "20000003"},
+            json={"audio_info": {"duration": 1200}, "result": {"text": ""}},
+        )
+    )
+    async with httpx.AsyncClient() as http_client:
+        result = await VolcanoAsrClient(http_client).poll(
+            api_key=b"private-key", task_id=submission().request_id
+        )
+
+    assert result.completed is True
+    assert result.payload == {
+        "audio_info": {"duration": 1200},
+        "result": {"text": "", "utterances": []},
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("http_status", "provider_status", "code", "retriable"),
     [
@@ -135,4 +156,3 @@ async def test_provider_errors_are_stably_classified(
     assert caught.value.retriable is retriable
     assert "private-key" not in repr(caught.value)
     assert "signature=secret" not in repr(caught.value)
-

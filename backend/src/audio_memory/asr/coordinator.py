@@ -36,6 +36,10 @@ class AnalysisSubmitter(Protocol):
     async def submit_new_upload(self, request: object) -> str: ...
 
 
+class TranscriptFinalizer(Protocol):
+    async def apply(self, job_id: str, refiner: object | None = None, **kwargs): ...
+
+
 @dataclass(slots=True)
 class VolcanoAsrCoordinator:
     database: Database
@@ -44,6 +48,7 @@ class VolcanoAsrCoordinator:
     storage: ManagedOssClient
     volcano: VolcanoAsrClient
     keychain: AsrKeychain
+    transcript_finalizer: TranscriptFinalizer | None = None
     submit_concurrency: int = 2
     poll_interval_seconds: float = 2.0
     max_attempts: int = 3
@@ -86,6 +91,8 @@ class VolcanoAsrCoordinator:
 
         try:
             await asyncio.gather(*(complete(task.id) for task in tasks))
+            if self.transcript_finalizer is not None:
+                await self.transcript_finalizer.apply(job_id)
             await analysis_submitter.submit_new_upload(analysis_request)
         except asyncio.CancelledError:
             raise

@@ -40,6 +40,32 @@ def test_normalizes_utterances_with_stable_indexes_and_speakers() -> None:
     ]
 
 
+def test_ignores_provider_tokens_without_timestamps() -> None:
+    segments = normalize_volcano_result(
+        file_id="file-1",
+        duration_ms=3000,
+        payload={
+            "result": {
+                "utterances": [{
+                    "start_time": 100,
+                    "end_time": 900,
+                    "text": "你好。",
+                    "words": [
+                        {"start_time": 100, "end_time": 300, "text": "你"},
+                        {"start_time": -1, "end_time": -1, "text": "。"},
+                        {"start_time": 300, "end_time": 600, "text": "好"},
+                    ],
+                }]
+            }
+        },
+    )
+
+    assert segments[0].words == [
+        {"start_ms": 100, "end_ms": 300, "text": "你"},
+        {"start_ms": 300, "end_ms": 600, "text": "好"},
+    ]
+
+
 @pytest.mark.parametrize(
     "utterances",
     [
@@ -59,4 +85,3 @@ def test_invalid_provider_timeline_is_rejected(utterances) -> None:
             duration_ms=3000,
             payload={"result": {"utterances": utterances}},
         )
-

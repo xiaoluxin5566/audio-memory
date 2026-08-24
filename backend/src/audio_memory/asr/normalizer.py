@@ -70,6 +70,8 @@ def _words(value: object, *, start_ms: int, end_ms: int) -> list[dict[str, objec
         word_start = _integer(word.get("start_time"))
         word_end = _integer(word.get("end_time"))
         text = word.get("text")
+        if word_start == -1 and word_end == -1:
+            continue
         if (
             word_start < start_ms
             or word_end > end_ms
@@ -88,4 +90,3 @@ def _integer(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AsrResultError("timestamp must be an integer")
     return value
-

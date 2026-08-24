@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -27,7 +28,7 @@ from audio_memory.uploads.cleanup import (
     remove_staged_entry,
 )
 from audio_memory.domain import JobStage
-from audio_memory.models import AnalysisJob, AnalysisVersion, Batch, JobFile, TempFileManifest, Transcript
+from audio_memory.models import AnalysisJob, AnalysisVersion, AsrFileTask, Batch, JobFile, TempFileManifest, Transcript
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
 from audio_memory.prompts.composer import PromptComposer
@@ -285,6 +286,49 @@ async def test_job_api_projects_analysis_phase_from_durable_version(
 
     assert response.status_code == 200
     assert response.json()["analysis_phase"] == version_status
+
+
+@pytest.mark.asyncio
+async def test_job_api_projects_cloud_asr_phase_and_durable_progress(job_client):
+    client, _, database = job_client
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(id=job_id, stage=JobStage.TRANSCRIBING.value))
+        task_values = []
+        for index, (storage_status, status, materialized) in enumerate([
+            ("uploaded", "submitted", None),
+            ("uploaded", "completed", datetime.now(UTC)),
+            ("pending", "pending", None),
+        ]):
+            file_id = str(uuid4())
+            session.add(JobFile(
+                id=file_id, job_id=job_id, original_name=f"{index}.mp3",
+                extension=".mp3", size_bytes=100, sha256=str(index) * 64,
+                duration_ms=1_000, position=index, temporary_path=f"/{index}.mp3",
+            ))
+            task_values.append((index, file_id, storage_status, status, materialized))
+        await session.commit()
+    async with database.session() as session:
+        for index, file_id, storage_status, status, materialized in task_values:
+            session.add(AsrFileTask(
+                id=str(uuid4()), job_id=job_id, job_file_id=file_id,
+                relative_source_path=f"staging/{job_id}/{index}.mp3",
+                sha256=str(index) * 64, request_id=str(uuid4()),
+                storage_status=storage_status, status=status,
+                remote_task_id=str(uuid4()) if status != "pending" else None,
+                result_json="{}" if status == "completed" else None,
+                materialized_at=materialized,
+            ))
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["transcription_mode"] == "cloud"
+    assert response.json()["local_phase"] == "云端转写中"
+    assert response.json()["progress_percent"] == 47
+    assert response.json()["batch_current"] == 1
+    assert response.json()["batch_total"] == 3
 
 
 @pytest.mark.asyncio

@@ -112,6 +112,9 @@ export function getFeedbackFormState(rating, comment = '') {
 export function formatJobEta(job) {
   if (job.stage === 'analyzing') return '正在生成分析结果…';
   if (job.stage === 'ready_to_commit') return '正在安全发布报告…';
+  if (job.transcription_mode === 'cloud') {
+    return '云端任务处理中，进度按已保存阶段更新';
+  }
   if (job.eta_state !== 'ready' || job.eta_seconds == null) {
     return '正在估算剩余时间…';
   }
