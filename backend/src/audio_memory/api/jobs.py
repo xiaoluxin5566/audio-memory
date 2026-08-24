@@ -524,9 +524,14 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         job = await service_from(request).get_job(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if job.stage != JobStage.INTERRUPTED.value:
+    cloud_asr_retry = (
+        job.stage == JobStage.FAILED.value
+        and job.error_code == "cloud_asr_failed"
+    )
+    if job.stage != JobStage.INTERRUPTED.value and not cloud_asr_retry:
         raise HTTPException(
-            status_code=409, detail="Only an interrupted transcription can resume"
+            status_code=409,
+            detail="Only an interrupted or failed cloud transcription can resume",
         )
     if job.provider_id is None or job.model_id is None:
         raise HTTPException(status_code=409, detail="Job has no provider snapshot")
@@ -547,6 +552,14 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         ),
     )
     sleep_status = await protect_job_if_enabled(request, job_id)
+    if cloud_asr_retry:
+        async with service_from(request).database.session() as session:
+            durable_job = await session.get(AnalysisJob, job_id)
+            if durable_job is None:
+                raise HTTPException(status_code=404, detail=job_id)
+            durable_job.stage = JobStage.TRANSCRIBING.value
+            durable_job.error_code = None
+            await session.commit()
     track_transcription(
         request,
         job_id,

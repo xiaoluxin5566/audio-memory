@@ -82,6 +82,15 @@ test('report audit failure is presented as generated and retryable', () => {
   })
 })
 
+test('cloud ASR failure never claims transcription completed', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'cloud_asr_failed' }), {
+    title: '云端转写未完成',
+    body: '音频仍安全保存在本机，可从失败位置继续；尚未生成完整转写和报告。',
+    action: '继续云端转写',
+  })
+  assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'cloud_asr_failed' }), 'resume-cloud-asr')
+})
+
 test('failed analysis detail retries analysis even when the top-level stage is stale', () => {
   assert.equal(jobRecoveryAction({ stage: 'failed', analysis_phase: 'failed' }), 'retry-analysis')
   assert.equal(jobRecoveryAction({ stage: 'analyzing', analysis_phase: 'failed' }), 'retry-analysis')

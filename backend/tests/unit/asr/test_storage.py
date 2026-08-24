@@ -55,6 +55,32 @@ async def test_broker_issues_one_object_upload_without_receiving_filename(
 
 
 @pytest.mark.asyncio
+async def test_broker_accepts_signed_opaque_object_id_from_production_registry(
+    respx_mock,
+) -> None:
+    object_id = "obj_" + "A" * 142
+    respx_mock.post("https://broker.example/v1/uploads").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object_id": object_id,
+                "upload_url": "https://bucket.oss-cn-beijing.aliyuncs.com/random?sig=x",
+                "upload_headers": {"Content-Type": "audio/mpeg"},
+                "expires_at": "2026-08-23T13:00:00Z",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http_client:
+        ticket = await ManagedOssClient(
+            http_client=http_client,
+            broker_base_url="https://broker.example",
+            installation_token=b"install-secret",
+        ).create_upload(upload_request())
+
+    assert ticket.object_id == object_id
+
+
+@pytest.mark.asyncio
 async def test_read_url_and_delete_are_scoped_to_object_id(respx_mock) -> None:
     read_route = respx_mock.post(
         "https://broker.example/v1/objects/obj_7f4c/read-url"

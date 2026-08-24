@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 
-_OBJECT_ID = re.compile(r"[A-Za-z0-9_-]{1,120}")
+_OBJECT_ID = re.compile(r"[A-Za-z0-9_-]{1,512}")
 
 
 class StorageAuthorizationError(RuntimeError):

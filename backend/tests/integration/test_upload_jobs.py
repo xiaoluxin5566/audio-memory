@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -44,6 +45,20 @@ class RetryCoordinator:
 
     async def validate_saved(self, provider_id):
         return SimpleNamespace(ok=True)
+
+    async def credential_generation(self, provider_id):
+        return 8
+
+
+class ResumableCloudAsrCoordinator:
+    def __init__(self):
+        self.called = asyncio.Event()
+
+    async def run_job(self, *, job_id, analysis_request, analysis_submitter):
+        self.job_id = job_id
+        self.analysis_request = analysis_request
+        self.called.set()
+        return "analyzing"
 
 
 class RetryTaskCoordinator:
@@ -590,6 +605,49 @@ async def test_resume_rejects_truncated_source_audio_before_claiming_success(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "resume_source_missing"
+
+
+@pytest.mark.asyncio
+async def test_failed_cloud_asr_resumes_from_local_sources(job_client):
+    client, paths, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    source = paths.staging / job_id / "source.mp3"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"safe local audio")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "cloud_asr_failed"
+        job.provider_id = "deepseek"
+        job.model_id = "deepseek-v4-flash"
+        session.add(JobFile(
+            id=str(uuid4()), job_id=job_id, original_name="source.mp3",
+            extension=".mp3", size_bytes=source.stat().st_size, sha256=digest,
+            duration_ms=1_000, position=0, temporary_path=str(source),
+        ))
+        await session.commit()
+    prompt_store = PromptStore(paths.prompts)
+    prompt_store.initialize()
+    cloud_asr = ResumableCloudAsrCoordinator()
+    app_state = client._transport.app.state
+    app_state.transcription_tasks = {}
+    app_state.provider_coordinator = RetryCoordinator()
+    app_state.analysis_task_coordinator = RetryTaskCoordinator()
+    app_state.prompt_store = prompt_store
+    app_state.database = database
+    app_state.cloud_asr_coordinator = cloud_asr
+
+    response = await client.post(f"/api/jobs/{job_id}/resume")
+    await asyncio.wait_for(cloud_asr.called.wait(), timeout=1)
+
+    assert response.status_code == 202
+    assert response.json()["stage"] == JobStage.TRANSCRIBING.value
+    assert cloud_asr.job_id == job_id
+    async with database.session() as session:
+        resumed = await session.get(AnalysisJob, job_id)
+        assert resumed.stage == JobStage.TRANSCRIBING.value
+        assert resumed.error_code is None
 
 
 @pytest.mark.asyncio

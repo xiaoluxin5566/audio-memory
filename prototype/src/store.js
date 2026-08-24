@@ -120,6 +120,13 @@ export function formatJobEta(job) {
 }
 
 export function jobFailureCopy(job) {
+  if (job.error_code === 'cloud_asr_failed') {
+    return {
+      title: '云端转写未完成',
+      body: '音频仍安全保存在本机，可从失败位置继续；尚未生成完整转写和报告。',
+      action: '继续云端转写',
+    };
+  }
   if (job.error_code === 'report_audit_pending') {
     return {
       title: '报告已生成，审计待重试',
@@ -136,6 +143,9 @@ export function jobFailureCopy(job) {
 
 
 export function jobRecoveryAction(job) {
+  if (job?.stage === 'failed' && job?.error_code === 'cloud_asr_failed') {
+    return 'resume-cloud-asr';
+  }
   if (job?.stage === 'failed' || job?.analysis_phase === 'failed') {
     return 'retry-analysis';
   }
