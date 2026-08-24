@@ -109,16 +109,31 @@ class SingleReportRunner:
                 segment_count=len(transcript),
             )
             started = time.monotonic()
-            raw_report = await self.provider.generate_markdown(
-                version.provider_id,
-                system=request.instructions,
-                user=request.user_data,
-                model_id=version.model_id,
-                scene_id=request.scene_id,
-                max_tokens=request.max_tokens,
-                timeout_seconds=request.timeout_seconds,
-                segment_count=request.segment_count,
-            )
+            try:
+                raw_report = await self._generate_markdown(version, request)
+            except ProviderAnalysisError as exc:
+                if exc.code != "model_output_truncated":
+                    raise
+                emit_analysis_event(
+                    logging.getLogger("uvicorn.error"),
+                    "analysis.report.initial_generation_retry",
+                    analysis_version_id=version.id,
+                    provider_id=version.provider_id,
+                    model_id=version.model_id,
+                    status="retrying",
+                    reason=exc.code,
+                    segment_count=len(transcript),
+                    retry_path="compact_complete_report",
+                )
+                retry_request = (
+                    self.composer.compose_direct_report_markdown_compact_retry(
+                        transcript_markdown=markdown,
+                        profile=profile,
+                        user_analysis_prompt=goal_content,
+                        segment_count=len(transcript),
+                    )
+                )
+                raw_report = await self._generate_markdown(version, retry_request)
             raw_report = normalize_report_headings(raw_report)
             result = MarkdownReportResult.from_markdown(raw_report)
             staged["direct_report_v1_markdown"] = result.report_markdown
@@ -624,6 +639,18 @@ class SingleReportRunner:
                 score_scope="v2_final_audit",
             ),
             v2_quality, worker_owner_id, 0,
+        )
+
+    async def _generate_markdown(self, version, request) -> str:
+        return await self.provider.generate_markdown(
+            version.provider_id,
+            system=request.instructions,
+            user=request.user_data,
+            model_id=version.model_id,
+            scene_id=request.scene_id,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+            segment_count=request.segment_count,
         )
 
     @staticmethod

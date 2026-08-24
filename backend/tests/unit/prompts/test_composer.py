@@ -80,6 +80,35 @@ def strict_schema() -> dict[str, object]:
     }
 
 
+def test_direct_report_compact_retry_keeps_full_input_and_sets_length_budget() -> None:
+    request = PromptComposer().compose_direct_report_markdown_compact_retry(
+        transcript_markdown="[seg_001] speaker_A: 这是完整逐字稿。",
+        profile=[{"dimension": "工作", "value": "Audio Memory"}],
+        user_analysis_prompt="重点分析工作。",
+        segment_count=472,
+    )
+
+    assert request.scene_id == "direct-report-compact-retry"
+    assert request.segment_count == 472
+    assert "[seg_001] speaker_A: 这是完整逐字稿。" in request.user_data
+    assert "Audio Memory" in request.user_data
+    assert "重点分析工作" in request.instructions
+    assert "12,000" in request.instructions
+    assert request.max_tokens == 16_384
+
+
+def test_direct_report_generation_has_complete_report_length_budget() -> None:
+    request = PromptComposer().compose_direct_report_markdown(
+        transcript_markdown="[seg_001] speaker_A: 这是完整逐字稿。",
+        profile=[],
+        user_analysis_prompt="重点分析工作。",
+        segment_count=472,
+    )
+
+    assert "12,000" in request.instructions
+    assert "从标题到结尾都完整" in request.instructions
+
+
 def test_scene_composition_keeps_four_layers_ordered_and_separate() -> None:
     document = PromptDocument("meeting", 3, "关注明确决策，不要输出未确认提议。")
 
