@@ -396,35 +396,44 @@ class SingleReportRunner:
                     chunk_audits=list(chunk_audits),
                     total_segment_count=len(transcript),
                 )
-                raw_audit = await self.provider.generate(
-                    version.provider_id,
-                    system=merge_request.instructions,
-                    user=merge_request.user_data,
-                    model_id=version.model_id,
-                    scene_id=merge_request.scene_id,
-                    max_tokens=merge_request.max_tokens,
-                    timeout_seconds=merge_request.timeout_seconds,
-                    segment_count=merge_request.segment_count,
-                )
-                audit = ReportAudit.model_validate(json.loads(raw_audit))
-                if audit.audit_mode != "full_v1_audit":
-                    raise ValueError("merged V1 audit returned the wrong audit mode")
-                if (
-                    audit.coverage.reviewed_segment_count != len(transcript)
-                    or audit.coverage.total_segment_count != len(transcript)
-                ):
-                    raise ValueError("merged V1 audit returned wrong coverage")
-                validate_atomic_audit_issues(audit)
-                audit = canonicalize_audit_evidence(
-                    audit,
-                    transcript_by_id,
-                    report_markdown=result.report_markdown,
-                )
-                validate_audit_evidence(
-                    audit,
-                    transcript_by_id=transcript_by_id,
-                    report_markdown=result.report_markdown,
-                )
+                for merge_attempt in range(2):
+                    raw_audit = await self.provider.generate(
+                        version.provider_id,
+                        system=merge_request.instructions,
+                        user=merge_request.user_data,
+                        model_id=version.model_id,
+                        scene_id=merge_request.scene_id,
+                        max_tokens=merge_request.max_tokens,
+                        timeout_seconds=merge_request.timeout_seconds,
+                        segment_count=merge_request.segment_count,
+                        repair_attempted=merge_attempt > 0,
+                    )
+                    try:
+                        audit = ReportAudit.model_validate(json.loads(raw_audit))
+                        if audit.audit_mode != "full_v1_audit":
+                            raise ValueError(
+                                "merged V1 audit returned the wrong audit mode"
+                            )
+                        if (
+                            audit.coverage.reviewed_segment_count != len(transcript)
+                            or audit.coverage.total_segment_count != len(transcript)
+                        ):
+                            raise ValueError("merged V1 audit returned wrong coverage")
+                        validate_atomic_audit_issues(audit)
+                        audit = canonicalize_audit_evidence(
+                            audit,
+                            transcript_by_id,
+                            report_markdown=result.report_markdown,
+                        )
+                        validate_audit_evidence(
+                            audit,
+                            transcript_by_id=transcript_by_id,
+                            report_markdown=result.report_markdown,
+                        )
+                        break
+                    except ValueError:
+                        if merge_attempt:
+                            raise
             except Exception as exc:
                 emit_analysis_event(
                     logging.getLogger("uvicorn.error"),

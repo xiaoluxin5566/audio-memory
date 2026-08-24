@@ -216,6 +216,20 @@ class InvalidEvidenceOnceProvider(PipelineProvider):
         return await super().generate(provider_id, **kwargs)
 
 
+class InvalidMergeAuditOnceProvider(PipelineProvider):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.merge_attempts = 0
+
+    async def generate(self, provider_id: str, **kwargs: object) -> str:
+        if str(kwargs["scene_id"]) == "direct-report-audit-merge":
+            self.merge_attempts += 1
+            if self.merge_attempts == 1:
+                self.calls.append({"scene_id": kwargs["scene_id"], **kwargs})
+                return "The merged audit follows in JSON."
+        return await super().generate(provider_id, **kwargs)
+
+
 class GenerationSource:
     async def credential_generation(self, provider_id: str) -> int:
         return 1
@@ -333,6 +347,27 @@ async def test_truncated_audit_chunk_is_split_until_each_leaf_succeeds(
     assert provider.chunk_sizes[0] > 4
     assert any(size <= 4 for size in provider.chunk_sizes)
     assert staged["direct_report_v1_audit_chunk_results"]
+    assert report.quality_metadata.audit_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_invalid_merged_audit_is_retried_once(tmp_path) -> None:
+    provider = InvalidMergeAuditOnceProvider(
+        v1_audit=audit_payload(mode="full_v1_audit", issue=False)
+    )
+
+    report, staged = await run_with(tmp_path, provider)
+
+    assert provider.merge_attempts == 2
+    merge_calls = [
+        call for call in provider.calls
+        if call["scene_id"] == "direct-report-audit-merge"
+    ]
+    assert [call.get("repair_attempted", False) for call in merge_calls] == [
+        False,
+        True,
+    ]
+    assert staged["direct_report_v1_audit"]["audit_mode"] == "full_v1_audit"
     assert report.quality_metadata.audit_status == "completed"
 
 
