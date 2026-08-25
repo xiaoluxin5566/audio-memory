@@ -106,15 +106,18 @@ async def save_provider_key(
 ) -> ProviderView:
     ensure_provider(provider_id)
     coordinator = coordinator_from(request)
-    result = await asyncio.wait_for(
-        coordinator.validate_candidate(
-            provider_id,
-            session_id,
-            payload.api_key.encode("utf-8"),
-            model_id=payload.model_id,
-        ),
-        timeout=20,
-    )
+    try:
+        result = await asyncio.wait_for(
+            coordinator.validate_candidate(
+                provider_id,
+                session_id,
+                payload.api_key.encode("utf-8"),
+                model_id=payload.model_id,
+            ),
+            timeout=20,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not result.ok:
         raise HTTPException(
             status_code=422,

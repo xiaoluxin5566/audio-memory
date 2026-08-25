@@ -231,6 +231,29 @@ async def test_credential_generation_survives_coordinator_restart(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_removed_stored_models_fall_back_to_provider_defaults(tmp_path) -> None:
+    database = Database(tmp_path / "removed-provider-model.sqlite3")
+    await database.create_schema()
+    metadata = ProviderMetadataRepository(database)
+    await metadata.ensure_defaults(
+        {"kimi": "kimi-k3", "deepseek": "deepseek-v4-pro"}
+    )
+    await metadata.update_model("kimi", "kimi-k2.6")
+    await metadata.update_model("deepseek", "deepseek-v4-flash")
+
+    coordinator = ProviderStateCoordinator(
+        keychain=FakeKeychain(),
+        validators={"kimi": AcceptingValidator()},
+        metadata=metadata,
+    )
+    await coordinator.initialize()
+
+    assert coordinator.state("kimi").model_id == "kimi-k3"
+    assert coordinator.state("deepseek").model_id == "deepseek-v4-pro"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publication_guard_blocks_physical_credential_replacement() -> None:
     class AcceptingValidator:
         async def validate(self, secret: bytes) -> ValidationResult:
