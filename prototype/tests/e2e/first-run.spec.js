@@ -89,6 +89,15 @@ test('volcano ASR setup links directly to the official API key page', async ({ p
   await expect(page.getByRole('dialog').getByRole('link', { name: '申请或管理 API Key' })).toHaveAttribute('href', setupUrl)
 })
 
+test('voice API card shows the most recent validation time', async ({ page }) => {
+  await installApi(page)
+  await page.goto('/')
+
+  const voiceCard = page.locator('section').filter({ hasText: '语音转写 API' })
+  await expect(voiceCard.getByText(/连接可用 · \d{2}:\d{2} 校验/)).toBeVisible()
+  await expect(voiceCard.getByText('连接可用 · volc.seedasr.auc')).toBeHidden()
+})
+
 test('failed configuration keeps the visible key until the modal is closed', async ({ page }) => {
   const calls = await installApi(page, { rejectDeepSeek: true })
   await page.goto('/')

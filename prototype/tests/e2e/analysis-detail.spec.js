@@ -38,3 +38,40 @@ test('autonomous analysis uses editorial sections with optional timeline and vie
   await expect(page.locator('.analysis-recommendation-list')).toContainText('建立最小闭环')
   await expect(page.locator('.analysis-relationship-map')).toHaveCount(0)
 })
+
+test('desktop report scrolling keeps the control rail fixed without its own scroll', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 })
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const { pathname } = new URL(route.request().url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', model_id: 'deepseek-v4-pro', state: 'available', active: true }] } })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-24T10:00:00Z' } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { todos: [], days: [{
+      date: '2026年8月25日', cards: [{
+        id: 'long-report', batch_id: 'batch-1', scene_id: 'analysis', uploaded_at: '2026-08-25T10:00:00Z', qa: [], evidence: [],
+        payload: { scene_id: 'analysis', cards: [{
+          title: '长报告滚动测试', summary: '验证左栏固定。',
+          content: Array.from({ length: 18 }, (_, index) => ({ type: 'analysis', title: `分析 ${index + 1}`, body: '这是一段用于形成足够页面高度的报告正文。'.repeat(8), items: [] })),
+          quotes: [], recommendations: [],
+        }] },
+      }],
+    }] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: false, status: 'inactive' } })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204 })
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+  await page.goto('/')
+  await page.getByRole('heading', { name: '长报告滚动测试' }).click()
+
+  const rail = page.locator('.control-rail')
+  const before = await rail.evaluate((element) => element.getBoundingClientRect().top)
+  await page.evaluate(() => window.scrollTo(0, 900))
+  const after = await rail.evaluate((element) => element.getBoundingClientRect().top)
+  const overflowY = await rail.evaluate((element) => getComputedStyle(element).overflowY)
+
+  expect(after).toBe(before)
+  expect(overflowY).toBe('visible')
+})

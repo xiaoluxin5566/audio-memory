@@ -41,6 +41,13 @@ function prettySize(bytes = 0) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function validationTimeLabel(value) {
+  if (!value) return '刚刚';
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(value));
+}
+
 export function App() {
   const [state, setState] = useState(() => createInitialState());
   const [environment, setEnvironment] = useState(null);
@@ -52,7 +59,7 @@ export function App() {
   const [reanalysisOpen, setReanalysisOpen] = useState(false);
   const [interruptionNoticeOpen, setInterruptionNoticeOpen] = useState(false);
   const [asrOpen, setAsrOpen] = useState(false);
-  const [asrState, setAsrState] = useState({ state: 'initializing', displayName: '火山语音', resourceId: 'volc.seedasr.auc' });
+  const [asrState, setAsrState] = useState({ state: 'initializing', displayName: '火山语音', resourceId: 'volc.seedasr.auc', lastChecked: '' });
   const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [removalBlockedOpen, setRemovalBlockedOpen] = useState(false);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
@@ -95,7 +102,7 @@ export function App() {
   }, []);
   const refreshAsr = useCallback(async () => {
     const value = await api.asr();
-    setAsrState({ state: value.state, displayName: value.display_name, resourceId: value.resource_id, errorCode: value.error_code });
+    setAsrState({ state: value.state, displayName: value.display_name, resourceId: value.resource_id, lastChecked: validationTimeLabel(value.last_validated_at), errorCode: value.error_code });
     return value;
   }, []);
   useEffect(() => { refreshAsr().catch(() => setAsrState((current) => ({ ...current, state: 'unavailable' }))); }, [refreshAsr]);
@@ -370,7 +377,7 @@ export function App() {
               <div className="panel-title"><strong>语音转写 API</strong><span className={asrState.state === 'available' ? 'ok-text' : ''}>{asrState.state === 'available' ? '已配置' : '未配置'}</span></div>
               <div className="provider-summary"><div><b>{asrState.displayName}</b><small>仅支持火山语音 · 豆包录音文件识别 2.0</small></div><button className="secondary compact" onClick={() => setAsrOpen(true)}>{asrState.state === 'available' ? '修改' : '去配置'}</button></div>
               <a className="provider-help-link" href={VOLCANO_ASR_API_KEY_URL} target="_blank" rel="noreferrer">申请或管理 API Key <span aria-hidden="true">↗</span></a>
-              {asrState.state === 'available' && <div className="status-success"><i />连接可用 · {asrState.resourceId}</div>}
+              {asrState.state === 'available' && <div className="status-success"><i />连接可用 · {asrState.lastChecked || '刚刚'} 校验</div>}
             </section>
             <section className="panel sleep-setting-panel">
               <label className="sleep-setting-row">
