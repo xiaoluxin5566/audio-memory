@@ -145,7 +145,8 @@ test('startup validation refreshes automatically without manual revalidation', a
   })
   await page.goto('/')
 
-  await expect(page.getByText('连接可用', { exact: false })).toBeVisible({ timeout: 5_000 })
+  const modelCard = page.locator('section').filter({ hasText: '模型与 API Key' })
+  await expect(modelCard.getByText('连接可用', { exact: false })).toBeVisible({ timeout: 5_000 })
   await expect(page.locator('input[type=file]')).toBeEnabled()
   expect(providerReads).toBeGreaterThanOrEqual(3)
 })
