@@ -8,7 +8,7 @@ export function createInitialState() {
       deepseek: { name: 'DeepSeek', modelName: '', configured: false, lastChecked: '' },
       openai: { name: 'OpenAI', modelName: '', configured: false, lastChecked: '' },
     },
-    activeProvider: 'kimi',
+    activeProvider: 'deepseek',
     upload: { files: [], error: '', paused: false },
     job: null,
     feed: [],
@@ -123,6 +123,13 @@ export function formatJobEta(job) {
 }
 
 export function jobFailureCopy(job) {
+  if (job.error_code === 'managed_storage_unavailable') {
+    return {
+      title: '云端转写准备失败',
+      body: '音频仍安全保存在本机；产品正在重新建立临时存储授权，尚未生成完整转写和报告。',
+      action: '继续云端转写',
+    };
+  }
   if (job.error_code === 'cloud_asr_failed') {
     return {
       title: '云端转写未完成',
@@ -146,7 +153,7 @@ export function jobFailureCopy(job) {
 
 
 export function jobRecoveryAction(job) {
-  if (job?.stage === 'failed' && job?.error_code === 'cloud_asr_failed') {
+  if (job?.stage === 'failed' && ['cloud_asr_failed', 'managed_storage_unavailable'].includes(job?.error_code)) {
     return 'resume-cloud-asr';
   }
   if (job?.stage === 'failed' || job?.analysis_phase === 'failed') {

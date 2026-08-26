@@ -10,7 +10,7 @@ from audio_memory.readiness import PipelineReadinessView
 
 
 class FixedReadiness:
-    async def check(self) -> PipelineReadinessView:
+    async def check(self, **_kwargs) -> PipelineReadinessView:
         return PipelineReadinessView(
             ready=False,
             analysis_ready=True,
@@ -68,4 +68,3 @@ async def test_upload_is_rejected_before_request_body_is_read() -> None:
             "missing": ["asr:volcano"],
         }
     }
-

@@ -99,6 +99,15 @@ test('cloud ASR failure never claims transcription completed', () => {
   assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'cloud_asr_failed' }), 'resume-cloud-asr')
 })
 
+test('managed storage preparation failure is routed back to cloud transcription', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'managed_storage_unavailable' }), {
+    title: '云端转写准备失败',
+    body: '音频仍安全保存在本机；产品正在重新建立临时存储授权，尚未生成完整转写和报告。',
+    action: '继续云端转写',
+  })
+  assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'managed_storage_unavailable' }), 'resume-cloud-asr')
+})
+
 test('failed analysis detail retries analysis even when the top-level stage is stale', () => {
   assert.equal(jobRecoveryAction({ stage: 'failed', analysis_phase: 'failed' }), 'retry-analysis')
   assert.equal(jobRecoveryAction({ stage: 'analyzing', analysis_phase: 'failed' }), 'retry-analysis')

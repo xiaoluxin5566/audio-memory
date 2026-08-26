@@ -49,6 +49,11 @@ class AsrSource:
         )
 
 
+class StorageSource:
+    def __init__(self, ready: bool) -> None:
+        self.ready = ready
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("analysis", "asr", "ready", "missing"),
@@ -71,3 +76,15 @@ async def test_readiness_combinations(
     assert result.asr_ready is asr
     assert result.missing == missing
 
+
+@pytest.mark.asyncio
+async def test_managed_storage_is_part_of_upload_readiness() -> None:
+    result = await PipelineReadiness(
+        analysis=AnalysisSource(True),
+        asr=AsrSource(True),
+        managed_storage=StorageSource(False),
+    ).check()
+
+    assert result.ready is False
+    assert result.managed_storage_ready is False
+    assert result.missing == ("managed_storage",)

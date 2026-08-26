@@ -13,6 +13,72 @@ const activeProviders = {
   })),
 }
 
+const availableButInactiveProviders = {
+  providers: activeProviders.providers.map((provider) => ({
+    ...provider,
+    state: ['kimi', 'deepseek'].includes(provider.provider_id) ? 'available' : provider.state,
+    active: false,
+  })),
+}
+
+async function installUploadPrerequisites(page, providers, createJobResponse) {
+  let createJobCalls = 0
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: providers })
+    if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: providers })
+    if (pathname === '/api/jobs' && request.method() === 'POST') {
+      createJobCalls += 1
+      return route.fulfill(createJobResponse)
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+  return () => createJobCalls
+}
+
+test('available but inactive providers require choosing the current model before upload', async ({ page }) => {
+  const createJobCalls = await installUploadPrerequisites(
+    page,
+    availableButInactiveProviders,
+    { json: { id: 'must-not-create', stage: 'uploading' } },
+  )
+  await page.goto('/')
+
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'meeting.mp3',
+    mimeType: 'audio/mpeg',
+    buffer: Buffer.from('browser acceptance audio'),
+  })
+
+  await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeVisible()
+  await expect(page.getByText('未选择当前模型')).toBeVisible()
+  expect(createJobCalls()).toBe(0)
+})
+
+test('job creation failure is visible instead of looking like a dropped file was ignored', async ({ page }) => {
+  await installUploadPrerequisites(page, activeProviders, {
+    status: 409,
+    json: { detail: { code: 'configuration_required', message: '请选择当前分析模型' } },
+  })
+  await page.goto('/')
+
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'meeting.mp3',
+    mimeType: 'audio/mpeg',
+    buffer: Buffer.from('browser acceptance audio'),
+  })
+
+  await expect(page.getByRole('status')).toHaveText('请选择当前分析模型')
+})
+
 const completedFeed = {
   todos: [],
   days: [{

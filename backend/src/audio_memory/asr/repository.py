@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import json
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from audio_memory.db import Database
@@ -66,8 +66,18 @@ class AsrRepository:
         async with self.database.session() as session:
             rows = await session.scalars(
                 select(AnalysisJob.id)
-                .join(AsrFileTask, AsrFileTask.job_id == AnalysisJob.id)
-                .where(AnalysisJob.stage == "transcribing")
+                .where(
+                    or_(
+                        and_(
+                            AnalysisJob.stage == "transcribing",
+                            AnalysisJob.id.in_(select(AsrFileTask.job_id)),
+                        ),
+                        and_(
+                            AnalysisJob.stage == "failed",
+                            AnalysisJob.error_code == "managed_storage_unavailable",
+                        ),
+                    )
+                )
                 .distinct()
                 .order_by(AnalysisJob.created_at, AnalysisJob.id)
             )

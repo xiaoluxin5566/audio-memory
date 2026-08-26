@@ -43,6 +43,17 @@ test('provider API becomes existing UI provider map without exposing keys', () =
 })
 
 
+test('fresh install defaults model setup to DeepSeek when no provider is active', () => {
+  const normalized = normalizeProviders({ providers: [
+    { provider_id: 'kimi', display_name: 'Kimi', model_id: 'kimi-k2.6', state: 'unconfigured', active: false },
+    { provider_id: 'deepseek', display_name: 'DeepSeek', model_id: 'deepseek-v4-pro', state: 'unconfigured', active: false },
+  ] })
+
+  assert.equal(normalized.activeProvider, 'deepseek')
+  assert.equal(normalized.providers.deepseek.modelName, 'deepseek-v4-pro')
+})
+
+
 test('provider API preserves keychain and rate-limit recovery state', () => {
   const normalized = normalizeProviders({ providers: [
     { provider_id: 'kimi', display_name: 'Kimi', state: 'keychain_unavailable', active: false, error_code: 'keychain_unavailable', error_message: '无法访问系统钥匙串' },

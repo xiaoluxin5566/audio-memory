@@ -23,6 +23,7 @@ import { buildReportEventMap } from './reportPresentation.js';
 import './styles.css';
 
 const VOLCANO_ASR_API_KEY_URL = 'https://console.volcengine.com/speech/new/setting/apikeys';
+const INTERRUPTION_NOTICE_VERSION_KEY = 'audio-memory.analysis-interruption-notice-version';
 const ROUTES = { '/': 'feed', '/history': 'history' };
 const ROUTE_PATHS = { feed: '/', history: '/history' };
 const sceneClass = { analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
@@ -200,7 +201,7 @@ export function App() {
       setToast('当前任务完成并生成报告前，不能添加新的音频');
       return;
     }
-    if (state.providers[state.activeProvider]?.state !== 'available') {
+    if (state.providers[state.activeProvider]?.state !== 'available' || !state.providers[state.activeProvider]?.active) {
       setProviderOpen(true);
       return;
     }
@@ -208,7 +209,14 @@ export function App() {
     const files = [...fileList];
     if (!files.length) return;
     let jobId = state.job?.id;
-    if (!jobId) jobId = (await api.createJob()).id;
+    if (!jobId) {
+      try {
+        jobId = (await api.createJob()).id;
+      } catch (error) {
+        setToast(error.message);
+        return;
+      }
+    }
     setState((current) => ({ ...current, job: { id: jobId, stage: 'uploading', progress: 0 } }));
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
@@ -250,7 +258,7 @@ export function App() {
 
   async function executeStartAnalysis() {
     const provider = state.providers[state.activeProvider];
-    if (provider?.state !== 'available') { setProviderOpen(true); return; }
+    if (provider?.state !== 'available' || !provider?.active) { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
     setStartingAnalysis(true);
     try {
@@ -259,7 +267,17 @@ export function App() {
       setAnalysisSettings((current) => ({ ...current, status: sleepStatus }));
       if (sleepStatus === 'unavailable') setToast('防休眠未生效，请保持电脑唤醒以完成分析');
       setState((current) => ({ ...current, job: { ...job, progress: jobProgressValue(job) } }));
-      setInterruptionNoticeOpen(true);
+      const appVersion = environment?.version;
+      let noticeAlreadyShown = false;
+      if (appVersion) {
+        try {
+          noticeAlreadyShown = window.localStorage.getItem(INTERRUPTION_NOTICE_VERSION_KEY) === appVersion;
+          if (!noticeAlreadyShown) window.localStorage.setItem(INTERRUPTION_NOTICE_VERSION_KEY, appVersion);
+        } catch {
+          // A storage restriction must never prevent analysis from starting.
+        }
+      }
+      if (!noticeAlreadyShown) setInterruptionNoticeOpen(true);
     } finally {
       setStartingAnalysis(false);
     }
@@ -267,7 +285,7 @@ export function App() {
 
   async function startAnalysis() {
     const provider = state.providers[state.activeProvider];
-    if (provider?.state !== 'available') { setProviderOpen(true); return; }
+    if (provider?.state !== 'available' || !provider?.active) { setProviderOpen(true); return; }
     if (!state.upload.files.length || state.upload.paused || state.upload.files.some((file) => file.progress < 100)) return;
     if (!analysisSettings.loaded) return;
     await executeStartAnalysis();
@@ -358,6 +376,7 @@ export function App() {
   }
 
   const currentProvider = state.providers[state.activeProvider];
+  const analysisProviderReady = currentProvider?.state === 'available' && currentProvider?.active;
   const uploadLocked = startingAnalysis || Boolean(state.job && state.job.stage !== 'uploading');
   return (
     <div className="app-shell">
@@ -368,14 +387,14 @@ export function App() {
           <aside className="control-rail">
             <h1>分析音频</h1>
             <section className="panel provider-panel">
-              <div className="panel-title"><strong>模型与 API Key</strong><span className={currentProvider.configured ? 'ok-text' : ''}>{currentProvider.configured ? '已配置' : '未配置'}</span></div>
-              <div className="provider-summary"><div>{currentProvider.configured && <b>{currentProvider.modelName}</b>}<small>{currentProvider.configured ? '用于内容分析' : '请先完成配置'}</small></div><button className="secondary compact" onClick={() => setProviderOpen(true)}>{currentProvider.configured ? '修改' : '去配置'}</button></div>
-              {currentProvider.state === 'available' && <div className="status-success"><i />连接可用 · {currentProvider.lastChecked || '刚刚'} 校验</div>}
+              <div className="panel-title"><strong>报告生成 API</strong><span className={analysisProviderReady ? 'ok-text' : ''}>{analysisProviderReady ? '已配置' : currentProvider.configured ? '未选择当前模型' : '未配置'}</span></div>
+              <div className="provider-summary"><div>{currentProvider.configured && <b>{currentProvider.modelName}</b>}<small>{analysisProviderReady ? '用于内容分析' : currentProvider.configured ? '请选择本次使用的模型' : '请先完成配置'}</small></div><button className="secondary compact" onClick={() => setProviderOpen(true)}>{analysisProviderReady ? '修改' : currentProvider.configured ? '选择' : '去配置'}</button></div>
+              {analysisProviderReady && <div className="status-success"><i />连接可用 · {currentProvider.lastChecked || '刚刚'} 校验</div>}
               {currentProvider.error && <div className="inline-error"><b>{currentProvider.error}</b></div>}
             </section>
             <section className="panel provider-panel">
               <div className="panel-title"><strong>语音转写 API</strong><span className={asrState.state === 'available' ? 'ok-text' : ''}>{asrState.state === 'available' ? '已配置' : '未配置'}</span></div>
-              <div className="provider-summary"><div><b>{asrState.displayName}</b><small>仅支持火山语音 · 豆包录音文件识别 2.0</small></div><button className="secondary compact" onClick={() => setAsrOpen(true)}>{asrState.state === 'available' ? '修改' : '去配置'}</button></div>
+              <div className="provider-summary"><div><small>仅支持火山语音 · 豆包录音文件识别 2.0</small></div><button className="secondary compact" onClick={() => setAsrOpen(true)}>{asrState.state === 'available' ? '修改' : '去配置'}</button></div>
               <a className="provider-help-link" href={VOLCANO_ASR_API_KEY_URL} target="_blank" rel="noreferrer">申请或管理 API Key <span aria-hidden="true">↗</span></a>
               {asrState.state === 'available' && <div className="status-success"><i />连接可用 · {asrState.lastChecked || '刚刚'} 校验</div>}
             </section>
@@ -389,9 +408,9 @@ export function App() {
             </section>
             <section className="panel upload-panel">
               <div className="panel-title"><strong>上传音频</strong><span>{state.upload.files.length ? `${state.upload.files.length} 个文件` : ''}</span></div>
-              <div className={`drop-zone ${currentProvider.state !== 'available' || asrState.state !== 'available' || uploadLocked ? 'disabled' : ''}`} onClick={() => uploadLocked ? undefined : currentProvider.state !== 'available' ? setProviderOpen(true) : asrState.state !== 'available' ? setAsrOpen(true) : fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!uploadLocked) addFiles(event.dataTransfer.files); }}>
+              <div className={`drop-zone ${!analysisProviderReady || asrState.state !== 'available' || uploadLocked ? 'disabled' : ''}`} onClick={() => uploadLocked ? undefined : !analysisProviderReady ? setProviderOpen(true) : asrState.state !== 'available' ? setAsrOpen(true) : fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!uploadLocked) addFiles(event.dataTransfer.files); }}>
                 <b>{uploadLocked ? '当前任务完成并生成报告前，不能添加新的音频' : '拖拽音频到这里，或点击选择'}</b><span>{uploadLocked ? '可重试或清除当前任务' : '支持 MP3、AAC'}</span>
-                <input ref={fileInput} type="file" multiple disabled={currentProvider.state !== 'available' || asrState.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
+                <input ref={fileInput} type="file" multiple disabled={!analysisProviderReady || asrState.state !== 'available' || uploadLocked} accept=".mp3,.aac,audio/mpeg,audio/aac" onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} />
               </div>
               {state.upload.error && <div className="inline-error"><b>{state.upload.error}</b><span>移除不支持的文件后可继续。</span></div>}
               <div className="file-stack">{state.upload.files.map((file) => <UploadFile key={file.id} file={file} onRemove={() => removeFile(file.id)} />)}</div>
@@ -693,7 +712,7 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
   const configurableProviders = configurableProviderEntries(state.providers);
   const initialProviderId = state.activeProvider !== 'glm'
     ? state.activeProvider
-    : (state.providers.kimi ? 'kimi' : configurableProviders[0]?.[0] || 'deepseek');
+    : (state.providers.deepseek ? 'deepseek' : configurableProviders[0]?.[0] || 'kimi');
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(
     state.providers[initialProviderId]?.modelName || ''

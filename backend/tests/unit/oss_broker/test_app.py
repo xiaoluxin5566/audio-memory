@@ -20,7 +20,7 @@ class Signer:
         self.deletes: list[str] = []
 
     async def issue_upload(
-        self, *, object_key: str, content_type: str, size_bytes: int, sha256: str
+        self, *, object_key: str, content_type: str, size_bytes: int, sha256: str,
     ):
         self.uploads.append((object_key, content_type, size_bytes, sha256))
         return {
@@ -77,7 +77,10 @@ async def test_upload_ticket_is_single_object_and_filename_free(broker) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"object_id", "upload_url", "upload_headers", "expires_at"}
+    assert set(body) == {
+        "object_id", "upload_url", "upload_headers", "upload_method",
+        "upload_fields", "expires_at",
+    }
     assert "installation-a" not in body["object_id"]
     object_key, content_type, size_bytes, sha256 = signer.uploads[0]
     assert object_key.startswith("temporary/")
@@ -165,4 +168,3 @@ async def test_invalid_upload_scope_is_rejected_before_signing(broker, payload) 
         )
     assert response.status_code == 422
     assert signer.uploads == []
-

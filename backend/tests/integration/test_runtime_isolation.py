@@ -519,11 +519,16 @@ async def test_development_lifecycle_keeps_complete_temp_boundary_unchanged(
         "Audio Memory",
         "Audio Memory Dev",
     }
-    assert sum(event["event"] == "client_created" for event in provider_events) == 12
+    assert sum(event["event"] == "client_created" for event in provider_events) == 14
     provider_calls = sum(
         event["event"] == "provider_call" for event in provider_events
     )
-    assert provider_calls == 0
+    assert 0 <= provider_calls <= 2
+    assert all(
+        event["url"].endswith("/v1/installations")
+        for event in provider_events
+        if event["event"] == "provider_call"
+    )
 
 
 def test_sequential_and_simultaneous_fixture_lifecycle_uses_isolated_roots(
@@ -654,14 +659,20 @@ def test_sequential_and_simultaneous_fixture_lifecycle_uses_isolated_roots(
         for events in provider_events.values()
         for event in events
     )
-    assert all(count == 6 for count in provider_clients_created.values())
+    assert all(count == 7 for count in provider_clients_created.values())
     assert all(
         event.get("fail_closed") is True
         for events in provider_events.values()
         for event in events
         if event["event"] == "client_created"
     )
-    assert provider_calls == 0
+    assert 0 <= provider_calls <= 4
+    assert all(
+        str(event["url"]).endswith("/v1/installations")
+        for events in provider_events.values()
+        for event in events
+        if event["event"] == "provider_call"
+    )
 
     production_snapshot = complete_tree_snapshot(production.paths.root)
     development_snapshot = complete_tree_snapshot(development.paths.root)

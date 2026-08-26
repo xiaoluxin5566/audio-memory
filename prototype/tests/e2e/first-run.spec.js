@@ -6,7 +6,7 @@ const emptyProviders = () => ({
     display_name: provider_id === 'kimi' ? 'Kimi' : provider_id === 'deepseek' ? 'DeepSeek' : 'OpenAI',
     model_id: provider_id === 'kimi' ? 'kimi-k2.5' : provider_id === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5-mini',
     state: 'unconfigured',
-    active: provider_id === 'kimi',
+    active: false,
     last_validated_at: null,
     error_code: null,
     error_message: null,
@@ -61,14 +61,17 @@ test('successful first configuration becomes current and closes the modal', asyn
   await page.goto('/')
 
   await expect(page.getByRole('heading', { name: '先上传音频' })).toBeVisible()
-  await page.locator('section').filter({ hasText: '模型与 API Key' }).getByRole('button', { name: '去配置' }).click()
-  await page.getByRole('button', { name: 'DeepSeek' }).click()
+  const reportApiCard = page.locator('section').filter({ hasText: '报告生成 API' })
+  await expect(reportApiCard.getByText('模型与 API Key')).toBeHidden()
+  await reportApiCard.getByRole('button', { name: '去配置' }).click()
+  await expect(page.getByRole('button', { name: 'DeepSeek' })).toHaveClass(/active/)
+  await expect(page.getByRole('button', { name: 'Kimi' })).not.toHaveClass(/active/)
   await page.getByLabel('API Key').fill('visible-test-key')
   await page.getByRole('button', { name: '保存并校验' }).click()
 
   await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeHidden()
-  await expect(page.locator('section').filter({ hasText: '模型与 API Key' }).locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
-  await expect(page.locator('section').filter({ hasText: '模型与 API Key' }).getByText('连接可用', { exact: false })).toBeVisible()
+  await expect(page.locator('section').filter({ hasText: '报告生成 API' }).locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
+  await expect(page.locator('section').filter({ hasText: '报告生成 API' }).getByText('连接可用', { exact: false })).toBeVisible()
   expect(calls).toContain('PUT /api/providers/deepseek/key')
   expect(calls).toContain('POST /api/providers/deepseek/activate')
   expect(calls.indexOf('PUT /api/providers/deepseek/key')).toBeLessThan(calls.indexOf('POST /api/providers/deepseek/activate'))
@@ -94,6 +97,7 @@ test('voice API card shows the most recent validation time', async ({ page }) =>
   await page.goto('/')
 
   const voiceCard = page.locator('section').filter({ hasText: '语音转写 API' })
+  await expect(voiceCard.locator('.provider-summary b')).toHaveCount(0)
   await expect(voiceCard.getByText(/连接可用 · \d{2}:\d{2} 校验/)).toBeVisible()
   await expect(voiceCard.getByText('连接可用 · volc.seedasr.auc')).toBeHidden()
 })
@@ -101,7 +105,7 @@ test('voice API card shows the most recent validation time', async ({ page }) =>
 test('failed configuration keeps the visible key until the modal is closed', async ({ page }) => {
   const calls = await installApi(page, { rejectDeepSeek: true })
   await page.goto('/')
-  await page.locator('section').filter({ hasText: '模型与 API Key' }).getByRole('button', { name: '去配置' }).click()
+  await page.locator('section').filter({ hasText: '报告生成 API' }).getByRole('button', { name: '去配置' }).click()
   await page.getByRole('button', { name: 'DeepSeek' }).click()
 
   const keyField = page.getByLabel('API Key')
@@ -145,7 +149,7 @@ test('startup validation refreshes automatically without manual revalidation', a
   })
   await page.goto('/')
 
-  const modelCard = page.locator('section').filter({ hasText: '模型与 API Key' })
+  const modelCard = page.locator('section').filter({ hasText: '报告生成 API' })
   await expect(modelCard.getByText('连接可用', { exact: false })).toBeVisible({ timeout: 5_000 })
   await expect(page.locator('input[type=file]')).toBeEnabled()
   expect(providerReads).toBeGreaterThanOrEqual(3)

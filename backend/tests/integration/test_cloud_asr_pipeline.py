@@ -35,10 +35,14 @@ class Storage:
 
     async def create_upload(self, request):
         self.created += 1
+        assert request.size_bytes == len(b"original-audio")
         return UploadTicket(
             object_id="obj_random",
             upload_url="https://bucket.example/object?sig=upload",
-            upload_headers={"Content-Type": request.content_type},
+            upload_headers={
+                "Content-Type": request.content_type,
+                "Content-Length": str(request.size_bytes),
+            },
             expires_at=datetime(2026, 8, 24, tzinfo=UTC),
         )
 

@@ -26,7 +26,7 @@ class ReadinessUploadMiddleware:
                 getattr(fastapi_app, "state", None), "pipeline_readiness", None
             )
             if readiness is not None:
-                result = await readiness.check()
+                result = await readiness.check(refresh_managed_storage=True)
                 if not result.ready:
                     response = JSONResponse(
                         status_code=409,
@@ -40,4 +40,3 @@ class ReadinessUploadMiddleware:
                     await response(scope, receive, send)
                     return
         await self.app(scope, receive, send)
-

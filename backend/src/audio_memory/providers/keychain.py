@@ -44,6 +44,8 @@ class KeychainRepository:
         "glm": "provider:glm",
         "volcano_asr": "asr_provider:volcano",
         "beta_installation": "installation:beta",
+        "managed_storage_device_key": "managed_storage:device-key",
+        "managed_storage_credential": "managed_storage:credential",
     }
 
     def __init__(self, client: SecurityClient, service: str = SERVICE) -> None:

@@ -4,10 +4,16 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .app import BrokerInstallation, ObjectRegistration, create_broker_app
+from .device_auth import (
+    CredentialAuthority,
+    DeviceRequestAuthorizer,
+)
+from .security_ledger import SqliteEnrollmentLimiter, SqliteSecurityLedger
 
 
 class HashedTokenAuthorizer:
@@ -36,7 +42,10 @@ class HashedTokenAuthorizer:
 
 class OssRequestFactory(Protocol):
     @staticmethod
-    def put(*, bucket: str, key: str, content_type: str) -> object: ...
+    def put(
+        *, bucket: str, key: str, content_type: str, content_length: int,
+        content_md5: str, metadata: dict[str, str],
+    ) -> object: ...
 
     @staticmethod
     def get(*, bucket: str, key: str) -> object: ...
@@ -46,22 +55,59 @@ class OssRequestFactory(Protocol):
 
 
 class AlibabaOssSigner:
-    def __init__(self, *, client: Any, bucket: str, requests: OssRequestFactory) -> None:
+    def __init__(
+        self, *, client: Any, bucket: str, requests: OssRequestFactory,
+        credentials_loader: Any, region: str, endpoint: str,
+    ) -> None:
         self._client = client
         self._bucket = bucket
         self._requests = requests
+        self._credentials_loader = credentials_loader
+        self._region = region
+        self._endpoint = endpoint.rstrip("/")
 
     async def issue_upload(
         self, *, object_key: str, content_type: str, size_bytes: int, sha256: str
     ) -> dict[str, object]:
-        request = self._requests.put(
-            bucket=self._bucket, key=object_key, content_type=content_type
-        )
-        result = self._client.presign(request, expires=timedelta(minutes=15))
+        credentials = self._credentials_loader()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        conditions: list[object] = [
+            {"bucket": self._bucket},
+            {"key": object_key},
+            {"Content-Type": content_type},
+            {"x-oss-meta-sha256": sha256},
+            {"success_action_status": "200"},
+            ["content-length-range", size_bytes, size_bytes],
+        ]
+        fields = {
+            "key": object_key,
+            "Content-Type": content_type,
+            "x-oss-meta-sha256": sha256,
+            "success_action_status": "200",
+            "OSSAccessKeyId": credentials.access_key_id,
+        }
+        if credentials.security_token:
+            conditions.append({"x-oss-security-token": credentials.security_token})
+            fields["x-oss-security-token"] = credentials.security_token
+        policy = base64.b64encode(json.dumps(
+            {
+                "expiration": expires_at.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "conditions": conditions,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")).decode("ascii")
+        fields["policy"] = policy
+        fields["Signature"] = base64.b64encode(hmac.new(
+            credentials.access_key_secret.encode("utf-8"),
+            policy.encode("ascii"),
+            hashlib.sha1,
+        ).digest()).decode("ascii")
         return {
-            "url": result.url,
-            "headers": dict(result.signed_headers),
-            "expires_at": result.expiration,
+            "url": self._endpoint,
+            "method": "POST",
+            "fields": fields,
+            "headers": {},
+            "expires_at": expires_at,
         }
 
     async def issue_read(self, *, object_key: str) -> dict[str, object]:
@@ -78,9 +124,17 @@ class AlibabaRequestFactory:
     def __init__(self, sdk: Any) -> None:
         self._sdk = sdk
 
-    def put(self, *, bucket: str, key: str, content_type: str) -> object:
+    def put(
+        self, *, bucket: str, key: str, content_type: str, content_length: int,
+        content_md5: str, metadata: dict[str, str],
+    ) -> object:
         return self._sdk.PutObjectRequest(
-            bucket=bucket, key=key, content_type=content_type
+            bucket=bucket,
+            key=key,
+            content_type=content_type,
+            content_length=content_length,
+            content_md5=content_md5,
+            metadata=metadata,
         )
 
     def get(self, *, bucket: str, key: str) -> object:
@@ -94,12 +148,18 @@ def build_app_from_environment(env: Mapping[str, str], *, sdk: Any) -> Any:
     required = (
         "OSS_BUCKET",
         "OSS_REGION",
-        "BROKER_TOKEN_SHA256",
+        "BROKER_CREDENTIAL_SECRET",
         "BROKER_REGISTRY_SECRET",
+        "BROKER_SECURITY_DB",
     )
     missing = next((name for name in required if not env.get(name)), None)
     if missing is not None:
         raise ValueError(f"missing {missing}")
+    security_db = Path(env["BROKER_SECURITY_DB"])
+    try:
+        security_db.resolve(strict=False).relative_to(Path("/mnt"))
+    except ValueError as exc:
+        raise ValueError("BROKER_SECURITY_DB must be on a /mnt persistent volume") from exc
 
     def load_credentials() -> Any:
         return sdk.credentials.Credentials(
@@ -117,13 +177,40 @@ def build_app_from_environment(env: Mapping[str, str], *, sdk: Any) -> Any:
         client=sdk.Client(cfg),
         bucket=env["OSS_BUCKET"],
         requests=AlibabaRequestFactory(sdk),
-    )
-    return create_broker_app(
-        authorizer=HashedTokenAuthorizer(
-            installation_id=env.get("BROKER_INSTALLATION_ID", "beta6"),
-            token_sha256=env["BROKER_TOKEN_SHA256"],
-            daily_bytes=int(env.get("BROKER_DAILY_BYTES", str(20 * 1024**3))),
+        credentials_loader=load_credentials,
+        region=env["OSS_REGION"],
+        endpoint=env.get(
+            "OSS_ENDPOINT",
+            f"https://{env['OSS_BUCKET']}.oss-{env['OSS_REGION']}.aliyuncs.com",
         ),
+    )
+    credential_authority = CredentialAuthority(
+        secret=env["BROKER_CREDENTIAL_SECRET"].encode("utf-8")
+    )
+    daily_bytes = int(env.get("BROKER_DAILY_BYTES", str(20 * 1024**3)))
+    ledger = SqliteSecurityLedger(security_db)
+    for installation_id in env.get("BROKER_REVOKED_INSTALLATIONS", "").split(","):
+        if installation_id.strip():
+            ledger.revoke(installation_id.strip())
+    return create_broker_app(
+        authorizer=None,
+        device_authorizer=DeviceRequestAuthorizer(
+            authority=credential_authority,
+            ledger=ledger,
+        ),
+        credential_authority=credential_authority,
+        daily_bytes=daily_bytes,
+        enrollment_limiter=SqliteEnrollmentLimiter(
+            ledger=ledger,
+            max_per_source_per_hour=int(
+                env.get("BROKER_ENROLLMENTS_PER_SOURCE_HOUR", "20")
+            ),
+            max_global_per_hour=int(
+                env.get("BROKER_ENROLLMENTS_GLOBAL_HOUR", "500")
+            ),
+            enrollment_enabled=env.get("BROKER_ENROLLMENT_ENABLED", "1") == "1",
+        ),
+        trust_forwarded_client=env.get("BROKER_TRUST_FORWARDED_CLIENT", "1") == "1",
         registry=SignedObjectRegistry(
             secret=env["BROKER_REGISTRY_SECRET"].encode("utf-8")
         ),

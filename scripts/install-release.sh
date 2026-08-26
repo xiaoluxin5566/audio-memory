@@ -10,6 +10,13 @@ CURRENT_LINK="$APP_ROOT/current"
 DATABASE="$DATA_ROOT/audio-memory.sqlite3"
 CLI_TARGET="$HOME/.local/bin/audio-memory"
 BOOTSTRAP_PYTHON="${AUDIO_MEMORY_BOOTSTRAP_PYTHON:-}"
+SHARED_UV_CACHE="$APP_ROOT/.uv-cache"
+BOOTSTRAP_UV_CACHE="$RELEASE_ROOT/.uv-cache"
+if [ -d "$SHARED_UV_CACHE" ]; then
+  BOOTSTRAP_UV_CACHE="$SHARED_UV_CACHE"
+elif [ -d "$CURRENT_LINK/.uv-cache" ]; then
+  BOOTSTRAP_UV_CACHE="$CURRENT_LINK/.uv-cache"
+fi
 
 fail() {
   printf '安装失败：%s\n' "$1" >&2
@@ -42,7 +49,7 @@ run_bootstrap_python() {
   if [ -n "$BOOTSTRAP_PYTHON" ]; then
     "$BOOTSTRAP_PYTHON" "$@"
   else
-    UV_CACHE_DIR="$RELEASE_ROOT/.uv-cache" \
+    UV_CACHE_DIR="$BOOTSTRAP_UV_CACHE" \
       "$RELEASE_ROOT/runtime/uv/uv" run --no-project --python 3.12 python "$@"
   fi
 }
@@ -136,7 +143,15 @@ fi
 
 [ "$(tr -d '[:space:]' < "$TARGET/VERSION")" = "$VERSION" ] || fail "已安装版本校验失败"
 if [ "${AUDIO_MEMORY_SKIP_RELEASE_SETUP:-0}" != "1" ] && [ ! -f "$SETUP_MARKER" ]; then
-  AUDIO_MEMORY_PREBUILT=1 "$TARGET/scripts/install.sh" || \
+  if [ ! -d "$SHARED_UV_CACHE" ]; then
+    if [ -d "$CURRENT_LINK/.uv-cache" ]; then
+      mv "$CURRENT_LINK/.uv-cache" "$SHARED_UV_CACHE"
+    else
+      mkdir -m 700 "$SHARED_UV_CACHE"
+    fi
+  fi
+  AUDIO_MEMORY_PREBUILT=1 AUDIO_MEMORY_UV_CACHE_DIR="$SHARED_UV_CACHE" \
+    "$TARGET/scripts/install.sh" || \
     fail "版本运行环境准备失败，当前版本未切换；重新安装会从安全断点继续"
   SETUP_TEMP="$TARGET/.release-setup-complete.$$"
   printf '%s\n' "$VERSION" > "$SETUP_TEMP"

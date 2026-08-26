@@ -11,6 +11,7 @@ class ReadinessView(BaseModel):
     ready: bool
     analysis_ready: bool
     asr_ready: bool
+    managed_storage_ready: bool
     missing: list[str]
 
 
@@ -21,6 +22,6 @@ async def get_readiness(request: Request) -> ReadinessView:
         ready=result.ready,
         analysis_ready=result.analysis_ready,
         asr_ready=result.asr_ready,
+        managed_storage_ready=result.managed_storage_ready,
         missing=list(result.missing),
     )
-

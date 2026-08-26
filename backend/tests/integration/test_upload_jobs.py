@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 import audio_memory.uploads.service as upload_service_module
+import audio_memory.api.jobs as jobs_api_module
 from audio_memory.api.jobs import router
 from audio_memory.config import AppPaths, PinnedDevelopmentRoot, RuntimeConfig
 from audio_memory.db import Database
@@ -692,6 +693,48 @@ async def test_failed_cloud_asr_resumes_from_local_sources(job_client):
         resumed = await session.get(AnalysisJob, job_id)
         assert resumed.stage == JobStage.TRANSCRIBING.value
         assert resumed.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_managed_storage_refresh_does_not_schedule_resume_twice(
+    job_client, monkeypatch: pytest.MonkeyPatch
+):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "managed_storage_unavailable"
+        job.provider_id = "deepseek"
+        job.model_id = "deepseek-v4-flash"
+        await session.commit()
+
+    app_state = client._transport.app.state
+    app_state.transcription_tasks = {}
+    release_recovery = asyncio.Event()
+
+    async def recovered_pipeline() -> None:
+        await release_recovery.wait()
+
+    async def readiness_that_recovers(_request) -> None:
+        app_state.transcription_tasks[job_id] = asyncio.create_task(
+            recovered_pipeline()
+        )
+
+    monkeypatch.setattr(
+        jobs_api_module, "ensure_pipeline_ready", readiness_that_recovers
+    )
+
+    response = await client.post(f"/api/jobs/{job_id}/resume")
+
+    assert response.status_code == 202
+    assert response.json()["stage"] == JobStage.TRANSCRIBING.value
+    assert list(app_state.transcription_tasks) == [job_id]
+    task = app_state.transcription_tasks[job_id]
+    assert not task.done()
+
+    release_recovery.set()
+    await task
 
 
 @pytest.mark.asyncio

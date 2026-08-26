@@ -149,6 +149,7 @@ def test_release_setup_runs_in_final_version_directory(tmp_path: Path) -> None:
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 printf '%s\n' "$root" > "$root/setup-root.txt"
+printf '%s\n' "$AUDIO_MEMORY_UV_CACHE_DIR" > "$root/setup-cache.txt"
 """,
         encoding="utf-8",
     )
@@ -161,7 +162,38 @@ printf '%s\n' "$root" > "$root/setup-root.txt"
     assert (target / "setup-root.txt").read_text(encoding="utf-8").strip() == str(
         target
     )
+    assert (target / "setup-cache.txt").read_text(encoding="utf-8").strip() == str(
+        data_root / "app" / ".uv-cache"
+    )
     assert (data_root / "app" / "current").resolve() == target
+
+
+def test_upgrade_reuses_previous_release_dependency_cache(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_root = tmp_path / "data"
+    previous = data_root / "app" / "versions" / "0.1.0-beta.6"
+    previous_cache = previous / ".uv-cache"
+    previous_cache.mkdir(parents=True)
+    (previous / "VERSION").write_text("0.1.0-beta.6\n", encoding="utf-8")
+    (previous_cache / "dependency.sentinel").write_text("cached\n", encoding="utf-8")
+    (data_root / "app" / "current").symlink_to(previous)
+    release_root = create_release(tmp_path / "release", "0.1.0-beta.6.1")
+    (release_root / "scripts" / "install.sh").write_text(
+        """#!/bin/bash
+set -euo pipefail
+test -f "$AUDIO_MEMORY_UV_CACHE_DIR/dependency.sentinel"
+""",
+        encoding="utf-8",
+    )
+    (release_root / "scripts" / "install.sh").chmod(0o755)
+    home.mkdir()
+
+    result = run_installer_with_release_setup(home, data_root, release_root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    shared = data_root / "app" / ".uv-cache"
+    assert (shared / "dependency.sentinel").read_text(encoding="utf-8") == "cached\n"
+    assert not previous_cache.exists()
 
 
 def test_installer_refuses_an_existing_install_lock_without_mutation(

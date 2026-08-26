@@ -9,6 +9,11 @@ from audio_memory.asr.storage import (
     UploadTicket,
     UploadRequest,
 )
+from audio_memory.oss_broker.device_auth import (
+    CredentialAuthority,
+    DeviceRequestSigner,
+    generate_device_identity,
+)
 from datetime import UTC, datetime
 
 
@@ -52,6 +57,40 @@ async def test_broker_issues_one_object_upload_without_receiving_filename(
     assert ticket.object_id == "obj_7f4c"
     assert "sig=x" not in repr(ticket)
     assert "install-secret" not in repr(ticket)
+
+
+@pytest.mark.asyncio
+async def test_device_signed_request_replaces_shared_bearer_token(respx_mock) -> None:
+    identity = generate_device_identity()
+    credential = CredentialAuthority(
+        secret=b"credential-signing-secret-32bytes"
+    ).issue(
+        public_key=identity.public_key,
+        release="0.1.0-beta.6",
+        daily_bytes=1024,
+    )
+    route = respx_mock.post("https://broker.example/v1/uploads").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object_id": "obj_signed",
+                "upload_url": "https://bucket.example/upload",
+                "upload_headers": {"Content-Type": "audio/mpeg"},
+                "expires_at": "2026-08-23T13:00:00Z",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http_client:
+        await ManagedOssClient(
+            http_client=http_client,
+            broker_base_url="https://broker.example",
+            request_signer=DeviceRequestSigner(identity, credential),
+        ).create_upload(upload_request())
+
+    request = route.calls[0].request
+    assert "Authorization" not in request.headers
+    assert request.headers["X-Audio-Memory-Credential"] == credential
+    assert request.headers["X-Audio-Memory-Signature"]
 
 
 @pytest.mark.asyncio
@@ -151,13 +190,17 @@ async def test_upload_streams_original_file_with_ticket_headers(
 ) -> None:
     source = tmp_path / "source.mp3"
     source.write_bytes(b"original-audio")
-    route = respx_mock.put(
+    route = respx_mock.post(
         "https://bucket.oss-cn-beijing.aliyuncs.com/random?sig=x"
     ).mock(return_value=httpx.Response(200))
     ticket = UploadTicket(
         object_id="obj_7f4c",
         upload_url="https://bucket.oss-cn-beijing.aliyuncs.com/random?sig=x",
-        upload_headers={"Content-Type": "audio/mpeg", "x-oss-meta-sha256": "abc"},
+        upload_headers={
+            "X-Test": "bound-header",
+        },
+        upload_method="POST",
+        upload_fields={"key": "temporary/object", "policy": "signed-policy"},
         expires_at=datetime(2026, 8, 23, 13, tzinfo=UTC),
     )
     async with httpx.AsyncClient() as http_client:
@@ -169,6 +212,8 @@ async def test_upload_streams_original_file_with_ticket_headers(
         await client.upload_file(ticket, source)
 
     request = route.calls[0].request
-    assert request.content == b"original-audio"
-    assert request.headers["Content-Type"] == "audio/mpeg"
-    assert request.headers["x-oss-meta-sha256"] == "abc"
+    body = request.content
+    assert b'name="key"' in body and b"temporary/object" in body
+    assert b'name="policy"' in body and b"signed-policy" in body
+    assert b'name="file"' in body and b"original-audio" in body
+    assert request.headers["X-Test"] == "bound-header"

@@ -109,7 +109,6 @@ async def test_health_exposes_development_profile_without_runtime_details(
         response.json()
     )
     assert fake_mac_security_client[0].service_accounts == [
-        ("Audio Memory Dev", "installation:beta"),
         ("Audio Memory Dev", "provider:kimi"),
         ("Audio Memory Dev", "provider:deepseek"),
         ("Audio Memory Dev", "provider:openai"),

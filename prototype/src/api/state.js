@@ -96,7 +96,7 @@ export function normalizeProviders(payload) {
     providers,
     activeProvider: Object.values(providers).find((item) => item.active)
       ? Object.entries(providers).find(([, item]) => item.active)[0]
-      : 'kimi',
+      : 'deepseek',
   }
 }
 

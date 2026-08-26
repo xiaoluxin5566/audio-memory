@@ -38,8 +38,11 @@ from audio_memory.providers.types import PROVIDER_CONFIGS
 from audio_memory.providers.validation import ProviderValidationService
 from audio_memory.asr.client import VolcanoAsrClient, VolcanoCredentialValidator
 from audio_memory.asr.coordinator import VolcanoAsrCoordinator
+from audio_memory.asr.device_identity import (
+    ManagedStorageIdentityCoordinator,
+    ManagedStorageRuntime,
+)
 from audio_memory.asr.credentials import (
-    INSTALLATION_KEYCHAIN_ID,
     AsrCredentialCoordinator,
 )
 from audio_memory.asr.repository import AsrRepository
@@ -229,27 +232,47 @@ def create_app(
                 ),
             )
             app.state.asr_coordinator = asr_coordinator
-            installation = keychain_repository.read(INSTALLATION_KEYCHAIN_ID)
+            storage_http_client = httpx.AsyncClient(timeout=120.0)
+            provider_clients.append(storage_http_client)
+            storage_identity = ManagedStorageIdentityCoordinator(
+                keychain=keychain_repository,
+                http_client=storage_http_client,
+                broker_base_url=DEFAULT_OSS_BROKER_URL,
+                release=__version__,
+            )
             app.state.cloud_asr_coordinator = None
-            if installation.secret is not None:
-                storage_http_client = httpx.AsyncClient(timeout=120.0)
-                provider_clients.append(storage_http_client)
-                app.state.cloud_asr_coordinator = VolcanoAsrCoordinator(
+
+            def build_cloud_asr(request_signer):
+                coordinator = VolcanoAsrCoordinator(
                     database=database,
                     runtime_root=resolved_paths.root,
                     repository=AsrRepository(database),
                     storage=ManagedOssClient(
                         http_client=storage_http_client,
                         broker_base_url=DEFAULT_OSS_BROKER_URL,
-                        installation_token=installation.secret,
+                        request_signer=request_signer,
                     ),
                     volcano=VolcanoAsrClient(asr_http_client),
                     keychain=keychain_repository,
                     transcript_finalizer=transcription_service.risk_gate,
                 )
+                app.state.cloud_asr_coordinator = coordinator
+                return coordinator
+
+            async def recover_after_storage_ready() -> None:
+                if hasattr(app.state, "analysis_task_coordinator"):
+                    await recover_cloud_asr_jobs(app)
+
+            storage_runtime = ManagedStorageRuntime(
+                identity=storage_identity,
+                build_coordinator=build_cloud_asr,
+                on_ready=recover_after_storage_ready,
+            )
+            app.state.managed_storage_runtime = storage_runtime
             app.state.pipeline_readiness = PipelineReadiness(
                 analysis=coordinator,
                 asr=asr_coordinator,
+                managed_storage=storage_runtime,
             )
             analysis_http_client = httpx.AsyncClient(timeout=120.0)
             provider_clients.append(analysis_http_client)
@@ -316,9 +339,17 @@ def create_app(
                 task_coordinator=analysis_tasks,
                 write_boundary=development_boundary,
             )
-            await recover_cloud_asr_jobs(app)
+            app.state.managed_storage_startup_task = asyncio.create_task(
+                storage_runtime.ensure_ready()
+            )
             yield
         finally:
+            managed_storage_task = getattr(
+                app.state, "managed_storage_startup_task", None
+            )
+            if managed_storage_task is not None and not managed_storage_task.done():
+                managed_storage_task.cancel()
+                await asyncio.gather(managed_storage_task, return_exceptions=True)
             reanalysis_worker = getattr(app.state, "reanalysis_worker", None)
             if reanalysis_worker is not None:
                 await reanalysis_worker.close()

@@ -9,6 +9,7 @@ MODEL_SMOKE_TEST="${AUDIO_MEMORY_MODEL_SMOKE_TEST:-0}"
 PREBUILT="${AUDIO_MEMORY_PREBUILT:-0}"
 UV="uv"
 FFMPEG_BIN=""
+DEPENDENCY_CACHE="${AUDIO_MEMORY_UV_CACHE_DIR:-$PROJECT_ROOT/.uv-cache}"
 if [ "$PREBUILT" = "1" ]; then
   UV="$PROJECT_ROOT/runtime/uv/uv"
   FFMPEG_BIN="$PROJECT_ROOT/runtime/ffmpeg/bin"
@@ -41,7 +42,7 @@ else
   printf '正在准备 Audio Memory…\n'
   (
     cd "$PROJECT_ROOT/backend"
-    run env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" "$UV" sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
+    run env UV_CACHE_DIR="$DEPENDENCY_CACHE" "$UV" sync --frozen --no-dev --extra database --extra macos --extra transcription --extra diarization
   )
   if [ "$PREBUILT" != "1" ]; then
     (
@@ -63,7 +64,7 @@ if [ "${AUDIO_MEMORY_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   else
     (
       cd "$PROJECT_ROOT/backend"
-      python_command=(env UV_CACHE_DIR="$PROJECT_ROOT/.uv-cache" "$UV" run --no-sync python)
+      python_command=(env UV_CACHE_DIR="$DEPENDENCY_CACHE" "$UV" run --no-sync python)
       if [ "$MODEL_SMOKE_TEST" = "1" ]; then
         python_command=(python3)
       fi

@@ -17,11 +17,13 @@ const providers = {
 
 async function installApi(page, { initiallyEnabled = false, initialStatus = 'inactive', startStatus = null } = {}) {
   let enabled = initiallyEnabled
+  let appVersion = '0.1.0-beta.6'
   let startCalls = 0
   let updateCalls = 0
   await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
+    if (pathname === '/api/health') return route.fulfill({ json: { status: 'ok', profile: 'development', version: appVersion } })
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: providers })
     if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
@@ -54,6 +56,7 @@ async function installApi(page, { initiallyEnabled = false, initialStatus = 'ina
   return {
     startCalls: () => startCalls,
     updateCalls: () => updateCalls,
+    setVersion: (version) => { appVersion = version },
   }
 }
 
@@ -65,6 +68,12 @@ async function uploadOneFile(page) {
     mimeType: 'audio/mpeg',
     buffer: Buffer.from('audio'),
   })
+}
+
+
+async function startOneAnalysis(page) {
+  await uploadOneFile(page)
+  await page.getByRole('button', { name: '开始分析 1 个文件' }).click()
 }
 
 
@@ -89,6 +98,32 @@ test('enabled protection starts analysis and shows the same interruption notice'
 
   await expect(page.getByRole('dialog', { name: '分析已经开始' })).toBeVisible()
   expect(calls.startCalls()).toBe(1)
+})
+
+
+test('interruption notice is not repeated after acknowledgement on the same app version', async ({ page }) => {
+  const calls = await installApi(page)
+  await startOneAnalysis(page)
+  await page.getByRole('button', { name: '知道了' }).click()
+
+  await startOneAnalysis(page)
+
+  await expect.poll(calls.startCalls).toBe(2)
+  await page.waitForTimeout(250)
+  await expect(page.getByRole('dialog', { name: '分析已经开始' })).toBeHidden()
+})
+
+
+test('interruption notice appears again after the app version changes', async ({ page }) => {
+  const controls = await installApi(page)
+  await startOneAnalysis(page)
+  await page.getByRole('button', { name: '知道了' }).click()
+  controls.setVersion('0.1.0-beta.7')
+
+  await startOneAnalysis(page)
+
+  await expect.poll(controls.startCalls).toBe(2)
+  await expect(page.getByRole('dialog', { name: '分析已经开始' })).toBeVisible()
 })
 
 

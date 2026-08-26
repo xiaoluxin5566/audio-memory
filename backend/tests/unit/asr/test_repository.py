@@ -110,6 +110,23 @@ async def test_recoverable_jobs_only_lists_transcribing_cloud_work(tmp_path) -> 
         job = await session.get(AnalysisJob, job_id)
         assert job is not None
         job.stage = "failed"
+        job.error_code = "cloud_asr_failed"
         await session.commit()
     assert await repository.recoverable_job_ids() == []
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_managed_storage_failure_is_recoverable_before_asr_task_exists(
+    tmp_path,
+) -> None:
+    database, job_id, _file_id = await seeded_database(tmp_path)
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        assert job is not None
+        job.stage = "failed"
+        job.error_code = "managed_storage_unavailable"
+        await session.commit()
+
+    assert await AsrRepository(database).recoverable_job_ids() == [job_id]
     await database.dispose()

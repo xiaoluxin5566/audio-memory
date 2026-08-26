@@ -87,7 +87,7 @@ async def ensure_pipeline_ready(request: Request) -> None:
     readiness = getattr(request.app.state, "pipeline_readiness", None)
     if readiness is None:
         return
-    result = await readiness.check()
+    result = await readiness.check(refresh_managed_storage=True)
     if not result.ready:
         raise HTTPException(
             status_code=409,
@@ -244,13 +244,20 @@ async def job_view_with_sleep_status(request: Request, job) -> JobView:
     return view
 
 
-def track_transcription(request: Request, job_id: str, coroutine) -> None:
+def track_transcription(request: Request, job_id: str, coroutine) -> bool:
     tasks: dict[str, asyncio.Task[None]] = request.app.state.transcription_tasks
+    existing = tasks.get(job_id)
+    if existing is not None and not existing.done():
+        close = getattr(coroutine, "close", None)
+        if close is not None:
+            close()
+        return False
     task = asyncio.create_task(coroutine)
     tasks[job_id] = task
 
     def finish(completed: asyncio.Task[None]) -> None:
-        tasks.pop(job_id, None)
+        if tasks.get(job_id) is completed:
+            tasks.pop(job_id, None)
         if not completed.cancelled():
             error = completed.exception()
             if error is not None:
@@ -262,6 +269,7 @@ def track_transcription(request: Request, job_id: str, coroutine) -> None:
                 )
 
     task.add_done_callback(finish)
+    return True
 
 
 async def run_pipeline(
@@ -419,6 +427,17 @@ async def recover_cloud_asr_jobs(app) -> list[str]:
             job = await service_from(request).get_job(job_id)
             if job.provider_id is None or job.model_id is None:
                 raise ValueError("cloud ASR job has no analysis provider snapshot")
+            if (
+                job.stage == JobStage.FAILED.value
+                and job.error_code == "managed_storage_unavailable"
+            ):
+                async with app.state.database.session() as session:
+                    durable_job = await session.get(AnalysisJob, job_id)
+                    if durable_job is None:
+                        raise LookupError(job_id)
+                    durable_job.stage = JobStage.TRANSCRIBING.value
+                    durable_job.error_code = None
+                    await session.commit()
             analysis_request = await snapshot_analysis_request(
                 request,
                 job_id=job_id,
@@ -431,7 +450,7 @@ async def recover_cloud_asr_jobs(app) -> list[str]:
                 ),
             )
             sleep_status = await protect_job_if_enabled(request, job_id)
-            track_transcription(
+            scheduled = track_transcription(
                 request,
                 job_id,
                 run_pipeline(
@@ -441,7 +460,8 @@ async def recover_cloud_asr_jobs(app) -> list[str]:
                     sleep_protected=sleep_status == "active",
                 ),
             )
-            recovered.append(job_id)
+            if scheduled:
+                recovered.append(job_id)
         except Exception:
             logger.exception(
                 "Cloud ASR startup recovery could not be scheduled job_id=%s",
@@ -532,6 +552,7 @@ async def delete_file(job_id: str, file_id: str, request: Request) -> Response:
 
 @router.post("/{job_id}/start")
 async def start_job(job_id: str, request: Request) -> JobView:
+    await ensure_pipeline_ready(request)
     coordinator = request.app.state.provider_coordinator
     try:
         provider, credential_generation = (
@@ -586,8 +607,16 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     cloud_asr_retry = (
         job.stage == JobStage.FAILED.value
-        and job.error_code == "cloud_asr_failed"
+        and job.error_code in {"cloud_asr_failed", "managed_storage_unavailable"}
     )
+    if cloud_asr_retry:
+        await ensure_pipeline_ready(request)
+        if job_id in tasks:
+            return {
+                "id": job_id,
+                "stage": JobStage.TRANSCRIBING.value,
+                "sleep_prevention_status": request.app.state.sleep_prevention.status,
+            }
     if job.stage != JobStage.INTERRUPTED.value and not cloud_asr_retry:
         raise HTTPException(
             status_code=409,
@@ -620,7 +649,7 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
             durable_job.stage = JobStage.TRANSCRIBING.value
             durable_job.error_code = None
             await session.commit()
-    track_transcription(
+    scheduled = track_transcription(
         request,
         job_id,
         run_pipeline(
@@ -631,6 +660,12 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
             sleep_protected=sleep_status == "active",
         ),
     )
+    if not scheduled:
+        return {
+            "id": job_id,
+            "stage": JobStage.TRANSCRIBING.value,
+            "sleep_prevention_status": request.app.state.sleep_prevention.status,
+        }
     return {
         "id": job_id,
         "stage": JobStage.TRANSCRIBING.value,

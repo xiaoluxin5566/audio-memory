@@ -17,12 +17,15 @@ export function runtimeEnvironment(expectedProfile, healthPayload) {
   const label = expectedProfile === 'development'
     ? (suppliedLabel || '开发环境')
     : ''
+  const version = typeof healthPayload?.version === 'string'
+    ? healthPayload.version.trim()
+    : ''
   const message = !blocked
     ? ''
     : profile === 'production'
       ? '当前开发界面连接到了正式环境，已阻止所有写入操作。'
       : '无法确认本地服务环境，已阻止所有写入操作。'
-  return { profile, blocked, label, message }
+  return { profile, blocked, label, message, version }
 }
 
 
