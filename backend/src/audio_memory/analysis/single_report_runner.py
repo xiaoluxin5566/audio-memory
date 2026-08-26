@@ -36,7 +36,9 @@ from audio_memory.analysis.direct_report_pipeline import (
 from audio_memory.analysis.direct_report_document import StructuredReportResult
 from audio_memory.analysis.segmented_report_audit import (
     audit_chunk_id,
+    merge_chunk_audits_deterministically,
     partition_transcript_for_audit,
+    promote_single_chunk_audit,
     split_audit_chunk,
     validate_atomic_audit_issues,
 )
@@ -109,16 +111,35 @@ class SingleReportRunner:
                 segment_count=len(transcript),
             )
             started = time.monotonic()
-            raw_report = await self.provider.generate_markdown(
-                version.provider_id,
-                system=request.instructions,
-                user=request.user_data,
-                model_id=version.model_id,
-                scene_id=request.scene_id,
-                max_tokens=request.max_tokens,
-                timeout_seconds=request.timeout_seconds,
-                segment_count=request.segment_count,
-            )
+            try:
+                raw_report = await self._generate_markdown(version, request)
+            except ProviderAnalysisError as exc:
+                is_deepseek_model = (
+                    version.provider_id.strip().lower() == "deepseek"
+                    and version.model_id.strip().lower().startswith("deepseek-")
+                )
+                if exc.code != "model_output_truncated" or not is_deepseek_model:
+                    raise
+                emit_analysis_event(
+                    logging.getLogger("uvicorn.error"),
+                    "analysis.report.initial_generation_retry",
+                    analysis_version_id=version.id,
+                    provider_id=version.provider_id,
+                    model_id=version.model_id,
+                    status="retrying",
+                    reason=exc.code,
+                    segment_count=len(transcript),
+                    retry_path="compact_complete_report",
+                )
+                retry_request = (
+                    self.composer.compose_direct_report_markdown_compact_retry(
+                        transcript_markdown=markdown,
+                        profile=profile,
+                        user_analysis_prompt=goal_content,
+                        segment_count=len(transcript),
+                    )
+                )
+                raw_report = await self._generate_markdown(version, retry_request)
             raw_report = normalize_report_headings(raw_report)
             result = MarkdownReportResult.from_markdown(raw_report)
             staged["direct_report_v1_markdown"] = result.report_markdown
@@ -136,6 +157,28 @@ class SingleReportRunner:
         v1_quality = evaluate_direct_markdown_quality(
             result.report_markdown, transcript_chars=len(markdown)
         )
+        if (
+            version.model_id.strip().lower() == "deepseek-v4-flash"
+            and not v1_quality.passed
+        ):
+            for key in list(staged):
+                if key in {
+                    "direct_report_v1_markdown",
+                    "direct_report_initial_markdown",
+                } or key.startswith("direct_report_v1_audit"):
+                    staged.pop(key, None)
+            await self._save_checkpoint(
+                version.id,
+                staged,
+                worker_owner_id,
+                duration_ms=0,
+            )
+            raise ProviderAnalysisError(
+                "Report generation completed but deterministic completeness "
+                "checks failed: " + ", ".join(v1_quality.failures),
+                code="report_incomplete",
+                retriable=True,
+            )
 
         audit_payload = staged.get("direct_report_v1_audit")
         audit = None
@@ -260,6 +303,44 @@ class SingleReportRunner:
                         return [item for group in children for item in group]
                     if saved_split is not None:
                         saved_chunk_splits.pop(chunk_id, None)
+
+                    async def audit_split_children(reason: str):
+                        assert split_children is not None
+                        assert split_child_ids is not None
+                        emit_analysis_event(
+                            logging.getLogger("uvicorn.error"),
+                            "analysis.report.audit_chunk_split",
+                            analysis_version_id=version.id,
+                            provider_id=version.provider_id,
+                            model_id=version.model_id,
+                            status="retrying",
+                            reason=reason,
+                            split_depth=split_depth,
+                            segment_count=chunk.segment_count,
+                            child_count=len(split_children),
+                            chunk_index=chunk.index,
+                            chunk_count=chunk.total,
+                        )
+                        saved_chunk_splits[chunk_id] = split_child_ids
+                        async with checkpoint_lock:
+                            await self._save_checkpoint(
+                                version.id,
+                                staged,
+                                worker_owner_id,
+                                duration_ms=int(
+                                    (time.monotonic() - started) * 1_000
+                                ),
+                            )
+                        children = await asyncio.gather(
+                            *(
+                                audit_chunk(
+                                    child, split_depth=split_depth + 1
+                                )
+                                for child in split_children
+                            )
+                        )
+                        return [item for group in children for item in group]
+
                     chunk_markdown = build_full_transcript_markdown(
                         list(chunk.segments)
                     )
@@ -293,41 +374,7 @@ class SingleReportRunner:
                             exc.code == "model_output_truncated"
                             and chunk.segment_count > policy.minimum_segment_count
                         ):
-                            assert split_children is not None
-                            assert split_child_ids is not None
-                            emit_analysis_event(
-                                logging.getLogger("uvicorn.error"),
-                                "analysis.report.audit_chunk_split",
-                                analysis_version_id=version.id,
-                                provider_id=version.provider_id,
-                                model_id=version.model_id,
-                                status="retrying",
-                                reason=exc.code,
-                                split_depth=split_depth,
-                                segment_count=chunk.segment_count,
-                                child_count=len(split_children),
-                                chunk_index=chunk.index,
-                                chunk_count=chunk.total,
-                            )
-                            saved_chunk_splits[chunk_id] = split_child_ids
-                            async with checkpoint_lock:
-                                await self._save_checkpoint(
-                                    version.id,
-                                    staged,
-                                    worker_owner_id,
-                                    duration_ms=int(
-                                        (time.monotonic() - started) * 1_000
-                                    ),
-                                )
-                            children = await asyncio.gather(
-                                *(
-                                    audit_chunk(
-                                        child, split_depth=split_depth + 1
-                                    )
-                                    for child in split_children
-                                )
-                            )
-                            return [item for group in children for item in group]
+                            return await audit_split_children(exc.code)
                         raise
                     try:
                         chunk_audit = ReportAudit.model_validate(json.loads(raw))
@@ -365,6 +412,10 @@ class SingleReportRunner:
                                 split_depth=split_depth,
                                 validation_attempt=validation_attempt + 1,
                             )
+                        if chunk.segment_count > policy.minimum_segment_count:
+                            return await audit_split_children(
+                                "model_response_invalid"
+                            )
                         raise
                     saved_chunk_results[chunk_id] = chunk_audit.model_dump(
                         mode="json"
@@ -389,42 +440,60 @@ class SingleReportRunner:
                 staged["direct_report_v1_audit_chunks"] = [
                     item.model_dump(mode="json") for item in chunk_audits
                 ]
-                merge_request = self.composer.compose_merged_report_audit(
-                    v1_markdown=result.report_markdown,
-                    sections=split_report_sections(result.report_markdown),
-                    gate_failures=v1_quality.failures,
-                    chunk_audits=list(chunk_audits),
-                    total_segment_count=len(transcript),
-                )
-                raw_audit = await self.provider.generate(
-                    version.provider_id,
-                    system=merge_request.instructions,
-                    user=merge_request.user_data,
-                    model_id=version.model_id,
-                    scene_id=merge_request.scene_id,
-                    max_tokens=merge_request.max_tokens,
-                    timeout_seconds=merge_request.timeout_seconds,
-                    segment_count=merge_request.segment_count,
-                )
-                audit = ReportAudit.model_validate(json.loads(raw_audit))
-                if audit.audit_mode != "full_v1_audit":
-                    raise ValueError("merged V1 audit returned the wrong audit mode")
-                if (
-                    audit.coverage.reviewed_segment_count != len(transcript)
-                    or audit.coverage.total_segment_count != len(transcript)
-                ):
-                    raise ValueError("merged V1 audit returned wrong coverage")
-                validate_atomic_audit_issues(audit)
-                audit = canonicalize_audit_evidence(
-                    audit,
-                    transcript_by_id,
-                    report_markdown=result.report_markdown,
-                )
-                validate_audit_evidence(
-                    audit,
-                    transcript_by_id=transcript_by_id,
-                    report_markdown=result.report_markdown,
-                )
+                if len(chunk_audits) == 1:
+                    audit = promote_single_chunk_audit(
+                        chunk_audits[0], total_segment_count=len(transcript)
+                    )
+                elif version.model_id.strip().lower() == "deepseek-v4-flash":
+                    audit = merge_chunk_audits_deterministically(
+                        chunk_audits, total_segment_count=len(transcript)
+                    )
+                else:
+                    merge_request = self.composer.compose_merged_report_audit(
+                        v1_markdown=result.report_markdown,
+                        sections=split_report_sections(result.report_markdown),
+                        gate_failures=v1_quality.failures,
+                        chunk_audits=list(chunk_audits),
+                        total_segment_count=len(transcript),
+                    )
+                    for merge_attempt in range(2):
+                        raw_audit = await self.provider.generate(
+                            version.provider_id,
+                            system=merge_request.instructions,
+                            user=merge_request.user_data,
+                            model_id=version.model_id,
+                            scene_id=merge_request.scene_id,
+                            max_tokens=merge_request.max_tokens,
+                            timeout_seconds=merge_request.timeout_seconds,
+                            segment_count=merge_request.segment_count,
+                            repair_attempted=merge_attempt > 0,
+                        )
+                        try:
+                            audit = ReportAudit.model_validate(json.loads(raw_audit))
+                            if audit.audit_mode != "full_v1_audit":
+                                raise ValueError(
+                                    "merged V1 audit returned the wrong audit mode"
+                                )
+                            if (
+                                audit.coverage.reviewed_segment_count != len(transcript)
+                                or audit.coverage.total_segment_count != len(transcript)
+                            ):
+                                raise ValueError("merged V1 audit returned wrong coverage")
+                            validate_atomic_audit_issues(audit)
+                            audit = canonicalize_audit_evidence(
+                                audit,
+                                transcript_by_id,
+                                report_markdown=result.report_markdown,
+                            )
+                            validate_audit_evidence(
+                                audit,
+                                transcript_by_id=transcript_by_id,
+                                report_markdown=result.report_markdown,
+                            )
+                            break
+                        except ValueError:
+                            if merge_attempt:
+                                raise
             except Exception as exc:
                 emit_analysis_event(
                     logging.getLogger("uvicorn.error"),
@@ -442,6 +511,34 @@ class SingleReportRunner:
                     worker_owner_id,
                     duration_ms=int((time.monotonic() - started) * 1_000),
                 )
+                if version.model_id.strip().lower() == "deepseek-v4-flash":
+                    if not v1_quality.passed:
+                        raise ProviderAnalysisError(
+                            "Report generation completed but deterministic "
+                            "completeness checks failed: "
+                            + ", ".join(v1_quality.failures),
+                            code="report_incomplete",
+                            retriable=True,
+                        ) from exc
+                    return await self._publish_report(
+                        version,
+                        staged,
+                        result,
+                        ReportQualityMetadata(
+                            report_version="v1",
+                            audit_status="completed_unaudited",
+                            quality_score=None,
+                            quality_score_scope=None,
+                            quality_passed=None,
+                            degraded_reason=(
+                                "DeepSeek Flash 审核在有限恢复后仍未完成；"
+                                "已保留并发布完整初稿。"
+                            ),
+                        ),
+                        v1_quality,
+                        worker_owner_id,
+                        int((time.monotonic() - started) * 1_000),
+                    )
                 raise ProviderAnalysisError(
                     f"Report generated; audit pending retry: {exc}",
                     code="report_audit_pending",
@@ -615,6 +712,18 @@ class SingleReportRunner:
                 score_scope="v2_final_audit",
             ),
             v2_quality, worker_owner_id, 0,
+        )
+
+    async def _generate_markdown(self, version, request) -> str:
+        return await self.provider.generate_markdown(
+            version.provider_id,
+            system=request.instructions,
+            user=request.user_data,
+            model_id=version.model_id,
+            scene_id=request.scene_id,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+            segment_count=request.segment_count,
         )
 
     @staticmethod

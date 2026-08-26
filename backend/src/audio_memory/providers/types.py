@@ -86,7 +86,6 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         "kimi-k3",
         models=(
             ProviderModel("kimi-k3", "最高质量"),
-            ProviderModel("kimi-k2.6", "最高性价比"),
         ),
     ),
     "deepseek": ProviderConfig(
@@ -96,7 +95,6 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         "deepseek-v4-pro",
         models=(
             ProviderModel("deepseek-v4-pro", "最高质量"),
-            ProviderModel("deepseek-v4-flash", "最高性价比"),
         ),
     ),
     "openai": ProviderConfig(

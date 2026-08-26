@@ -60,12 +60,13 @@ def material_issue(*, severity: str = "major") -> dict[str, object]:
     }
 
 
-def test_audit_rejects_score_total_that_does_not_equal_dimensions() -> None:
+def test_audit_recomputes_score_total_from_dimensions() -> None:
     payload = audit_payload()
     payload["scores"]["total"] = 88  # type: ignore[index]
 
-    with pytest.raises(ValidationError, match="sum"):
-        ReportAudit.model_validate(payload)
+    audit = ReportAudit.model_validate(payload)
+
+    assert audit.scores.total == 87
 
 
 def test_audit_rejects_high_score_when_critical_issue_is_unresolved() -> None:

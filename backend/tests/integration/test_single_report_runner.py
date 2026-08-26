@@ -53,7 +53,7 @@ def valid_clean_audit(mode: str = "full_v1_audit") -> dict[str, object]:
 
 
 class FakeProvider:
-    def __init__(self, *, structured_response: str | None = None, markdown_responses: list[str] | None = None, review_response: dict[str, object] | None = None, review_responses: list[dict[str, object]] | None = None, annotation_response: dict[str, object] | None = None) -> None:
+    def __init__(self, *, structured_response: str | None = None, markdown_responses: list[str | Exception] | None = None, review_response: dict[str, object] | None = None, review_responses: list[dict[str, object]] | None = None, annotation_response: dict[str, object] | None = None) -> None:
         self.calls: list[dict[str, object]] = []
         self.structured_response = structured_response
         self.markdown_responses = list(markdown_responses or [valid_markdown()])
@@ -63,7 +63,10 @@ class FakeProvider:
 
     async def generate_markdown(self, provider_id: str, **kwargs: object) -> str:
         self.calls.append({"method": "markdown", "provider_id": provider_id, **kwargs})
-        return self.markdown_responses.pop(0)
+        response = self.markdown_responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     async def generate(self, provider_id: str, **kwargs: object) -> str:
         scene_id = kwargs.get("scene_id")
@@ -103,7 +106,12 @@ class FakePublisher:
         return {"version_id": version_id}
 
 
-async def seed(database: Database) -> None:
+async def seed(
+    database: Database,
+    *,
+    provider_id: str = "deepseek",
+    model_id: str = "deepseek-v4-pro",
+) -> None:
     async with database.session() as session:
         session.add(AnalysisJob(id="job-1", stage="analyzing"))
         session.add(
@@ -125,8 +133,8 @@ async def seed(database: Database) -> None:
         )
         session.add(
             AnalysisVersion(
-                id="version-1", source_job_id="job-1", provider_id="deepseek",
-                model_id="deepseek-v4-pro", credential_generation=1,
+                id="version-1", source_job_id="job-1", provider_id=provider_id,
+                model_id=model_id, credential_generation=1,
                 prompt_snapshot_json=json.dumps({"user-analysis-goal": {"content": "重点看工作。", "version": 1}}),
                 profile_snapshot_json=json.dumps([{"dimension": "职业", "value": "AI 硬件从业者"}]),
                 fixed_rules_hash=PromptComposer.fixed_rules_hash(),
@@ -177,15 +185,136 @@ async def test_single_report_runner_calls_provider_once_with_profile_and_full_tr
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert provider.calls[0]["method"] == "markdown"
     assert provider.calls[1]["method"] == "audit"
-    assert provider.calls[2]["method"] == "audit"
     assert "seg_0_0" in str(provider.calls[1]["user"])
     assert "AI 硬件从业者" in str(provider.calls[0]["user"])
     assert "speaker_1" in str(provider.calls[0]["user"])
     assert "只输出最终 Markdown" in str(provider.calls[0]["system"])
     assert len(publisher.reports) == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_report_runner_retries_truncated_initial_report_compactly(tmp_path) -> None:
+    database = Database(tmp_path / "truncated-initial-report.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    provider = FakeProvider(
+        markdown_responses=[
+            ProviderAnalysisError(
+                "Provider output was truncated", code="model_output_truncated"
+            ),
+            valid_markdown("压缩重写后仍然保留完整的重要分析。"),
+        ]
+    )
+    publisher = FakePublisher()
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=publisher,
+        generation_source=FakeGenerationSource(),
+    )
+
+    await runner.run("version-1", "worker-1")
+
+    markdown_calls = [call for call in provider.calls if call["method"] == "markdown"]
+    assert [call["scene_id"] for call in markdown_calls] == [
+        "direct-report",
+        "direct-report-compact-retry",
+    ]
+    assert "speaker_1" in str(markdown_calls[1]["user"])
+    assert "12,000" in str(markdown_calls[1]["system"])
+    assert len(publisher.reports) == 1
+    assert "压缩重写后" in publisher.reports[0].report_markdown
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-1")
+    staged = json.loads(version.staged_results_json)
+    assert "压缩重写后" in staged["direct_report_initial_markdown"]
+    assert "分析质量" not in staged["direct_report_initial_markdown"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_report_runner_does_not_compact_retry_kimi_truncation(tmp_path) -> None:
+    database = Database(tmp_path / "kimi-truncated-initial-report.sqlite3")
+    await database.create_schema()
+    await seed(database, provider_id="moonshot", model_id="kimi-k2.5")
+    provider = FakeProvider(
+        markdown_responses=[
+            ProviderAnalysisError(
+                "Provider output was truncated", code="model_output_truncated"
+            ),
+            valid_markdown("Kimi must not consume this response."),
+        ]
+    )
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=FakePublisher(),
+        generation_source=FakeGenerationSource(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as failure:
+        await runner.run("version-1", "worker-1")
+
+    assert failure.value.code == "model_output_truncated"
+    markdown_calls = [call for call in provider.calls if call["method"] == "markdown"]
+    assert [call["scene_id"] for call in markdown_calls] == ["direct-report"]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_report_runner_does_not_retry_non_truncation_error(tmp_path) -> None:
+    database = Database(tmp_path / "initial-report-auth-error.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    provider = FakeProvider(
+        markdown_responses=[
+            ProviderAnalysisError(
+                "Provider credential is unavailable", code="authentication_failed"
+            )
+        ]
+    )
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=FakePublisher(),
+        generation_source=FakeGenerationSource(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1", "worker-1")
+
+    assert raised.value.code == "authentication_failed"
+    assert len(provider.calls) == 1
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_report_runner_retries_truncated_initial_report_only_once(tmp_path) -> None:
+    database = Database(tmp_path / "initial-report-double-truncation.sqlite3")
+    await database.create_schema()
+    await seed(database)
+    provider = FakeProvider(
+        markdown_responses=[
+            ProviderAnalysisError("first truncation", code="model_output_truncated"),
+            ProviderAnalysisError("second truncation", code="model_output_truncated"),
+        ]
+    )
+    runner = SingleReportRunner(
+        database=database,
+        provider=provider,
+        publisher=FakePublisher(),
+        generation_source=FakeGenerationSource(),
+    )
+
+    with pytest.raises(ProviderAnalysisError) as raised:
+        await runner.run("version-1", "worker-1")
+
+    assert raised.value.code == "model_output_truncated"
+    assert len(provider.calls) == 2
     await database.dispose()
 
 
@@ -209,7 +338,7 @@ async def test_single_report_runner_reuses_generated_checkpoint_after_publish_fa
     )
     await second.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert len(second_publisher.reports) == 1
     await database.dispose()
 
@@ -246,9 +375,8 @@ async def test_markdown_mode_supplements_failed_draft_before_publish(tmp_path) -
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert provider.calls[1]["scene_id"] == "direct-report-audit-chunk"
-    assert provider.calls[2]["scene_id"] == "direct-report-audit-merge"
     assert "初稿工作分析" in str(provider.calls[1]["user"])
     assert "初稿工作分析，保留这一句" in publisher.reports[0].report_markdown
     async with database.session() as session:
@@ -384,7 +512,7 @@ async def test_markdown_mode_runs_one_quality_repair_review_before_failing(tmp_p
 
     await runner.run("version-1", "worker-1")
 
-    assert [call["method"] for call in provider.calls] == ["markdown", "audit", "audit"]
+    assert [call["method"] for call in provider.calls] == ["markdown", "audit"]
     assert len(publisher.reports) == 1
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-1")
@@ -445,7 +573,7 @@ async def test_invalid_annotations_fall_back_to_complete_markdown(tmp_path) -> N
 
     await runner.run("version-1", "worker-1")
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 2
     assert publisher.reports[0].report_markdown.startswith(valid_markdown())
     assert "本次报告：" in publisher.reports[0].report_markdown
     assert publisher.reports[0].report_annotations is None

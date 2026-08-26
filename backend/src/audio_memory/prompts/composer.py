@@ -283,6 +283,36 @@ class PromptComposer:
             response_format="text",
         )
 
+    def compose_direct_report_markdown_compact_retry(
+        self,
+        *,
+        transcript_markdown: str,
+        profile: list[dict[str, object]],
+        user_analysis_prompt: str,
+        segment_count: int = 0,
+    ) -> DirectReportRequest:
+        base = self.compose_direct_report_markdown(
+            transcript_markdown=transcript_markdown,
+            profile=profile,
+            user_analysis_prompt=user_analysis_prompt,
+            segment_count=segment_count,
+        )
+        instructions = base.instructions + """
+
+## 完整报告篇幅预算
+
+上一次生成因过度展开而超出输出上限。请重新阅读上面的完整逐字稿，输出一份从标题到结尾都完整的最终报告。全文不得超过 12,000 个中文字符；优先保留重要事实、关键判断、必要边界和可执行下一步，合并重复解释，省略低价值细节。不得只输出摘要、续写、补丁或修改说明。"""
+        return DirectReportRequest(
+            scene_id="direct-report-compact-retry",
+            instructions=instructions,
+            user_data=base.user_data,
+            max_tokens=16_384,
+            timeout_seconds=base.timeout_seconds,
+            segment_count=base.segment_count,
+            schema_json="",
+            response_format="text",
+        )
+
     def compose_direct_report_markdown_supplement(
         self,
         *,

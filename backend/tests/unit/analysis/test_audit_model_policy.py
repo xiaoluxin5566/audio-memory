@@ -20,6 +20,16 @@ def test_known_models_receive_distinct_operational_audit_budgets() -> None:
     assert kimi.max_parallel_chunks == 3
 
 
+def test_deepseek_flash_uses_smaller_proactive_audit_chunks_than_pro() -> None:
+    flash = resolve_audit_model_policy("deepseek", "deepseek-v4-flash")
+    pro = resolve_audit_model_policy("deepseek", "deepseek-v4-pro")
+
+    assert flash.policy_name == "deepseek-v4-flash-output-bounded-v1"
+    assert flash.max_transcript_tokens == 3_000
+    assert pro.max_transcript_tokens == 24_000
+    assert flash.max_parallel_chunks == 4
+
+
 def test_unknown_model_uses_the_most_conservative_supported_policy() -> None:
     unknown = resolve_audit_model_policy("custom", "future-model")
     glm = resolve_audit_model_policy("glm", "glm-5.2")
