@@ -654,7 +654,7 @@ def test_sequential_and_simultaneous_fixture_lifecycle_uses_isolated_roots(
         for events in provider_events.values()
         for event in events
     )
-    assert all(count == 5 for count in provider_clients_created.values())
+    assert all(count == 6 for count in provider_clients_created.values())
     assert all(
         event.get("fail_closed") is True
         for events in provider_events.values()
