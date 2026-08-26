@@ -787,6 +787,43 @@ async def test_failed_model_analysis_retries_with_active_provider_without_whispe
 
 
 @pytest.mark.asyncio
+async def test_analyzing_job_with_failed_durable_version_can_retry(job_client):
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.ANALYZING.value
+        job.provider_id = "kimi"
+        job.model_id = "kimi-k3"
+        session.add(
+            AnalysisVersion(
+                id="failed-kimi-version",
+                source_job_id=job_id,
+                batch_id=None,
+                provider_id="kimi",
+                model_id="kimi-k3",
+                credential_generation=1,
+                prompt_snapshot_json="{}",
+                profile_snapshot_json="[]",
+                fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+                staged_results_json="{}",
+                status="failed",
+                error_code="model_analysis_failed",
+            )
+        )
+        await session.commit()
+    task_coordinator = RetryTaskCoordinator()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_task_coordinator = task_coordinator
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+
+    assert response.status_code == 202
+    assert task_coordinator.method == "resume"
+
+
+@pytest.mark.asyncio
 async def test_duplicate_analysis_retry_returns_current_running_state(job_client, caplog):
     client, _, database = job_client
     caplog.set_level(logging.INFO, logger="uvicorn.error")

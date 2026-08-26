@@ -139,7 +139,7 @@ export function jobFailureCopy(job) {
   }
   return {
     title: '模型分析失败',
-    body: '已保留完整转写；可修改当前厂商后重新分析，不会再次执行 Whisper。',
+    body: '已保留完整转写；可修改当前厂商后重新分析，不会再次执行云端转写。',
     action: '重新分析',
   };
 }

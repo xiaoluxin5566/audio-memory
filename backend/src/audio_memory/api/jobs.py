@@ -140,6 +140,24 @@ async def has_active_analysis(request: Request, job_id: str) -> bool:
     return version_id is not None
 
 
+async def has_retryable_failed_analysis(request: Request, job_id: str) -> bool:
+    async with service_from(request).database.session() as session:
+        version = await session.scalar(
+            select(AnalysisVersion)
+            .where(
+                AnalysisVersion.source_job_id == job_id,
+                AnalysisVersion.reanalysis_batch_id.is_(None),
+            )
+            .order_by(AnalysisVersion.created_at.desc())
+            .limit(1)
+        )
+    return (
+        version is not None
+        and version.status == "failed"
+        and version.error_code in ANALYSIS_RETRYABLE_ERROR_CODES
+    )
+
+
 async def protect_job_if_enabled(request: Request, job_id: str) -> str:
     enabled = await request.app.state.settings_repository.prevent_sleep_enabled()
     if not enabled:
@@ -642,10 +660,13 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
         job.stage in {JobStage.COMPLETED.value, JobStage.INTERRUPTED.value}
         and await has_legacy_completed_unaudited_report(request, job_id)
     )
+    durable_failed_analysis = await has_retryable_failed_analysis(
+        request, job_id
+    )
     if (
         job.stage != JobStage.FAILED.value
         or job.error_code not in ANALYSIS_RETRYABLE_ERROR_CODES
-    ) and not legacy_completed_unaudited:
+    ) and not legacy_completed_unaudited and not durable_failed_analysis:
         raise HTTPException(
             status_code=409,
             detail="Only a failed model analysis can be retried",
@@ -701,7 +722,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
     sleep_status = await protect_job_if_enabled(request, job_id)
     submitted = False
     try:
-        if job.error_code.startswith("autonomous_"):
+        if (job.error_code or "").startswith("autonomous_"):
             resumed_version = (
                 await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
                     source_job_id=job_id,

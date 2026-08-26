@@ -178,6 +178,28 @@ def test_audit_accepts_section_local_value_opportunity() -> None:
     assert audit.value_opportunities[0].kind == "knowledge_enrichment"
 
 
+def test_audit_normalizes_kimi_opportunity_id_shorthand() -> None:
+    payload = audit_payload()
+    payload["value_opportunities"] = [{
+        "opportunity_id": "opp_chunk1_user_waves",
+        "kind": "analysis_deepening",
+        "section_id": "section_002",
+        "current_gap": "只复述事实。",
+        "desired_value": "解释关键取舍。",
+        "evidence_segment_ids": [],
+        "evidence_excerpts": [],
+        "preserve_constraints": [],
+        "allow_section_rewrite": False,
+    }]
+
+    audit = ReportAudit.model_validate(payload)
+
+    assert (
+        audit.value_opportunities[0].opportunity_id
+        == "opportunity_chunk1_user_waves"
+    )
+
+
 def test_audit_rejects_duplicate_value_opportunity_ids() -> None:
     payload = audit_payload()
     opportunity = {

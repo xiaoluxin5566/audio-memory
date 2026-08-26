@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 AuditMode = Literal["chunk_v1_audit", "full_v1_audit", "revision_final_audit"]
@@ -72,6 +72,13 @@ class AuditValueOpportunity(_StrictModel):
     evidence_excerpts: list[EvidenceExcerpt] = Field(default_factory=list, max_length=100)
     preserve_constraints: list[str] = Field(default_factory=list, max_length=30)
     allow_section_rewrite: bool = False
+
+    @field_validator("opportunity_id", mode="before")
+    @classmethod
+    def normalize_common_shorthand(cls, value: object) -> object:
+        if isinstance(value, str) and value.startswith("opp_"):
+            return f"opportunity_{value.removeprefix('opp_')}"
+        return value
 
     @model_validator(mode="after")
     def validate_evidence_packet(self) -> "AuditValueOpportunity":

@@ -82,6 +82,14 @@ test('report audit failure is presented as generated and retryable', () => {
   })
 })
 
+test('model analysis retry copy refers to cloud transcription', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'model_analysis_failed' }), {
+    title: '模型分析失败',
+    body: '已保留完整转写；可修改当前厂商后重新分析，不会再次执行云端转写。',
+    action: '重新分析',
+  })
+})
+
 test('cloud ASR failure never claims transcription completed', () => {
   assert.deepEqual(jobFailureCopy({ error_code: 'cloud_asr_failed' }), {
     title: '云端转写未完成',
