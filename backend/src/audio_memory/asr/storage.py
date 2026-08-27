@@ -117,7 +117,13 @@ class ManagedOssClient:
                         ticket.upload_url,
                         headers=ticket.upload_headers,
                         data=ticket.upload_fields,
-                        files={"file": (source.name, stream)},
+                        files={
+                            "file": (
+                                source.name,
+                                stream,
+                                ticket.upload_fields.get("Content-Type"),
+                            )
+                        },
                     )
             else:
                 async def chunks():

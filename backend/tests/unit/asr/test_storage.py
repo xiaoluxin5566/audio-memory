@@ -217,3 +217,33 @@ async def test_upload_streams_original_file_with_ticket_headers(
     assert b'name="policy"' in body and b"signed-policy" in body
     assert b'name="file"' in body and b"original-audio" in body
     assert request.headers["X-Test"] == "bound-header"
+
+
+@pytest.mark.asyncio
+async def test_post_upload_does_not_add_a_second_content_type_for_aac(
+    respx_mock, tmp_path
+) -> None:
+    source = tmp_path / "source.aac"
+    source.write_bytes(b"aac-audio")
+    route = respx_mock.post("https://bucket.example/upload").mock(
+        return_value=httpx.Response(200)
+    )
+    ticket = UploadTicket(
+        object_id="obj_aac",
+        upload_url="https://bucket.example/upload",
+        upload_headers={},
+        upload_method="POST",
+        upload_fields={"Content-Type": "audio/aac", "policy": "signed-policy"},
+        expires_at=datetime(2026, 8, 23, 13, tzinfo=UTC),
+    )
+    async with httpx.AsyncClient() as http_client:
+        await ManagedOssClient(
+            http_client=http_client,
+            broker_base_url="https://broker.example",
+            installation_token=b"install-secret",
+        ).upload_file(ticket, source)
+
+    body = route.calls[0].request.content
+    assert b'name="Content-Type"' in body
+    assert b"audio/aac" in body
+    assert b"Content-Type: audio/x-aac" not in body
