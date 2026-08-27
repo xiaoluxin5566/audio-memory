@@ -49,7 +49,7 @@ class FeatureRecord:
         r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
     )
     _VERSION: ClassVar[re.Pattern[str]] = re.compile(
-        r"^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$"
+        r"^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+(?:-hotfix\.[0-9]+)?$"
     )
     _SHA: ClassVar[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
 
