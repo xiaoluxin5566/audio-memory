@@ -583,7 +583,7 @@ class ProviderAnalysisClient:
                 json=payload,
                 timeout=timeout_seconds,
             )
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.RequestError as exc:
             self._record_diagnostic(
                 provider_id=provider_id,
                 model_id=resolved_model,

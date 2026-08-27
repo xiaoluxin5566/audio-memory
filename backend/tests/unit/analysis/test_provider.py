@@ -449,3 +449,34 @@ async def test_transient_provider_failure_can_recover_on_third_attempt() -> None
 
     assert result == "recovered"
     assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_incomplete_provider_response_is_retried() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.RemoteProtocolError(
+                "incomplete chunked read", request=request
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "recovered"}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.generate_markdown(
+            "deepseek",
+            system="rules",
+            user="data",
+            scene_id="direct-report",
+            max_tokens=16_384,
+            timeout_seconds=120,
+        )
+
+    assert result == "recovered"
+    assert calls == 2
