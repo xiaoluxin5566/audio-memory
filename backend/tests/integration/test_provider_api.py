@@ -70,7 +70,7 @@ async def test_provider_responses_never_include_keys(provider_app: FastAPI) -> N
     transport = httpx.ASGITransport(app=provider_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         saved = await client.put(
-            "/api/providers/kimi/key",
+            "/api/providers/deepseek/key",
             headers={"X-Configuration-Session": "window-a"},
             json={"api_key": "top-secret-value"},
         )
@@ -87,15 +87,17 @@ async def test_saving_key_does_not_auto_activate(provider_app: FastAPI) -> None:
     transport = httpx.ASGITransport(app=provider_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         await client.put(
-            "/api/providers/openai/key",
+            "/api/providers/deepseek/key",
             headers={"X-Configuration-Session": "window-a"},
             json={"api_key": "candidate"},
         )
         listed = (await client.get("/api/providers")).json()
 
-    openai = next(item for item in listed["providers"] if item["provider_id"] == "openai")
-    assert openai["state"] == "available"
-    assert openai["active"] is False
+    deepseek = next(
+        item for item in listed["providers"] if item["provider_id"] == "deepseek"
+    )
+    assert deepseek["state"] == "available"
+    assert deepseek["active"] is False
 
 
 @pytest.mark.asyncio
@@ -110,11 +112,11 @@ async def test_unavailable_provider_cannot_be_activated(provider_app: FastAPI) -
 @pytest.mark.asyncio
 async def test_available_provider_activation_is_idempotent(provider_app: FastAPI) -> None:
     coordinator = provider_app.state.provider_coordinator
-    coordinator.set_state_for_test("kimi", ProviderStateName.AVAILABLE)
+    coordinator.set_state_for_test("deepseek", ProviderStateName.AVAILABLE)
     transport = httpx.ASGITransport(app=provider_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        first = await client.post("/api/providers/kimi/activate")
-        second = await client.post("/api/providers/kimi/activate")
+        first = await client.post("/api/providers/deepseek/activate")
+        second = await client.post("/api/providers/deepseek/activate")
 
     assert first.status_code == 200
     assert second.status_code == 200

@@ -60,6 +60,24 @@ def test_feature_id_rejects_path_and_branch_injection(value: str) -> None:
         FeatureRecord.new(value, base_commit="a" * 40)
 
 
+def test_feature_record_accepts_numbered_beta_hotfix_version() -> None:
+    record = FeatureRecord.new(
+        "beta7-hotfix", base_commit="a" * 40,
+        target_version="v0.1.0-beta.7-hotfix.1",
+    )
+
+    assert record.target_version == "v0.1.0-beta.7-hotfix.1"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["v0.1.0-beta.7-hotfix", "v0.1.0-beta.7-hotfix.x", "v0.1.0-beta.7-extra.1"],
+)
+def test_feature_record_rejects_unversioned_hotfix_suffix(value: str) -> None:
+    with pytest.raises(GovernanceError, match="功能状态文件内容无效"):
+        FeatureRecord.new("beta7-hotfix", base_commit="a" * 40, target_version=value)
+
+
 def test_feature_store_round_trip_preserves_only_workflow_state(
     tmp_path: Path,
 ) -> None:

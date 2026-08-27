@@ -49,7 +49,7 @@ audio-memory version
 
 ## 模型配置与隐私
 
-应用支持 DeepSeek、Kimi、OpenAI 和 GLM。API Key 仅保存在 macOS Keychain；SQLite、Prompt、反馈文件和日志不保存明文 Key。音频、转写、卡片、画像和反馈位于本机 `~/Library/Application Support/AudioMemory`。
+当前版本的模型配置只提供 DeepSeek V4 Pro。API Key 仅保存在 macOS Keychain；SQLite、Prompt、反馈文件和日志不保存明文 Key。音频、转写、卡片、画像和反馈位于本机 `~/Library/Application Support/AudioMemory`。
 
 历史重分析复用已保存的结构化转写，不重复运行 Whisper。待办过期后仅标红并在未完成区优先展示，不会自动完成。
 

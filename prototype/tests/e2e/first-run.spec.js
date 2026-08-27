@@ -4,7 +4,7 @@ const emptyProviders = () => ({
   providers: ['kimi', 'deepseek', 'openai'].map((provider_id) => ({
     provider_id,
     display_name: provider_id === 'kimi' ? 'Kimi' : provider_id === 'deepseek' ? 'DeepSeek' : 'OpenAI',
-    model_id: provider_id === 'kimi' ? 'kimi-k2.5' : provider_id === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5-mini',
+    model_id: provider_id === 'kimi' ? 'kimi-k3' : provider_id === 'deepseek' ? 'deepseek-v4-pro' : 'gpt-5-mini',
     state: 'unconfigured',
     active: false,
     last_validated_at: null,
@@ -65,12 +65,13 @@ test('successful first configuration becomes current and closes the modal', asyn
   await expect(reportApiCard.getByText('模型与 API Key')).toBeHidden()
   await reportApiCard.getByRole('button', { name: '去配置' }).click()
   await expect(page.getByRole('button', { name: 'DeepSeek' })).toHaveClass(/active/)
-  await expect(page.getByRole('button', { name: 'Kimi' })).not.toHaveClass(/active/)
+  await expect(page.getByRole('button', { name: 'Kimi' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'OpenAI' })).toHaveCount(0)
   await page.getByLabel('API Key').fill('visible-test-key')
   await page.getByRole('button', { name: '保存并校验' }).click()
 
   await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeHidden()
-  await expect(page.locator('section').filter({ hasText: '报告生成 API' }).locator('.provider-summary b')).toHaveText('deepseek-v4-flash')
+  await expect(page.locator('section').filter({ hasText: '报告生成 API' }).locator('.provider-summary b')).toHaveText('deepseek-v4-pro')
   await expect(page.locator('section').filter({ hasText: '报告生成 API' }).getByText('连接可用', { exact: false })).toBeVisible()
   expect(calls).toContain('PUT /api/providers/deepseek/key')
   expect(calls).toContain('POST /api/providers/deepseek/activate')

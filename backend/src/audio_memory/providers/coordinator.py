@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from audio_memory.providers.keychain import KeychainRepository, KeychainStatus
 from audio_memory.providers.types import (
+    CONFIGURABLE_PROVIDER_IDS,
     PROVIDER_CONFIGS,
     ProviderState,
     ProviderStateName,
@@ -95,11 +96,30 @@ class ProviderStateCoordinator:
                 self._generations[provider_id] = int(
                     getattr(row, "credential_generation", 0)
                 )
-                if getattr(row, "active", False):
+                if (
+                    getattr(row, "active", False)
+                    and provider_id in CONFIGURABLE_PROVIDER_IDS
+                ):
                     self._set_active(provider_id)
         await asyncio.gather(
-            *(self.validate_saved(provider_id) for provider_id in self._states)
+            *(
+                self.validate_saved(provider_id)
+                for provider_id in CONFIGURABLE_PROVIDER_IDS
+            )
         )
+        if not any(item.active for item in self._states.values()):
+            fallback = next(
+                (
+                    provider_id
+                    for provider_id in CONFIGURABLE_PROVIDER_IDS
+                    if self._states[provider_id].state is ProviderStateName.AVAILABLE
+                ),
+                None,
+            )
+            if fallback is not None:
+                if self._metadata is not None:
+                    await self._metadata.activate(fallback)
+                self._set_active(fallback)
 
     async def activate(self, provider_id: str) -> ProviderState:
         async with self._activation_lock:
