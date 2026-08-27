@@ -207,15 +207,16 @@ async def test_credential_generation_survives_coordinator_restart(tmp_path) -> N
     database = Database(tmp_path / "provider-generation.sqlite3")
     await database.create_schema()
     keychain = FakeKeychain()
-    validators = {"kimi": AcceptingValidator()}
+    keychain.values["deepseek"] = b"saved"
+    validators = {"deepseek": AcceptingValidator()}
     first = ProviderStateCoordinator(
         keychain=keychain,
         validators=validators,
         metadata=ProviderMetadataRepository(database),
     )
     await first.initialize()
-    await first.activate("kimi")
-    await first.validate_candidate("kimi", "settings", b"replacement")
+    await first.activate("deepseek")
+    await first.validate_candidate("deepseek", "settings", b"replacement")
 
     restarted = ProviderStateCoordinator(
         keychain=keychain,
@@ -225,7 +226,7 @@ async def test_credential_generation_survives_coordinator_restart(tmp_path) -> N
     await restarted.initialize()
     provider, generation = await restarted.snapshot_active_with_generation()
 
-    assert provider.provider_id == "kimi"
+    assert provider.provider_id == "deepseek"
     assert generation == 1
     await database.dispose()
 
@@ -250,6 +251,38 @@ async def test_removed_stored_models_fall_back_to_provider_defaults(tmp_path) ->
 
     assert coordinator.state("kimi").model_id == "kimi-k3"
     assert coordinator.state("deepseek").model_id == "deepseek-v4-pro"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_initialize_replaces_retired_active_provider_with_configured_deepseek(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "retired-active-provider.sqlite3")
+    await database.create_schema()
+    metadata = ProviderMetadataRepository(database)
+    await metadata.ensure_defaults(
+        {
+            "kimi": "kimi-k3",
+            "deepseek": "deepseek-v4-pro",
+            "openai": "gpt-5-mini",
+            "glm": "glm-5.2",
+        }
+    )
+    await metadata.activate("kimi")
+    keychain = FakeKeychain()
+    keychain.values["deepseek"] = b"saved-deepseek-key"
+    coordinator = ProviderStateCoordinator(
+        keychain=keychain,
+        validators={"deepseek": AcceptingValidator()},
+        metadata=metadata,
+    )
+
+    await coordinator.initialize()
+
+    provider, _generation = await coordinator.snapshot_active_with_generation()
+    assert provider.provider_id == "deepseek"
+    assert provider.model_id == "deepseek-v4-pro"
     await database.dispose()
 
 

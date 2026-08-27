@@ -58,23 +58,36 @@ def model_app() -> FastAPI:
 
 
 @pytest.mark.asyncio
-async def test_provider_catalog_exposes_curated_models_and_glm(model_app: FastAPI) -> None:
+async def test_provider_catalog_only_exposes_deepseek_v4_pro(model_app: FastAPI) -> None:
     transport = httpx.ASGITransport(app=model_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/providers")
 
     assert response.status_code == 200
-    providers = {item["provider_id"]: item for item in response.json()["providers"]}
-    assert providers["kimi"]["model_options"] == [
-        {"model_id": "kimi-k3", "label": "最高质量"},
-    ]
-    assert providers["deepseek"]["model_options"] == [
+    providers = response.json()["providers"]
+    assert len(providers) == 1
+    assert providers[0]["provider_id"] == "deepseek"
+    assert providers[0]["model_id"] == "deepseek-v4-pro"
+    assert providers[0]["model_options"] == [
         {"model_id": "deepseek-v4-pro", "label": "最高质量"},
     ]
-    assert providers["glm"]["model_options"] == [
-        {"model_id": "glm-5.2", "label": "最高质量"},
-        {"model_id": "glm-4.7-flash", "label": "最高性价比"},
-    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["kimi", "openai", "glm"])
+async def test_retired_provider_configuration_endpoints_are_rejected_before_validation(
+    model_app: FastAPI, provider_id: str
+) -> None:
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/providers/{provider_id}/key",
+            headers={"X-Configuration-Session": "settings"},
+            json={"api_key": "must-not-be-validated"},
+        )
+
+    assert response.status_code == 404
+    assert model_app.state.validators[provider_id].models == []
 
 
 @pytest.mark.asyncio
@@ -84,14 +97,14 @@ async def test_selecting_model_validates_and_updates_provider_snapshot(
     transport = httpx.ASGITransport(app=model_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.put(
-            "/api/providers/kimi/model", json={"model_id": "kimi-k3"}
+            "/api/providers/deepseek/model", json={"model_id": "deepseek-v4-pro"}
         )
 
     assert response.status_code == 200
-    assert response.json()["model_id"] == "kimi-k3"
-    assert model_app.state.validators["kimi"].models == ["kimi-k3"]
-    snapshot = model_app.state.provider_coordinator.state("kimi")
-    assert snapshot.model_id == "kimi-k3"
+    assert response.json()["model_id"] == "deepseek-v4-pro"
+    assert model_app.state.validators["deepseek"].models == ["deepseek-v4-pro"]
+    snapshot = model_app.state.provider_coordinator.state("deepseek")
+    assert snapshot.model_id == "deepseek-v4-pro"
 
 
 @pytest.mark.asyncio
@@ -114,7 +127,7 @@ async def test_removed_models_cannot_be_selected_for_new_work(
             json={"model_id": removed_model_id},
         )
 
-    assert response.status_code == 422
+    assert response.status_code == (422 if provider_id == "deepseek" else 404)
     assert model_app.state.validators[provider_id].models == []
 
 
@@ -139,8 +152,8 @@ async def test_removed_models_cannot_be_submitted_while_saving_a_key(
             json={"api_key": "new-key", "model_id": removed_model_id},
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == "Unsupported model"
+    assert response.status_code == (422 if provider_id == "deepseek" else 404)
+    assert response.json()["detail"] in {"Unsupported model", "Unsupported provider"}
     assert model_app.state.validators[provider_id].models == []
 
 
@@ -152,21 +165,21 @@ async def test_provider_rejects_model_outside_curated_catalog(model_app: FastAPI
             "/api/providers/glm/model", json={"model_id": "glm-user-entered"}
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 404
     assert model_app.state.validators["glm"].models == []
 
 
 @pytest.mark.asyncio
 async def test_first_key_validation_uses_the_selected_model(model_app: FastAPI) -> None:
-    model_app.state.provider_coordinator._keychain.values["kimi"] = b"old-key"
+    model_app.state.provider_coordinator._keychain.values["deepseek"] = b"old-key"
     transport = httpx.ASGITransport(app=model_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.put(
-            "/api/providers/kimi/key",
+            "/api/providers/deepseek/key",
             headers={"X-Configuration-Session": "settings"},
-            json={"api_key": "new-key", "model_id": "kimi-k3"},
+            json={"api_key": "new-key", "model_id": "deepseek-v4-pro"},
         )
 
     assert response.status_code == 200
-    assert response.json()["model_id"] == "kimi-k3"
-    assert model_app.state.validators["kimi"].models == ["kimi-k3"]
+    assert response.json()["model_id"] == "deepseek-v4-pro"
+    assert model_app.state.validators["deepseek"].models == ["deepseek-v4-pro"]

@@ -19,7 +19,7 @@ function normalizeReportAnnotations(value) {
 }
 
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI', glm: 'GLM' }
-const HIDDEN_CONFIGURATION_PROVIDERS = new Set(['glm'])
+const HIDDEN_CONFIGURATION_PROVIDERS = new Set(['kimi', 'openai', 'glm'])
 const REPORT_METRICS_MARKER = '<!-- audio-memory-report-metrics -->'
 
 export function extractReportMetrics(markdown = '') {

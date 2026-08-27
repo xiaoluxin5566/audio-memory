@@ -8,7 +8,11 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from audio_memory.providers.coordinator import ProviderStateCoordinator
-from audio_memory.providers.types import PROVIDER_CONFIGS, ProviderState
+from audio_memory.providers.types import (
+    CONFIGURABLE_PROVIDER_IDS,
+    PROVIDER_CONFIGS,
+    ProviderState,
+)
 
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
@@ -63,15 +67,19 @@ def coordinator_from(request: Request) -> ProviderStateCoordinator:
 
 
 def ensure_provider(provider_id: str) -> None:
-    if provider_id not in PROVIDER_CONFIGS:
+    if provider_id not in CONFIGURABLE_PROVIDER_IDS:
         raise HTTPException(status_code=404, detail="Unsupported provider")
+
+
+def configurable_states(coordinator: ProviderStateCoordinator) -> list[ProviderState]:
+    return [coordinator.state(provider_id) for provider_id in CONFIGURABLE_PROVIDER_IDS]
 
 
 @router.get("")
 async def list_providers(request: Request) -> ProviderList:
     coordinator = coordinator_from(request)
     return ProviderList(
-        providers=[ProviderView.from_state(item) for item in coordinator.list_states()]
+        providers=[ProviderView.from_state(item) for item in configurable_states(coordinator)]
     )
 
 
@@ -81,11 +89,11 @@ async def validate_configured(request: Request) -> ProviderList:
     await asyncio.gather(
         *(
             asyncio.wait_for(coordinator.validate_saved(provider_id), timeout=20)
-            for provider_id in PROVIDER_CONFIGS
+            for provider_id in CONFIGURABLE_PROVIDER_IDS
         )
     )
     return ProviderList(
-        providers=[ProviderView.from_state(item) for item in coordinator.list_states()]
+        providers=[ProviderView.from_state(item) for item in configurable_states(coordinator)]
     )
 
 

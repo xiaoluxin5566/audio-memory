@@ -119,3 +119,9 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         ),
     ),
 }
+
+
+# New configuration and analysis work is intentionally constrained to this
+# release-safe catalog. The wider registry remains for frozen legacy work and
+# historical provenance only.
+CONFIGURABLE_PROVIDER_IDS: tuple[str, ...] = ("deepseek",)
