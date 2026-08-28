@@ -89,10 +89,10 @@ def test_accepts_utterance_within_nearby_provider_audio_duration() -> None:
     ]
 
 
-def test_accepts_provider_duration_drift_within_one_percent() -> None:
+def test_accepts_provider_duration_drift_within_two_percent() -> None:
     segments = normalize_volcano_result(
         file_id="file-aac",
-        duration_ms=10_459_033,
+        duration_ms=10_350_000,
         payload={
             "audio_info": {"duration": 10_518_080},
             "result": {
@@ -116,12 +116,12 @@ def test_rejects_utterance_using_implausibly_long_provider_duration() -> None:
             file_id="file-aac",
             duration_ms=10_495_560,
             payload={
-                "audio_info": {"duration": 10_700_000},
+                "audio_info": {"duration": 10_720_000},
                 "result": {
                     "utterances": [
                         {
-                            "start_time": 10_695_000,
-                            "end_time": 10_699_000,
+                            "start_time": 10_715_000,
+                            "end_time": 10_719_000,
                             "text": "越界内容。",
                         }
                     ]

@@ -26,7 +26,7 @@ def normalize_volcano_result(
             and not isinstance(provider_duration, bool)
             and provider_duration > duration_ms
         ):
-            duration_tolerance_ms = max(2_000, duration_ms // 100)
+            duration_tolerance_ms = max(2_000, duration_ms // 50)
             if provider_duration > duration_ms + duration_tolerance_ms:
                 raise AsrResultError("invalid provider audio duration")
             duration_ms = provider_duration

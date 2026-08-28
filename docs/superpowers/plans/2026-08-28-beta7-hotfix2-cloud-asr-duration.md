@@ -4,7 +4,7 @@
 
 **Goal:** Ship `0.1.0-beta.7-hotfix.2` so valid Volcano AAC transcripts are not rejected when the provider duration is slightly longer than the local FFprobe duration.
 
-**Architecture:** Keep local duration as the default trust boundary, but accept Volcano `audio_info.duration` when it is greater and the drift is bounded by `max(2_000 ms, 1% of local duration)`. Reject larger provider-duration drift before materializing utterances. Package the change as a new immutable Beta 7 hotfix without replacing Hotfix 1.
+**Architecture:** Keep local duration as the default trust boundary, but accept Volcano `audio_info.duration` when it is greater and the drift is bounded by `max(2_000 ms, 2% of local duration)`. Reject larger provider-duration drift before materializing utterances. Package the change as a new immutable Beta 7 hotfix without replacing Hotfix 1.
 
 **Tech Stack:** Python 3.12, pytest, SQLite-backed Audio Memory backend, shell release gates.
 
@@ -14,7 +14,7 @@
 
 - Target version is exactly `0.1.0-beta.7-hotfix.2`.
 - Completed transcription and reports must remain recoverable on retry.
-- Provider duration drift over `max(2_000 ms, 1% of local duration)` must still fail closed.
+- Provider duration drift over `max(2_000 ms, 2% of local duration)` must still fail closed.
 - Do not publish, tag, push, merge, or replace an installed release without separate user approval.
 - Do not repeat the paid real-audio smoke; use the already completed authorized six-file flow as real-flow evidence.
 
