@@ -18,6 +18,18 @@ class CloudTranscriptSegment(TranscriptSegment):
 def normalize_volcano_result(
     *, file_id: str, duration_ms: int, payload: dict[str, Any]
 ) -> list[CloudTranscriptSegment]:
+    audio_info = payload.get("audio_info")
+    if isinstance(audio_info, dict):
+        provider_duration = audio_info.get("duration")
+        if (
+            isinstance(provider_duration, int)
+            and not isinstance(provider_duration, bool)
+            and provider_duration > duration_ms
+        ):
+            duration_tolerance_ms = max(2_000, duration_ms // 50)
+            if provider_duration > duration_ms + duration_tolerance_ms:
+                raise AsrResultError("invalid provider audio duration")
+            duration_ms = provider_duration
     try:
         result = payload["result"]
         utterances = result["utterances"]
