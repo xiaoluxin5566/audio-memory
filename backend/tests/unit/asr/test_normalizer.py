@@ -66,6 +66,70 @@ def test_ignores_provider_tokens_without_timestamps() -> None:
     ]
 
 
+def test_accepts_utterance_within_nearby_provider_audio_duration() -> None:
+    segments = normalize_volcano_result(
+        file_id="file-aac",
+        duration_ms=10_495_560,
+        payload={
+            "audio_info": {"duration": 10_518_336},
+            "result": {
+                "utterances": [
+                    {
+                        "start_time": 10_513_300,
+                        "end_time": 10_517_100,
+                        "text": "最后一句。",
+                    }
+                ]
+            },
+        },
+    )
+
+    assert [(item.start_ms, item.end_ms) for item in segments] == [
+        (10_513_300, 10_517_100)
+    ]
+
+
+def test_accepts_provider_duration_drift_within_one_percent() -> None:
+    segments = normalize_volcano_result(
+        file_id="file-aac",
+        duration_ms=10_459_033,
+        payload={
+            "audio_info": {"duration": 10_518_080},
+            "result": {
+                "utterances": [
+                    {
+                        "start_time": 10_513_000,
+                        "end_time": 10_516_870,
+                        "text": "最后一句。",
+                    }
+                ]
+            },
+        },
+    )
+
+    assert segments[0].end_ms == 10_516_870
+
+
+def test_rejects_utterance_using_implausibly_long_provider_duration() -> None:
+    with pytest.raises(AsrResultError, match="invalid provider audio duration"):
+        normalize_volcano_result(
+            file_id="file-aac",
+            duration_ms=10_495_560,
+            payload={
+                "audio_info": {"duration": 10_700_000},
+                "result": {
+                    "utterances": [
+                        {
+                            "start_time": 10_695_000,
+                            "end_time": 10_699_000,
+                            "text": "越界内容。",
+                        }
+                    ]
+                },
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "utterances",
     [
