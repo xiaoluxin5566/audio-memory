@@ -23,6 +23,7 @@ from feature_governance import (  # noqa: E402
     GitRepository,
     GovernanceError,
     ReleaseService,
+    ReleaseSmokeEvidence,
 )
 
 
@@ -603,6 +604,122 @@ def test_release_build_refuses_mutable_or_existing_version(
 
     with pytest.raises(GovernanceError):
         release.authorize_build(path, manifest.digest())
+
+
+MP3_FIXTURE = (
+    "08月01日 09-07 Pokee SE-audio.mp3",
+    "197b90cdf9a1f7b52c15871519a2f8b737f072470ea1984f39658a0582f3c754",
+)
+AAC_FIXTURE = (
+    "feishu-minute-obcnu82z4n194o292136j459.aac",
+    "fc776b4532c43f53165d4682f9b4aefecdaffb5f8d94575ed3650a06d5118c17",
+)
+
+
+def built_candidate(
+    git_repository: Path,
+) -> tuple[ReleaseService, object, Path, Path]:
+    release, manifest, manifest_path = integrated_candidate(git_repository)
+    archive = git_repository.parent / "audio-memory-v0.1.0-beta.3.tar.gz"
+    archive.write_bytes(b"sealed release archive")
+    release.record_build(manifest, archive)
+    return release, manifest, manifest_path, archive
+
+
+def valid_smoke_evidence(
+    manifest, archive: Path, main_commit: str
+) -> ReleaseSmokeEvidence:
+    return ReleaseSmokeEvidence(
+        schema_version=1,
+        target_version=manifest.target_version,
+        main_commit=main_commit,
+        archive_sha256=__import__("hashlib").sha256(archive.read_bytes()).hexdigest(),
+        runtime_version=manifest.target_version.removeprefix("v"),
+        module_path=(
+            f"/private/tmp/{manifest.target_version}/backend/src/"
+            "audio_memory/__init__.py"
+        ),
+        fixtures=(MP3_FIXTURE, AAC_FIXTURE),
+        stages=("transcribing", "analyzing", "completed"),
+        model_id="deepseek-v4-pro",
+        transcript_segments=225,
+        version_status="completed",
+        published_card_count=1,
+        elapsed_seconds=465.82,
+        started_at="2026-08-28T10:00:00+08:00",
+        completed_at="2026-08-28T10:07:45+08:00",
+    )
+
+
+def test_release_publish_requires_smoke_for_exact_built_archive(
+    git_repository: Path,
+) -> None:
+    release, manifest, manifest_path, archive = built_candidate(git_repository)
+
+    with pytest.raises(GovernanceError, match="封板"):
+        release.authorize_publish(manifest_path, manifest.digest(), archive)
+
+    release.record_smoke(
+        manifest,
+        archive,
+        valid_smoke_evidence(manifest, archive, release.repository.head_commit),
+    )
+    assert release.authorize_publish(
+        manifest_path, manifest.digest(), archive
+    ) == manifest
+
+
+def test_release_publish_rejects_archive_changed_after_smoke(
+    git_repository: Path,
+) -> None:
+    release, manifest, manifest_path, archive = built_candidate(git_repository)
+    release.record_smoke(
+        manifest,
+        archive,
+        valid_smoke_evidence(manifest, archive, release.repository.head_commit),
+    )
+    archive.write_bytes(b"different archive")
+
+    with pytest.raises(GovernanceError, match="哈希"):
+        release.authorize_publish(manifest_path, manifest.digest(), archive)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda evidence: replace(evidence, fixtures=(MP3_FIXTURE,)), "固定音频"),
+        (
+            lambda evidence: replace(
+                evidence,
+                fixtures=(MP3_FIXTURE, (AAC_FIXTURE[0], "0" * 64)),
+            ),
+            "固定音频",
+        ),
+        (
+            lambda evidence: replace(evidence, version_status="failed"),
+            "报告",
+        ),
+        (
+            lambda evidence: replace(evidence, published_card_count=0),
+            "报告",
+        ),
+    ],
+)
+def test_release_smoke_rejects_incomplete_evidence(
+    git_repository: Path, mutation, message: str
+) -> None:
+    release, manifest, _, archive = built_candidate(git_repository)
+
+    with pytest.raises(GovernanceError, match=message):
+        release.record_smoke(
+            manifest,
+            archive,
+            mutation(
+                valid_smoke_evidence(
+                    manifest, archive, release.repository.head_commit
+                )
+            ),
+        )
 
 
 def legacy_feature_worktree(root: Path, feature_id: str) -> Path:

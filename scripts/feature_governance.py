@@ -635,6 +635,76 @@ class IntegrationResult:
     main_commit: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseSmokeEvidence:
+    schema_version: int
+    target_version: str
+    main_commit: str
+    archive_sha256: str
+    runtime_version: str
+    module_path: str
+    fixtures: tuple[tuple[str, str], ...]
+    stages: tuple[str, ...]
+    model_id: str
+    transcript_segments: int
+    version_status: str
+    published_card_count: int
+    elapsed_seconds: float
+    started_at: str
+    completed_at: str
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "ReleaseSmokeEvidence":
+        expected = {field.name for field in fields(cls)}
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise GovernanceError("封板证据内容无效。")
+        try:
+            evidence = cls(
+                schema_version=payload["schema_version"],
+                target_version=payload["target_version"],
+                main_commit=payload["main_commit"],
+                archive_sha256=payload["archive_sha256"],
+                runtime_version=payload["runtime_version"],
+                module_path=payload["module_path"],
+                fixtures=tuple(tuple(item) for item in payload["fixtures"]),
+                stages=tuple(payload["stages"]),
+                model_id=payload["model_id"],
+                transcript_segments=payload["transcript_segments"],
+                version_status=payload["version_status"],
+                published_card_count=payload["published_card_count"],
+                elapsed_seconds=float(payload["elapsed_seconds"]),
+                started_at=payload["started_at"],
+                completed_at=payload["completed_at"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GovernanceError("封板证据内容无效。") from exc
+        if (
+            evidence.schema_version != 1
+            or not FeatureRecord._VERSION.fullmatch(evidence.target_version)
+            or not FeatureRecord._SHA.fullmatch(evidence.main_commit)
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence.archive_sha256)
+            or not evidence.runtime_version
+            or not evidence.module_path
+            or not isinstance(evidence.started_at, str)
+            or not isinstance(evidence.completed_at, str)
+            or not evidence.started_at
+            or not evidence.completed_at
+            or any(
+                len(item) != 2 or not re.fullmatch(r"[0-9a-f]{64}", item[1])
+                for item in evidence.fixtures
+            )
+        ):
+            raise GovernanceError("封板证据内容无效。")
+        return evidence
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **asdict(self),
+            "fixtures": [list(item) for item in self.fixtures],
+            "stages": list(self.stages),
+        }
+
+
 class ReleaseStore:
     def __init__(self, common_dir: Path) -> None:
         self.root = common_dir.resolve() / "audio-memory-governance"
@@ -701,6 +771,61 @@ class ReleaseStore:
             raise GovernanceError("集成回执内容无效。")
         return payload
 
+    def build_path(self, version: str) -> Path:
+        if not FeatureRecord._VERSION.fullmatch(version):
+            raise GovernanceError("发布版本号无效。")
+        return self.releases / f"{version}-build.json"
+
+    def smoke_path(self, version: str) -> Path:
+        if not FeatureRecord._VERSION.fullmatch(version):
+            raise GovernanceError("发布版本号无效。")
+        return self.releases / f"{version}-smoke.json"
+
+    def save_build(self, payload: dict[str, object]) -> Path:
+        path = self.build_path(str(payload["target_version"]))
+        self._atomic_json(path, payload)
+        return path
+
+    def load_build(self, version: str) -> dict[str, object]:
+        path = self.build_path(version)
+        FeatureStore._validate_regular_file(path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise GovernanceError("构建回执无法读取。") from exc
+        expected = {
+            "schema_version", "target_version", "main_commit",
+            "archive_path", "archive_sha256",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or payload["schema_version"] != 1
+            or payload["target_version"] != version
+            or not isinstance(payload["archive_path"], str)
+            or not isinstance(payload["main_commit"], str)
+            or not FeatureRecord._SHA.fullmatch(payload["main_commit"])
+            or not isinstance(payload["archive_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", payload["archive_sha256"])
+        ):
+            raise GovernanceError("构建回执内容无效。")
+        return payload
+
+    def save_smoke(self, evidence: ReleaseSmokeEvidence) -> Path:
+        path = self.smoke_path(evidence.target_version)
+        self._atomic_json(path, evidence.to_dict())
+        return path
+
+    def load_smoke(self, version: str) -> ReleaseSmokeEvidence:
+        path = self.smoke_path(version)
+        FeatureStore._validate_regular_file(path)
+        try:
+            return ReleaseSmokeEvidence.from_dict(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise GovernanceError("封板证据无法读取。") from exc
+
     def _atomic_json(self, path: Path, payload: object) -> None:
         FeatureStore._validate_directory(self.root, create=True)
         FeatureStore._validate_directory(self.releases, create=True)
@@ -724,6 +849,17 @@ class ReleaseStore:
 
 
 class ReleaseService:
+    REQUIRED_SMOKE_FIXTURES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (
+            "08月01日 09-07 Pokee SE-audio.mp3",
+            "197b90cdf9a1f7b52c15871519a2f8b737f072470ea1984f39658a0582f3c754",
+        ),
+        (
+            "feishu-minute-obcnu82z4n194o292136j459.aac",
+            "fc776b4532c43f53165d4682f9b4aefecdaffb5f8d94575ed3650a06d5118c17",
+        ),
+    )
+
     def __init__(self, repository: GitRepository) -> None:
         self.repository = repository
         self.features = FeatureService(repository)
@@ -898,6 +1034,89 @@ class ReleaseService:
             raise GovernanceError("发布版本标签已存在，不可覆盖。")
         return manifest
 
+    @staticmethod
+    def _archive_sha256(archive: Path) -> str:
+        if not archive.is_file() or archive.is_symlink():
+            raise GovernanceError("发布包不存在或路径无效。")
+        digest = hashlib.sha256()
+        with archive.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def record_build(self, manifest: ReleaseManifest, archive: Path) -> Path:
+        if (
+            self.repository.current_branch != "main"
+            or not self.repository.is_clean
+        ):
+            raise GovernanceError("构建回执必须对应干净的 main。")
+        resolved = archive.resolve()
+        return self.store.save_build({
+            "schema_version": 1,
+            "target_version": manifest.target_version,
+            "main_commit": self.repository.head_commit,
+            "archive_path": str(resolved),
+            "archive_sha256": self._archive_sha256(resolved),
+        })
+
+    def record_smoke(
+        self,
+        manifest: ReleaseManifest,
+        archive: Path,
+        evidence: ReleaseSmokeEvidence,
+    ) -> Path:
+        build = self.store.load_build(manifest.target_version)
+        archive_hash = self._archive_sha256(archive.resolve())
+        if (
+            build["archive_path"] != str(archive.resolve())
+            or build["archive_sha256"] != archive_hash
+            or evidence.target_version != manifest.target_version
+            or evidence.main_commit != build["main_commit"]
+            or evidence.archive_sha256 != archive_hash
+            or evidence.runtime_version != manifest.target_version.removeprefix("v")
+            or not evidence.module_path.endswith(
+                "/backend/src/audio_memory/__init__.py"
+            )
+        ):
+            raise GovernanceError("封板证据与本次构建包不一致。")
+        if evidence.fixtures != self.REQUIRED_SMOKE_FIXTURES:
+            raise GovernanceError("封板必须使用 MP3 和 AAC 两个固定音频。")
+        if (
+            evidence.stages != ("transcribing", "analyzing", "completed")
+            or evidence.model_id != "deepseek-v4-pro"
+            or evidence.transcript_segments <= 0
+            or evidence.version_status != "completed"
+            or evidence.published_card_count != 1
+        ):
+            raise GovernanceError("封板报告未完整生成。")
+        return self.store.save_smoke(evidence)
+
+    def authorize_publish(
+        self,
+        manifest_path: Path,
+        approval_token: str | None,
+        archive: Path,
+    ) -> ReleaseManifest:
+        manifest = self.authorize_build(manifest_path, approval_token)
+        build = self.store.load_build(manifest.target_version)
+        archive_hash = self._archive_sha256(archive.resolve())
+        if (
+            build["main_commit"] != self.repository.head_commit
+            or build["archive_path"] != str(archive.resolve())
+            or build["archive_sha256"] != archive_hash
+        ):
+            raise GovernanceError("发布包哈希与构建回执不一致。")
+        try:
+            evidence = self.store.load_smoke(manifest.target_version)
+        except GovernanceError as exc:
+            raise GovernanceError("未找到可用的双音频封板证据。") from exc
+        if (
+            evidence.main_commit != build["main_commit"]
+            or evidence.archive_sha256 != archive_hash
+        ):
+            raise GovernanceError("封板证据与发布包哈希不一致。")
+        return manifest
+
 
 def _repository_from_current_directory() -> GitRepository:
     return GitRepository(Path.cwd())
@@ -935,6 +1154,14 @@ def main(argv: list[str] | None = None) -> int:
     build_parser = subparsers.add_parser("release-build")
     build_parser.add_argument("version")
     build_parser.add_argument("--approve", required=True)
+    smoke_parser = subparsers.add_parser("release-smoke")
+    smoke_parser.add_argument("version")
+    smoke_parser.add_argument("archive", type=Path)
+    smoke_parser.add_argument("evidence", type=Path)
+    publish_parser = subparsers.add_parser("release-publish")
+    publish_parser.add_argument("version")
+    publish_parser.add_argument("archive", type=Path)
+    publish_parser.add_argument("--approve", required=True)
     arguments = parser.parse_args(argv)
     try:
         service = FeatureService(_repository_from_current_directory())
@@ -1103,12 +1330,11 @@ def main(argv: list[str] | None = None) -> int:
                 "failed": result.failed,
                 "main_commit": result.main_commit,
             }, ensure_ascii=False))
-        else:
+        elif arguments.command == "release-build":
             controller_root = Path(__file__).resolve().parent.parent
             release = ReleaseService(service.repository)
             manifest_path = release.store.manifest_path(arguments.version)
             manifest = release.authorize_build(manifest_path, arguments.approve)
-            release_records = release.records_to_mark_released(manifest)
             environment = dict(os.environ)
             environment["AUDIO_MEMORY_TOOLCHAIN_ROOT"] = str(controller_root)
             gate_result = subprocess.run(
@@ -1147,6 +1373,41 @@ def main(argv: list[str] | None = None) -> int:
                     for member in bundle.getmembers()
                 ):
                     raise GovernanceError("发布包携带了开发治理或运行数据。")
+            release.record_build(manifest, archive)
+            print(json.dumps({
+                "version": manifest.target_version,
+                "status": "built_waiting_for_smoke",
+                "main_commit": service.repository.head_commit,
+                "archive": str(archive),
+                "checksum": str(checksum),
+                "archive_sha256": expected_hash,
+            }, ensure_ascii=False))
+        elif arguments.command == "release-smoke":
+            release = ReleaseService(service.repository)
+            manifest = release.store.load_manifest(
+                release.store.manifest_path(arguments.version)
+            )
+            try:
+                evidence_payload = json.loads(
+                    arguments.evidence.resolve().read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise GovernanceError("封板证据文件无法读取。") from exc
+            evidence = ReleaseSmokeEvidence.from_dict(evidence_payload)
+            receipt = release.record_smoke(manifest, arguments.archive, evidence)
+            print(json.dumps({
+                "version": manifest.target_version,
+                "status": "smoke_passed_waiting_for_publish",
+                "archive_sha256": evidence.archive_sha256,
+                "evidence": str(receipt),
+            }, ensure_ascii=False))
+        else:
+            release = ReleaseService(service.repository)
+            manifest_path = release.store.manifest_path(arguments.version)
+            manifest = release.authorize_publish(
+                manifest_path, arguments.approve, arguments.archive
+            )
+            release_records = release.records_to_mark_released(manifest)
             service.repository._git(
                 "tag", "-a", manifest.target_version,
                 "-m", f"Release {manifest.target_version}",
@@ -1159,9 +1420,12 @@ def main(argv: list[str] | None = None) -> int:
                 ))
             print(json.dumps({
                 "version": manifest.target_version,
+                "status": "tagged_ready_to_push",
                 "tag": manifest.target_version,
-                "archive": str(archive),
-                "checksum": str(checksum),
+                "archive": str(arguments.archive.resolve()),
+                "archive_sha256": release._archive_sha256(
+                    arguments.archive.resolve()
+                ),
             }, ensure_ascii=False))
         return 0
     except GovernanceError as exc:
@@ -1180,6 +1444,7 @@ __all__ = [
     "ReleaseFeature",
     "ReleaseManifest",
     "ReleaseService",
+    "ReleaseSmokeEvidence",
     "ReleaseStore",
 ]
 

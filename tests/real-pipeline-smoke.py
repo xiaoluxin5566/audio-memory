@@ -5,15 +5,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import inspect
 import json
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+import audio_memory
+from audio_memory import __version__
 from audio_memory.config import AppPaths
 from audio_memory.main import create_app
 from audio_memory.models import AnalysisVersion, JobFile, Transcript
@@ -51,7 +56,19 @@ def parse_args() -> argparse.Namespace:
         help="Real MP3/AAC files to upload in one batch; synthetic MP3 when omitted.",
     )
     parser.add_argument("--timeout-seconds", type=int, default=3600)
+    parser.add_argument("--evidence-output", type=Path)
+    parser.add_argument("--target-version")
+    parser.add_argument("--main-commit")
+    parser.add_argument("--archive-sha256")
     return parser.parse_args()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def isolated_paths(home: Path) -> AppPaths:
@@ -134,6 +151,7 @@ def main() -> None:
                 uploaded_names.append(audio.name)
 
             pipeline_started = time.monotonic()
+            pipeline_started_at = datetime.now(timezone.utc).isoformat()
             started = post(f"/api/jobs/{job_id}/start")
             assert started.status_code == 200, started.text
 
@@ -222,6 +240,44 @@ def main() -> None:
                 f"files={stored_names}; transcript_segments={transcript_count}; "
                 f"published_cards={published_card_count}"
             )
+            if args.evidence_output:
+                if not (
+                    args.target_version
+                    and args.main_commit
+                    and args.archive_sha256
+                ):
+                    raise ValueError(
+                        "Evidence output requires target version, main commit, "
+                        "and archive SHA-256."
+                    )
+                evidence = {
+                    "schema_version": 1,
+                    "target_version": args.target_version,
+                    "main_commit": args.main_commit,
+                    "archive_sha256": args.archive_sha256,
+                    "runtime_version": __version__,
+                    "module_path": inspect.getfile(audio_memory),
+                    "fixtures": [
+                        [path.name, sha256_file(path)] for path in audio_files
+                    ],
+                    "stages": stages,
+                    "model_id": model_id,
+                    "transcript_segments": transcript_count,
+                    "version_status": version_status,
+                    "published_card_count": published_card_count,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "started_at": pipeline_started_at,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                output = args.evidence_output.expanduser().resolve()
+                output.parent.mkdir(parents=True, exist_ok=True)
+                temporary = output.with_suffix(output.suffix + ".tmp")
+                temporary.write_text(
+                    json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(output)
+                print(f"evidence={output}")
 
 
 if __name__ == "__main__":
