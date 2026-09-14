@@ -58,7 +58,7 @@ test('available but inactive providers require choosing the current model before
     buffer: Buffer.from('browser acceptance audio'),
   })
 
-  await expect(page.getByRole('heading', { name: '配置分析模型' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '配置报告服务' })).toBeVisible()
   await expect(page.getByText('未选择当前模型')).toBeVisible()
   expect(createJobCalls()).toBe(0)
 })
@@ -89,12 +89,21 @@ const completedFeed = {
       scene_id: 'meeting',
       uploaded_at: '2026-08-05T10:05:00Z',
       payload: {
-        scene_id: 'meeting',
+        scene_id: 'work_communication',
         cards: [{
           card: { title: '产品方案评审', summary: '团队确认了第一阶段的核心体验。' },
           detail: {},
           external_source_ids: [],
         }],
+        writingV1: true,
+        reportMarkdown: '团队已确认第一阶段核心体验。\n\n## 下一步\n\n- [ ] 根据验收标准完成第一轮验证。',
+        cardAssessment: {
+          card_id: 'card-1', status: 'scored', raw_total: 100,
+          capped_reference_total: null, acceptance_total: 100, passed: true,
+          dimensions: { factual_accuracy: 15, important_coverage: 15, analysis_depth: 25, actionability: 30, expression_structure: 15 },
+          deductions: [], strengths: '事实、分析和行动完整', weaknesses: '无重大缺陷',
+          read_scope: ['activity_001'], missing_inputs: [],
+        },
       },
       qa: [],
     }],
@@ -170,6 +179,11 @@ test('completed batch retries a transient feed refresh before clearing the job',
   await expect.poll(completedFeedReads).toBeGreaterThan(1)
   await expect(page.getByRole('heading', { name: '产品方案评审' })).toBeVisible()
   await expect(page.getByText('meeting.mp3')).toBeHidden()
+
+  await page.getByRole('heading', { name: '产品方案评审' }).click()
+  await expect(page.getByText('主卡评分 100 / 100')).toBeVisible()
+  await expect(page.getByText('根据验收标准完成第一轮验证。')).toBeVisible()
+  await page.getByRole('button', { name: '关闭详情' }).click()
 
   await page.getByRole('button', { name: '音频历史' }).click()
   await expect(page.getByText('meeting.mp3')).toBeVisible()

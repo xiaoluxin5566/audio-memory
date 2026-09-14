@@ -13,11 +13,13 @@ import {
 } from './store.js';
 import { api } from './api/client.js';
 import { uploadFile } from './api/upload.js';
-import { analysisBlocks, configurableProviderEntries, normalizeFeed, normalizeHistory } from './api/state.js';
-import { useProviders } from './hooks/useProviders.js';
+import { analysisBlocks, configurableProviderEntries, markdownPresentation, normalizeFeed, normalizeHistory, runtimeMetricsPresentation, tokenUsagePresentation } from './api/state.js';
+import { isWritingV1Preview, useProviders } from './hooks/useProviders.js';
 import { useActiveJob } from './hooks/useActiveJob.js';
 import { useReanalysis } from './hooks/useReanalysis.js';
 import { ReanalysisModal } from './components/ReanalysisModal.jsx';
+import { CardAssessment, WritingDraftStatus } from './components/CardAssessment.jsx';
+import { WritingV1PreviewStatus } from './components/WritingV1PreviewStatus.jsx';
 import { getReanalysisView, isActiveReanalysis } from './api/state.js';
 import { buildReportEventMap } from './reportPresentation.js';
 import './styles.css';
@@ -26,7 +28,12 @@ const VOLCANO_ASR_API_KEY_URL = 'https://console.volcengine.com/speech/new/setti
 const INTERRUPTION_NOTICE_VERSION_KEY = 'audio-memory.analysis-interruption-notice-version';
 const ROUTES = { '/': 'feed', '/history': 'history' };
 const ROUTE_PATHS = { feed: '/', history: '/history' };
-const sceneClass = { analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content', growth: 'growth', inspiration: 'inspiration' };
+const sceneClass = {
+  analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content',
+  growth: 'growth', inspiration: 'inspiration', work_communication: 'meeting',
+  parenting_family: 'parenting', health_state: 'growth', content_consumption: 'content',
+  inspiration_insight: 'inspiration', self_growth: 'growth', life_decisions: 'growth',
+};
 const providerStateLabel = {
   initializing: '正在读取本地配置',
   unconfigured: '等待填写 API Key',
@@ -53,6 +60,7 @@ export function App() {
   const [state, setState] = useState(() => createInitialState());
   const [environment, setEnvironment] = useState(null);
   const [retryingJob, setRetryingJob] = useState(false);
+  const writingV1Preview = isWritingV1Preview(window.location.search);
   const providerState = useProviders();
   const [route, setRoute] = useState(ROUTES[window.location.pathname] ?? 'feed');
   const [providerOpen, setProviderOpen] = useState(false);
@@ -112,7 +120,7 @@ export function App() {
     refreshContent().catch(() => setToast('无法读取本地历史，请确认服务已启动'));
   }, [refreshContent]);
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('reportPreview') !== 'deepseek') return;
+    if (writingV1Preview || new URLSearchParams(window.location.search).get('reportPreview') !== 'deepseek') return;
     if (reportPreviewOpened.current) return;
     const batch = state.feed[0];
     const card = batch?.cards.find((item) => item.reportMarkdown);
@@ -120,7 +128,7 @@ export function App() {
       reportPreviewOpened.current = true;
       setSelectedCard({ card, batch });
     }
-  }, [state.feed]);
+  }, [state.feed, writingV1Preview]);
   useEffect(() => {
     api.analysisSettings().then((settings) => setAnalysisSettings({
       preventSleep: Boolean(settings.prevent_sleep),
@@ -173,7 +181,7 @@ export function App() {
   }
   async function confirmReanalysis() {
     if (!reanalysis.preview?.previewToken) return;
-    try { await reanalysis.start(reanalysis.preview.previewToken); setToast('已开始使用最新 Prompt 重新分析历史'); }
+    try { await reanalysis.start(); setToast('已开始使用最新 Prompt 重新分析历史'); }
     catch (error) { setToast(error.message); }
   }
   async function controlReanalysis() {
@@ -421,6 +429,7 @@ export function App() {
             </section>
           </aside>
           <main className="feed-area">
+            {writingV1Preview && !selectedCard && <WritingV1PreviewStatus enabled={writingV1Preview} />}
             {selectedCard ? <CardDetail card={selectedCard.card} batch={selectedCard.batch} onClose={() => setSelectedCard(null)} onToast={setToast} /> : <Feed state={state} refresh={refreshContent} editingTodo={editingTodo} setEditingTodo={setEditingTodo} onOpenCard={(card, batch) => setSelectedCard({ card, batch })} />}
           </main>
         </div>
@@ -428,7 +437,7 @@ export function App() {
       {route === 'history' && <History state={state} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {asrOpen && <AsrModal state={asrState} refresh={refreshAsr} onClose={() => setAsrOpen(false)} onToast={setToast} />}
-      {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} />}
+      {reanalysisOpen && <ReanalysisModal preview={reanalysis.preview} previewOptions={reanalysis.previewOptions} loading={reanalysis.loadingPreview} error={reanalysis.error} current={reanalysis.current} view={reanalysisView} onClose={closeReanalysis} onConfirm={confirmReanalysis} onAction={controlReanalysis} onSelectPreview={reanalysis.selectPreview} />}
       {interruptionNoticeOpen && <AnalysisInterruptionNotice onClose={() => setInterruptionNoticeOpen(false)} />}
       {removalBlockedOpen && <RemovalBlockedModal onClose={() => setRemovalBlockedOpen(false)} />}
       {cancelConfirmOpen && <CancelAnalysisModal cancelling={cancellingJob} onClose={() => setCancelConfirmOpen(false)} onConfirm={cancelJob} />}
@@ -482,7 +491,7 @@ function Feed({ state, refresh, editingTodo, setEditingTodo, onOpenCard }) {
   return <div className="feed-content">{state.todos.length > 0 && <section className="todo-card"><div className="todo-head"><h2>全局待办</h2><span>{incomplete.length} 项未完成</span></div>{incomplete.map((todo) => <TodoRow key={todo.id} todo={todo} refresh={refresh} editingTodo={editingTodo} setEditingTodo={setEditingTodo} />)}{completed.length > 0 && <><div className="completed-label">已完成 · {completed.length}</div>{completed.map((todo) => <TodoRow key={todo.id} todo={todo} refresh={refresh} editingTodo={editingTodo} setEditingTodo={setEditingTodo} />)}</>}</section>}{state.feed.map((batch) => {
     const overview = batch.cards.find((card) => card.kind === 'batch_overview');
     const cards = orderCards(batch.cards.filter((card) => card.kind !== 'batch_overview'));
-    return <section className="day-block" key={batch.id}><div className="date-divider"><b>{batch.date}</b><span>最新更新 {batch.uploadedAt}</span></div><div className="batch-line"><div className="batch-title"><b>{batch.uploadedAt} 上传</b><span>分析完成</span></div>{overview && <BatchOverview overview={overview} />}{cards.map((card) => <article className="result-card" key={card.id} onClick={() => onOpenCard(card, batch)}><div className="result-head"><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><small>{card.timeLabel}</small></div><h3>{card.title}</h3><p>{card.summary}</p><div className="result-foot"><span>{card.meta}</span><button>查看完整结果 ›</button></div></article>)}</div></section>;
+    return <section className="day-block" key={batch.id}><div className="date-divider"><b>{batch.date}</b><span>最新更新 {batch.uploadedAt}</span></div><div className="batch-line"><div className="batch-title"><b>{batch.uploadedAt} 上传</b><span>{cards.some((card) => card.writingV1) ? '初稿已生成' : '分析完成'}</span></div>{overview && <BatchOverview overview={overview} />}{cards.map((card) => <article className="result-card" key={card.id} onClick={() => onOpenCard(card, batch)}><div className="result-head"><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><small>{card.timeLabel}</small></div><h3>{card.title}</h3><p>{card.summary}</p>{card.writingV1 && <WritingDraftStatus assessment={card.cardAssessment} />}<div className="result-foot"><span>{card.meta}</span><button>查看完整结果 ›</button></div></article>)}</div></section>;
   })}</div>;
 }
 
@@ -524,7 +533,7 @@ function CardDetail({ card, batch, onClose, onToast }) {
     setFeedbackOpen(false); setRating(''); setComment('');
   }
   const presentation = card.reportDocument ? null : buildReportEventMap(card.reportMarkdown);
-  return <div className="detail-page"><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p>{card.reportQuality && <ReportQualityStatus quality={card.reportQuality} />}</div><div className="detail-header-actions"><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} reportMetrics={card.reportMetrics} />}<ExternalSources sources={card.sources} />{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
+  return <div className={`detail-page${card.reportDocument || card.reportMarkdown ? ' report-detail-page' : ''}`}><header className="detail-header"><div><span className={`scene-badge ${sceneClass[card.sceneId]}`}>{card.label}</span><h1>{card.title}</h1><p>{batch.date} · {card.timeLabel}</p>{card.writingV1 ? <WritingDraftStatus assessment={card.cardAssessment} /> : card.reportQuality && <ReportQualityStatus quality={card.reportQuality} />}</div><div className="detail-header-actions"><button className="close-detail" onClick={onClose} aria-label="关闭详情">×</button></div></header><div className="detail-body">{card.reportDocument ? <StructuredReport document={card.reportDocument} /> : card.reportMarkdown ? <>{presentation && <ReportEventMap presentation={presentation} />}<MarkdownReport markdown={card.reportMarkdown} annotations={card.reportAnnotations} omitCoreConclusion={Boolean(presentation)} /></> : <>{card.sceneId === 'analysis' && <section className="analysis-hero"><div className="section-kicker">{card.label} · 核心结论</div><h2>{card.title}</h2><p>{card.summary}</p></section>}{card.detailSections.map((section, index) => ['meeting', 'analysis'].includes(card.sceneId) ? <MeetingDetailSection section={section} key={`${section.title}-${index}`} /> : <section className="detail-section" key={`${section.title}-${index}`}><h2>{section.title}</h2>{section.content && <p>{section.content}</p>}{section.items && <ol>{section.items.map((item) => <li key={item}>{item}</li>)}</ol>}</section>)}</>}{card.writingV1 && <CardAssessment assessment={card.cardAssessment} />}{(card.reportDocument || card.reportMarkdown) && <RuntimeMetrics metrics={card.runtimeMetrics} reportMetrics={card.reportMetrics} />}<ExternalSources sources={card.sources} />{card.sceneId !== 'analysis' && card.showEvidencePlayback !== false && <EvidencePlayback evidence={card.evidence} />}</div>{feedbackOpen && <FeedbackModal rating={rating} comment={comment} onRating={setRating} onComment={setComment} onSubmit={submitFeedback} onClose={closeFeedback} />}</div>;
 }
 
 export function reportQualityLabel(quality) {
@@ -579,15 +588,34 @@ function StructuredBlock({ block, sectionNumber, subsectionNumber }) {
 }
 
 function MarkdownReport({ markdown = '', annotations = null, omitCoreConclusion = false }) {
-  const title = String(markdown).split('\n').find((line) => /^#\s+/.test(line))?.replace(/^#\s+/, '') || '';
-  const body = String(markdown).replace(/^#\s+.*(?:\r?\n|$)/, '');
-  const reportBody = omitCoreConclusion ? omitMarkdownSection(body, '核心结论') : body;
+  const presentation = markdownPresentation(markdown);
+  const reportBody = omitCoreConclusion ? omitMarkdownSection(presentation.body, '核心结论') : presentation.body;
+  const title = presentation.title;
   return <article className="markdown-report" data-annotation-mode={annotations ? 'model' : 'markdown'}><AnalysisBlocks blocks={analysisBlocks(reportBody, 'full-report', title)} /></article>;
 }
 
 function RuntimeMetrics({ metrics, reportMetrics }) {
   if (!metrics && !reportMetrics) return null;
-  return <section className="runtime-metrics"><h2>数据范围与运行信息</h2><table className="runtime-metrics-table"><tbody>{reportMetrics?.characterCount != null && <tr><th>本次报告</th><td>{reportMetrics.characterCount} 字</td></tr>}{reportMetrics?.revised && <tr><th>定向修改增益</th><td>{reportMetrics.initialScore} → {reportMetrics.finalScore}（{reportMetrics.gain >= 0 ? '+' : ''}{reportMetrics.gain}）</td></tr>}{reportMetrics && !reportMetrics.revised && reportMetrics.finalScore != null && <tr><th>首次全量审核</th><td>{reportMetrics.finalScore} 分</td></tr>}{metrics && <><tr><th>模型调用</th><td>{metrics.model_call_count ?? 0} 次</td></tr><tr><th>输入 Token</th><td>{metrics.input_tokens ?? 0}</td></tr><tr><th>输出 Token</th><td>{metrics.output_tokens ?? 0}</td></tr><tr><th>联网核验</th><td>{metrics.web_search_performed ? '已进行' : '未进行'}</td></tr></>}</tbody></table></section>;
+  const runtime = runtimeMetricsPresentation(metrics);
+  const duration = (value) => `${((value ?? 0) / 1000).toFixed(1)} 秒`;
+  const tokenUsage = runtime && tokenUsagePresentation(
+    runtime.summary.inputTokens,
+    runtime.summary.outputTokens,
+    runtime.summary.tokenUsageUnavailableReason,
+  );
+  const searchTokenUsage = runtime && tokenUsagePresentation(
+    runtime.search.inputTokens,
+    runtime.search.outputTokens,
+    runtime.search.tokenUsageUnavailableReason,
+  );
+  const historyTokenUsage = runtime && (
+    runtime.history.inputTokens == null || runtime.history.outputTokens == null
+      ? '历史 Token 不可得'
+      : `${runtime.history.inputTokens} 输入 Token · ${runtime.history.outputTokens} 输出 Token`
+  );
+  const reviewDuration = runtime ? ['initial_audit', 'editorial_review', 'revisions', 'final_audit']
+    .reduce((total, stage) => total + (runtime.summary.stageDurationsMs[stage] ?? 0), 0) : 0;
+  return <section className="runtime-metrics"><h2>数据范围与运行信息</h2><table className="runtime-metrics-table"><tbody>{reportMetrics?.characterCount != null && <tr><th>本次报告</th><td>{reportMetrics.characterCount} 字</td></tr>}{reportMetrics?.revised && <tr><th>定向修改增益</th><td>{reportMetrics.initialScore} → {reportMetrics.finalScore}（{reportMetrics.gain >= 0 ? '+' : ''}{reportMetrics.gain}）</td></tr>}{reportMetrics && !reportMetrics.revised && reportMetrics.finalScore != null && <tr><th>首次全量审核</th><td>{reportMetrics.finalScore} 分</td></tr>}{runtime && <><tr><th>本次总时间</th><td>{duration(runtime.summary.durationMs)}</td></tr><tr><th>索引 / V1 写作</th><td>{duration(runtime.summary.stageDurationsMs.event_index)} / {duration(runtime.summary.stageDurationsMs.all_scenes_v1)}</td></tr><tr><th>审核 / 修订</th><td>{duration(reviewDuration)}</td></tr><tr><th>本次 Token</th><td>{tokenUsage}</td></tr><tr><th>本次费用</th><td>{runtime.summary.cost == null ? `不可得（${runtime.summary.costUnavailableReason || '提供商未返回'}）` : runtime.summary.cost}</td></tr><tr><th>终审分数</th><td>{runtime.summary.finalAuditScore == null ? '未完成' : `${runtime.summary.finalAuditScore} 分`}</td></tr></>}</tbody></table>{runtime && <div className="runtime-metrics-groups"><section><h3>本次正常报告生成</h3><p>{runtime.normal.count} 次模型调用</p></section><section><h3>本次修复与恢复</h3><p>{runtime.recovery.count} 次修复/重试 · {runtime.recovery.checkpointReusedStages.length} 个检查点复用</p></section><section><h3>本次搜索</h3><p>{duration(runtime.search.durationMs)} · {runtime.search.modelResponses} 次 Kimi 响应 · {runtime.search.toolCalls} 次 Web Search · {searchTokenUsage}</p></section><section><h3>历史累计</h3><p>{runtime.history.modelCalls} 次模型调用 · {historyTokenUsage}</p></section><details><summary>查看具体调用</summary><ul>{[...runtime.normal.calls, ...runtime.recovery.calls].map((call, index) => <li key={`${call.run_id}-${call.stage}-${index}`}>{call.stage} · {call.attempt_kind} · {duration(call.duration_ms)}</li>)}</ul></details></div>}</section>;
 }
 
 function ExternalSources({ sources = [] }) {
@@ -647,7 +675,7 @@ function AnalysisBlocks({ blocks = [] }) {
       const continuation = structured ? item.continuation ?? [] : [];
       return <li key={`${structured ? item.ordinal : itemIndex}-${text}`} value={structured ? item.ordinal : undefined}><RichInline text={text} />{continuation.map((paragraph, paragraphIndex) => <p key={`${paragraph}-${paragraphIndex}`}><RichInline text={paragraph} /></p>)}</li>;
     })}</ol>;
-    if (block.kind === 'matrix') return <div className="analysis-matrix-wrap" key={index}><table className="analysis-matrix"><thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}>{cell}</th>)}</tr></thead><tbody>{block.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><RichInline text={cell} /></td>)}</tr>)}</tbody></table></div>;
+    if (block.kind === 'matrix') return <div className={block.wrapperClass || 'markdown-table-scroll'} key={index}><table className="analysis-matrix"><thead><tr>{block.rows[0].map((cell, cellIndex) => <th key={cellIndex}>{cell}</th>)}</tr></thead><tbody>{block.rows.slice(1).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><RichInline text={cell} /></td>)}</tr>)}</tbody></table></div>;
     return <p className="analysis-paragraph" key={index}><RichInline text={block.text} /></p>;
   })}</div>;
 }
@@ -745,10 +773,12 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
     try {
       await api.saveProviderKey(providerId, key, sessionId.current, modelId);
       candidateProviders.current.delete(providerId);
-      await api.activateProvider(providerId);
+      if (providerId !== 'kimi') await api.activateProvider(providerId);
       await refresh();
       setKey('');
-      onToast(`${state.providers[providerId].name} 已配置并设为当前模型`);
+      onToast(providerId === 'kimi'
+        ? 'Kimi 已配置为 Beta 8 联网搜索服务'
+        : `${state.providers[providerId].name} 已配置并设为当前模型`);
       onClose();
     } catch (error) { setStatus({ type: 'error', message: error.message }); }
     finally { setChecking(false); }
@@ -780,7 +810,7 @@ function ProviderModal({ state, refresh, onClose, onToast }) {
     await Promise.all([...candidateProviders.current].map((id) => api.cancelCandidate(id, sessionId.current).catch(() => {})));
     onClose();
   }
-  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置分析模型</h1><p>选择厂商和具体模型，再填写 API Key；保存时会立即校验是否可用。</p><div className="provider-tabs">{configurableProviders.map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setModelId(provider.modelName || provider.models[0]?.id || ''); setKey(''); setStatus({ type: '', message: '' }); }}>{provider.name}{provider.configured && <small>已配置</small>}</button>)}</div><div className="model-picker"><b>选择具体模型</b><div>{selected.models.map((model) => <button type="button" key={model.id} className={modelId === model.id ? 'active' : ''} disabled={checking} onClick={() => chooseModel(model.id)}><strong>{model.id}</strong><span>{model.label}</span></button>)}</div></div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim() || !modelId} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="modal provider-modal"><button className="modal-close" onClick={close}>×</button><h1>配置报告服务</h1><p>DeepSeek 用于阅读和写作，Kimi 只用于 Beta 8 需要外部信息时的联网搜索。API Key 保存时会立即校验。</p><div className="provider-tabs">{configurableProviders.map(([id, provider]) => <button key={id} className={providerId === id ? 'active' : ''} onClick={() => { setProviderId(id); setModelId(provider.modelName || provider.models[0]?.id || ''); setKey(''); setStatus({ type: '', message: '' }); }}>{id === 'kimi' ? 'Kimi 联网搜索' : `${provider.name} 报告分析`}{provider.configured && <small>已配置</small>}</button>)}</div><div className="model-picker"><b>{providerId === 'kimi' ? '搜索模型' : '报告模型'}</b><div>{selected.models.map((model) => <button type="button" key={model.id} className={modelId === model.id ? 'active' : ''} disabled={checking} onClick={() => chooseModel(model.id)}><strong>{model.id}</strong><span>{model.label}</span></button>)}</div></div><div className="provider-state-line"><b>{selected.configured ? 'Key 已安全保存' : '尚未配置'}</b><span>{cooldownSeconds > 0 ? `请等待 ${cooldownSeconds} 秒后重试` : selected.error || providerStateLabel[selected.state] || '状态未知'}</span></div><label>API Key<input type="text" value={key} onChange={(event) => setKey(event.target.value)} placeholder={selected.configured ? '已保存，填写新 Key 可覆盖' : `填写 ${selected.name} API Key`} autoFocus autoComplete="off" spellCheck="false" /></label>{status.message && <div className={`validation ${status.type}`}>{status.message}</div>}<div className="modal-actions provider-actions"><button className="secondary" onClick={close}>取消</button>{selected.configured && <button className="secondary" disabled={checking || cooldownSeconds > 0} onClick={revalidate}>{cooldownSeconds > 0 ? `${cooldownSeconds} 秒后重试` : '重新校验'}</button>}{providerId !== 'kimi' && selected.state === 'available' && !selected.active && <button className="secondary" onClick={activate}>设为当前厂商</button>}<button className="primary" disabled={checking || !key.trim() || !modelId} onClick={submit}>{checking ? '正在校验…' : '保存并校验'}</button></div></section></div>;
 }
 
 function ClearModal({ onClose, onConfirm }) {

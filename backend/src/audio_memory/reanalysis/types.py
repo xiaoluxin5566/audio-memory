@@ -22,6 +22,8 @@ ITEM_STATES = frozenset({"pending", "running", "succeeded", "failed", "stopped"}
 class SourceSnapshot:
     batch_id: str
     job_id: str
+    current_analysis_version_id: str
+    pipeline_identity_hash: str
     audio_file_count: int
     transcript_character_count: int
     transcript_sha256: str
@@ -44,6 +46,8 @@ class ReanalysisSnapshot:
     prompt_hashes: dict[str, str]
     fixed_rule_hashes: dict[str, str]
     fixed_rules_hash: str
+    pipeline_kind: str
+    prompt_manifest: tuple[dict[str, object], ...]
     profile_snapshot: tuple[dict[str, object], ...]
     profile_hash: str
     source_batch_count: int
@@ -71,6 +75,8 @@ class ReanalysisSnapshot:
             },
             "fixed_rule_hashes": self.fixed_rule_hashes,
             "fixed_rules_hash": self.fixed_rules_hash,
+            "pipeline_kind": self.pipeline_kind,
+            "prompt_manifest": list(self.prompt_manifest),
             "profile_hash": self.profile_hash,
             "counts": {
                 "source_batches": self.source_batch_count,

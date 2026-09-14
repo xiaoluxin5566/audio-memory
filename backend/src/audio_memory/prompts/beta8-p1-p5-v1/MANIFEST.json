@@ -1,0 +1,57 @@
+{
+  "version": "beta8-p1-p5-v1-2026-09-10-anchor-derived-activities",
+  "prompts": [
+    {
+      "prompt_id": "P1",
+      "sha256": "4642a4658bbd8a9caf654ffedb01172f5533f7ee74da3e025b99f4fb615a5491"
+    },
+    {
+      "prompt_id": "P2",
+      "sha256": "0633039ee51ae2a8c25d75b265848e809e84f716b4773776a549d4fb65bde73b"
+    },
+    {
+      "prompt_id": "P3",
+      "sha256": "494a2e6389c7daaaf905d81777bb456aae1affc31d47da451a723634dc191071"
+    },
+    {
+      "prompt_id": "P4",
+      "sha256": "facec50aa56813a15d793fde2e2aada40ad9d1c40e412ae15c041e5287246764"
+    },
+    {
+      "prompt_id": "P5",
+      "sha256": "bb9653b58ba453ab67d88a111e86f96046e5a7c1427a1bebcf38590906cff477"
+    }
+  ],
+  "p4_scene_prompts": [
+    {
+      "scene_id": "work_communication",
+      "sha256": "9e312fe7a02bce53e63d90fba7baf84244381696d23dbb3bf9f35f2aeda3408f"
+    },
+    {
+      "scene_id": "parenting_family",
+      "sha256": "abeffd54a1fca4d8941d0e046493161ea950345703dfd6c2bf9fd301e8b9080c"
+    },
+    {
+      "scene_id": "health_state",
+      "sha256": "09217ebcb4fdf106817c4e82bead795ab8c1a583e6b6c105f47600152ebc62c2"
+    },
+    {
+      "scene_id": "content_consumption",
+      "sha256": "8c94d993142f78096e5913f77fef9b73434116873752f60d51b5a0977b8f4915"
+    },
+    {
+      "scene_id": "inspiration_insight",
+      "sha256": "2f0e75b930033057fa595c6d140ef4419fcb60a3445f20d36e365dc3c16fc616"
+    },
+    {
+      "scene_id": "self_growth",
+      "sha256": "d64746091eac081e89f3830acfb8f686aecf04ab00568d85034ce3cd625fbfcb"
+    },
+    {
+      "scene_id": "life_decisions",
+      "sha256": "bd14e318fc14ced5fd7262ddac9cc4a88e4c871ce9c47d47c9bf1b6f4e7cb291"
+    }
+  ],
+  "input_template_sha256": "d3e20ee1311e7fb9ad351db3c02c394d66fe208f9ee866a58007cd14bc20af03",
+  "rubric_sha256": "f6f7073ed9b371f8daa487bea46cbb8ce0106b85212a8df7eb1ded5048bc8b93"
+}

@@ -63,6 +63,7 @@ async def test_fresh_install_auto_enrolls_managed_storage(
         )
         assert readiness.managed_storage_ready is True
         assert app.state.cloud_asr_coordinator is not None
+        assert not hasattr(app.state, "whisper_engine")
 
     assert enrollment.call_count == 1
     assert (

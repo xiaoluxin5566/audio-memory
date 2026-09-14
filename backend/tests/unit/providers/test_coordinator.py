@@ -237,9 +237,9 @@ async def test_removed_stored_models_fall_back_to_provider_defaults(tmp_path) ->
     await database.create_schema()
     metadata = ProviderMetadataRepository(database)
     await metadata.ensure_defaults(
-        {"kimi": "kimi-k3", "deepseek": "deepseek-v4-pro"}
+        {"kimi": "kimi-k2.6", "deepseek": "deepseek-v4-pro"}
     )
-    await metadata.update_model("kimi", "kimi-k2.6")
+    await metadata.update_model("kimi", "kimi-k2.5")
     await metadata.update_model("deepseek", "deepseek-v4-flash")
 
     coordinator = ProviderStateCoordinator(
@@ -249,7 +249,7 @@ async def test_removed_stored_models_fall_back_to_provider_defaults(tmp_path) ->
     )
     await coordinator.initialize()
 
-    assert coordinator.state("kimi").model_id == "kimi-k3"
+    assert coordinator.state("kimi").model_id == "kimi-k2.6"
     assert coordinator.state("deepseek").model_id == "deepseek-v4-pro"
     await database.dispose()
 

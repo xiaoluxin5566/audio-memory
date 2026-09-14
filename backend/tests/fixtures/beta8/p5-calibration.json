@@ -1,0 +1,38 @@
+{
+  "version": "beta8-p5-calibration-v1",
+  "cases": [
+    {
+      "id": "complete-grounded-card",
+      "deductions": [],
+      "expected_raw_total": 100,
+      "expected_passed": true
+    },
+    {
+      "id": "missing-action-plan",
+      "deductions": [
+        {
+          "dimension": "actionability",
+          "points": 12,
+          "rule": "A_NONE",
+          "severity": "major",
+          "body_locator": "行动帮助缺失处",
+          "reason": "需要行动的核心主题没有可执行方案",
+          "evidence": "card_plan.useful_deliverable",
+          "missing_content": "需要给出能开始执行的具体步骤和验收方法",
+          "impact_reason": "核心交付物整体缺失"
+        }
+      ],
+      "expected_raw_total": 88,
+      "expected_passed": false
+    },
+    {
+      "id": "required-search-produced-no-source",
+      "deductions": [],
+      "required_search": true,
+      "verified_source_count": 0,
+      "expected_raw_total": 96,
+      "expected_passed": false,
+      "expected_program_rule": "A_SEARCH_MISSING"
+    }
+  ]
+}

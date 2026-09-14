@@ -33,6 +33,12 @@ from audio_memory.models import AnalysisJob, AnalysisVersion, AsrFileTask, Batch
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.prompts.store import PromptStore
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.beta8_composer import Beta8PromptComposer
+from audio_memory.analysis.pipeline_identity import build_pipeline_parameters
+from audio_memory.analysis.task_coordinator import (
+    AnalysisTaskCoordinator,
+    RetryAnalysisResult,
+)
 from audio_memory.power.sleep_prevention import SleepPreventionManager
 from audio_memory.repositories import AppSettingsRepository
 from audio_memory.analysis.task_coordinator import AlreadyRunningError
@@ -56,9 +62,17 @@ class ResumableCloudAsrCoordinator:
     def __init__(self):
         self.called = asyncio.Event()
 
-    async def run_job(self, *, job_id, analysis_request, analysis_submitter):
+    async def run_job(
+        self,
+        *,
+        job_id,
+        analysis_request,
+        analysis_submitter,
+        reconcile_unknown_submissions=False,
+    ):
         self.job_id = job_id
         self.analysis_request = analysis_request
+        self.reconcile_unknown_submissions = reconcile_unknown_submissions
         self.called.set()
         return "analyzing"
 
@@ -86,12 +100,12 @@ class RetryTaskCoordinator:
             priority=0,
         )
         self.called.set()
-        return SimpleNamespace(id="resumed-version")
+        return RetryAnalysisResult(status="resumed", version_id="resumed-version")
 
 
 class AlreadyRunningRetryTaskCoordinator(RetryTaskCoordinator):
     async def retry_failed_upload_in_place(self, **_kwargs):
-        return None
+        return RetryAnalysisResult(status="no_prior")
 
     async def submit_new_upload(self, _analysis_request):
         raise AlreadyRunningError("Analysis is already pending or running")
@@ -347,6 +361,23 @@ async def test_job_api_projects_safe_durable_analysis_detail_phase(job_client):
             worker_owner_id="worker-1",
             lease_expires_at="2099-01-01T00:00:00+00:00",
             pipeline_checkpoints_json='{"report_phase":"auditing"}',
+            pipeline_metrics_json=json.dumps({
+                "run_id": "run-live",
+                "model_call_count": 2,
+                "new_model_call_count": 2,
+                "stage_durations_ms": {"event_index": 125},
+                "search_input_tokens": None,
+                "search_output_tokens": None,
+                "run_search_input_tokens": None,
+                "run_search_output_tokens": None,
+                "search_token_usage_unavailable_reason": (
+                    "native search provider response omitted usage"
+                ),
+                "search_model_response_count": 2,
+                "web_search_tool_call_count": 1,
+                "run_search_model_response_count": 2,
+                "run_web_search_tool_call_count": 1,
+            }),
         ))
         await session.commit()
 
@@ -354,6 +385,17 @@ async def test_job_api_projects_safe_durable_analysis_detail_phase(job_client):
 
     assert response.status_code == 200
     assert response.json()["analysis_detail_phase"] == "auditing"
+    assert response.json()["analysis_metrics"]["run_id"] == "run-live"
+    assert response.json()["analysis_metrics"]["stage_durations_ms"] == {
+        "event_index": 125
+    }
+    assert response.json()["analysis_metrics"]["search_input_tokens"] is None
+    assert response.json()["analysis_metrics"]["search_output_tokens"] is None
+    assert response.json()["analysis_metrics"][
+        "search_token_usage_unavailable_reason"
+    ] == "native search provider response omitted usage"
+    assert response.json()["analysis_metrics"]["search_model_response_count"] == 2
+    assert response.json()["analysis_metrics"]["web_search_tool_call_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -375,6 +417,33 @@ async def test_job_api_never_claims_model_running_without_a_version(job_client):
 
     assert response.status_code == 200
     assert response.json()["analysis_phase"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_job_api_keeps_the_failed_run_metrics_visible(job_client):
+    client, _, database = job_client
+    job_id = str(uuid4())
+    async with database.session() as session:
+        session.add(AnalysisJob(
+            id=job_id,
+            stage=JobStage.FAILED.value,
+            error_code="analysis_provider_failed",
+        ))
+        session.add(AnalysisVersion(
+            id=str(uuid4()), source_job_id=job_id, batch_id=None,
+            provider_id="deepseek", model_id="deepseek-v4-pro",
+            credential_generation=1, prompt_snapshot_json="{}",
+            profile_snapshot_json="[]", fixed_rules_hash="f" * 64,
+            staged_results_json="{}", status="failed",
+            pipeline_metrics_json=json.dumps({"run_id": "run-failed"}),
+        ))
+        await session.commit()
+
+    response = await client.get(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["analysis_phase"] == "failed"
+    assert response.json()["analysis_metrics"]["run_id"] == "run-failed"
 
 
 @pytest.mark.asyncio
@@ -653,7 +722,15 @@ async def test_resume_rejects_truncated_source_audio_before_claiming_success(
 
 
 @pytest.mark.asyncio
-async def test_failed_cloud_asr_resumes_from_local_sources(job_client):
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "cloud_asr_failed",
+        "cloud_asr_submission_unknown",
+        "transcript_finalize_failed",
+    ],
+)
+async def test_failed_cloud_asr_resumes_from_local_sources(job_client, error_code):
     client, paths, database = job_client
     job_id = (await client.post("/api/jobs")).json()["id"]
     source = paths.staging / job_id / "source.mp3"
@@ -663,7 +740,7 @@ async def test_failed_cloud_asr_resumes_from_local_sources(job_client):
     async with database.session() as session:
         job = await session.get(AnalysisJob, job_id)
         job.stage = JobStage.FAILED.value
-        job.error_code = "cloud_asr_failed"
+        job.error_code = error_code
         job.provider_id = "deepseek"
         job.model_id = "deepseek-v4-flash"
         session.add(JobFile(
@@ -689,6 +766,7 @@ async def test_failed_cloud_asr_resumes_from_local_sources(job_client):
     assert response.status_code == 202
     assert response.json()["stage"] == JobStage.TRANSCRIBING.value
     assert cloud_asr.job_id == job_id
+    assert cloud_asr.reconcile_unknown_submissions is True
     async with database.session() as session:
         resumed = await session.get(AnalysisJob, job_id)
         assert resumed.stage == JobStage.TRANSCRIBING.value
@@ -864,6 +942,110 @@ async def test_analyzing_job_with_failed_durable_version_can_retry(job_client):
 
     assert response.status_code == 202
     assert task_coordinator.method == "resume"
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_fingerprintless_indexed_identity_without_fallback(
+    job_client,
+) -> None:
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "model_analysis_failed"
+        session.add(AnalysisVersion(
+            id="invalid-indexed-version", source_job_id=job_id,
+            provider_id="deepseek", model_id="deepseek-v4-flash",
+            credential_generation=8, prompt_snapshot_json="{}",
+            profile_snapshot_json="[]",
+            fixed_rules_hash=Beta8PromptComposer.fixed_rules_hash(),
+            staged_results_json="{}",
+            pipeline_parameters_json=json.dumps({
+                "pipeline_kind": "beta8_indexed_scene_v2"
+            }),
+            status="failed", error_code="model_analysis_failed",
+        ))
+        await session.commit()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_task_coordinator = AnalysisTaskCoordinator(
+        database
+    )
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "invalid_pipeline_identity"
+    async with database.session() as session:
+        versions = list(await session.scalars(
+            select(AnalysisVersion).where(AnalysisVersion.source_job_id == job_id)
+        ))
+    assert [version.id for version in versions] == ["invalid-indexed-version"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_retry_preserves_valid_indexed_pipeline_and_search_binding(
+    job_client,
+) -> None:
+    client, _, database = job_client
+    job_id = (await client.post("/api/jobs")).json()["id"]
+    parameters, parameters_json, parameters_hash = build_pipeline_parameters(
+        pipeline_kind="beta8_indexed_scene_v2",
+        provider_id="deepseek",
+        model_id="deepseek-v4-flash",
+        credential_generation=8,
+        search_provider_id="frozen-search",
+        search_model_id="frozen-search-model",
+    )
+    parameters["fixed_rules_hash"] = "1" * 64
+    parameters["prompt_manifest"] = [
+        {"prompt_id": "event_index", "sha256": "2" * 64}
+    ]
+    parameters_json = json.dumps(
+        parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    parameters_hash = hashlib.sha256(parameters_json.encode()).hexdigest()
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, job_id)
+        job.stage = JobStage.FAILED.value
+        job.error_code = "model_analysis_failed"
+        session.add(AnalysisVersion(
+            id="old-indexed-version", source_job_id=job_id,
+            provider_id="deepseek", model_id="deepseek-v4-flash",
+            credential_generation=8, prompt_snapshot_json="{}",
+            profile_snapshot_json="[]",
+            fixed_rules_hash=parameters["fixed_rules_hash"],
+            staged_results_json="{}", pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=parameters_hash,
+            status="failed", error_code="model_analysis_failed",
+        ))
+        await session.commit()
+    client._transport.app.state.provider_coordinator = RetryCoordinator()
+    client._transport.app.state.analysis_task_coordinator = AnalysisTaskCoordinator(
+        database
+    )
+    prompt_store = PromptStore(client._transport.app.state.upload_service.paths.prompts)
+    prompt_store.initialize()
+    client._transport.app.state.prompt_store = prompt_store
+    client._transport.app.state.database = database
+    client._transport.app.state.transcription_tasks = {}
+
+    response = await client.post(f"/api/jobs/{job_id}/retry-analysis")
+
+    assert response.status_code == 202
+    async with database.session() as session:
+        versions = list(await session.scalars(
+            select(AnalysisVersion)
+            .where(AnalysisVersion.source_job_id == job_id)
+            .order_by(AnalysisVersion.created_at)
+        ))
+    assert len(versions) == 2
+    fresh_parameters = json.loads(versions[-1].pipeline_parameters_json)
+    assert fresh_parameters["pipeline_kind"] == "beta8_indexed_scene_v2"
+    assert fresh_parameters["search_provider_id"] == "frozen-search"
+    assert fresh_parameters["search_model_id"] == "frozen-search-model"
+    assert fresh_parameters["fixed_rules_hash"] == Beta8PromptComposer.fixed_rules_hash()
 
 
 @pytest.mark.asyncio

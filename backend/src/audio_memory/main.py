@@ -53,11 +53,23 @@ from audio_memory.power.sleep_prevention import SleepPreventionManager
 from audio_memory.uploads.cleanup import cleanup_abandoned_uploads
 from audio_memory.uploads.service import UploadService
 from audio_memory.transcription.checkpoints import TranscriptionService
-from audio_memory.transcription.engine import MLXWhisperEngine
 from audio_memory.transcription.eta import TranscriptionEtaTracker
 from audio_memory.transcription.risk_service import TranscriptionRiskGateService
 from audio_memory.prompts.store import PromptStore
 from audio_memory.analysis.single_report_runner import SingleReportRunner
+from audio_memory.analysis.beta8_runner import Beta8ReportRunner
+from audio_memory.analysis.beta8_writing_runner import Beta8WritingRunner
+from audio_memory.analysis.beta8_p1_p5_runner import Beta8P1P5Runner
+from audio_memory.analysis.beta8_writing_transport import WritingTransport
+from audio_memory.analysis.beta8_search import Beta8SearchExecutor
+from audio_memory.analysis.version_runner_router import (
+    BETA8_INDEXED_PIPELINE_KIND,
+    BETA8_P1_P5_PIPELINE_KIND,
+    BETA8_WRITING_PIPELINE_KIND,
+    BETA8_LEGACY_PIPELINE_KIND,
+    SINGLE_REPORT_PIPELINE_KIND,
+    VersionRunnerRouter,
+)
 from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
 from audio_memory.analysis.provider import (
     ProviderAnalysisClient,
@@ -87,6 +99,7 @@ def create_app(
     frontend_dir: Path | None = None,
     local_port: int | None = None,
     environment_label: str | None = None,
+    validate_connections_on_startup: bool = True,
 ) -> FastAPI:
     base_runtime_config = runtime_config or RuntimeConfig.from_environment(
         home=Path.home(),
@@ -98,6 +111,13 @@ def create_app(
     )
     resolved_paths = resolved_runtime_config.paths
     resolved_port = resolved_runtime_config.port
+    if (
+        not validate_connections_on_startup
+        and resolved_runtime_config.profile is not AppProfile.DEVELOPMENT
+    ):
+        raise ValueError(
+            "validate_connections_on_startup=False is only allowed in development"
+        )
     resolved_frontend = frontend_dir or (
         Path(__file__).resolve().parents[3] / "prototype" / "dist" / "client"
     )
@@ -122,7 +142,6 @@ def create_app(
         instance_lock: InstanceLock | None = None
         database: Database | None = None
         provider_clients: list[httpx.AsyncClient] = []
-        whisper_engine: MLXWhisperEngine | None = None
         try:
             if resolved_runtime_config.profile is AppProfile.DEVELOPMENT:
                 development_boundary = PinnedDevelopmentRoot.open(
@@ -179,14 +198,6 @@ def create_app(
                 eta_tracker=eta_tracker,
                 write_boundary=development_boundary,
             )
-            whisper_engine = MLXWhisperEngine(
-                database,
-                resolved_paths,
-                runtime_profile=resolved_runtime_config.profile,
-                eta_tracker=eta_tracker,
-                write_boundary=development_boundary,
-            )
-            app.state.whisper_engine = whisper_engine
             transcription_service = TranscriptionService(
                 database,
                 eta_tracker=eta_tracker,
@@ -284,14 +295,55 @@ def create_app(
                 resolved_paths,
                 write_boundary=development_boundary,
             )
-            analysis_runner = SingleReportRunner(
+            single_report_runner = SingleReportRunner(
                 database=database,
                 provider=analysis_client,
                 publisher=analysis_publisher,
                 generation_source=coordinator,
             )
-            await coordinator.initialize()
-            await asr_coordinator.validate_saved()
+            beta8_search_executor = Beta8SearchExecutor(
+                analysis_client,
+                provider_id=resolved_runtime_config.beta8_search_provider,
+                model_id=resolved_runtime_config.beta8_search_model,
+            )
+            beta8_report_runner = Beta8ReportRunner(
+                database=database,
+                provider=analysis_client,
+                publisher=analysis_publisher,
+                generation_source=coordinator,
+                search_executor=beta8_search_executor,
+            )
+            beta8_writing_runner = Beta8WritingRunner(
+                database=database,
+                transport=WritingTransport(keychain_repository, analysis_http_client),
+                generation_source=coordinator,
+                output_root=resolved_paths.runtime / "beta8-writing-v1",
+                write_boundary=development_boundary,
+                enabled=resolved_runtime_config.profile is AppProfile.DEVELOPMENT,
+            )
+            beta8_p1_p5_runner = Beta8P1P5Runner(
+                database=database,
+                transport=WritingTransport(keychain_repository, analysis_http_client),
+                publisher=analysis_publisher,
+                generation_source=coordinator,
+                output_root=resolved_paths.runtime / "beta8-p1-p5-v1",
+                write_boundary=development_boundary,
+            )
+            analysis_runner = VersionRunnerRouter(
+                database=database,
+                runners={
+                    SINGLE_REPORT_PIPELINE_KIND: single_report_runner,
+                    BETA8_LEGACY_PIPELINE_KIND: beta8_report_runner,
+                    BETA8_INDEXED_PIPELINE_KIND: beta8_report_runner,
+                    BETA8_WRITING_PIPELINE_KIND: beta8_writing_runner,
+                    BETA8_P1_P5_PIPELINE_KIND: beta8_p1_p5_runner,
+                },
+            )
+            await coordinator.initialize(
+                validate_credentials=validate_connections_on_startup
+            )
+            if validate_connections_on_startup:
+                await asr_coordinator.validate_saved()
             analysis_tasks = AnalysisTaskCoordinator(
                 database,
                 reclaim_foreign_on_initialize=True,
@@ -307,6 +359,9 @@ def create_app(
             await reanalysis_worker.start()
             await analysis_tasks.start(analysis_runner)
             app.state.analysis_runner = analysis_runner
+            app.state.single_report_runner = single_report_runner
+            app.state.beta8_report_runner = beta8_report_runner
+            app.state.beta8_writing_runner = beta8_writing_runner
             app.state.analysis_task_coordinator = analysis_tasks
             app.state.reanalysis_worker = reanalysis_worker
             app.state.reanalysis_service = ReanalysisService(
@@ -339,9 +394,10 @@ def create_app(
                 task_coordinator=analysis_tasks,
                 write_boundary=development_boundary,
             )
-            app.state.managed_storage_startup_task = asyncio.create_task(
-                storage_runtime.ensure_ready()
-            )
+            if validate_connections_on_startup:
+                app.state.managed_storage_startup_task = asyncio.create_task(
+                    storage_runtime.ensure_ready()
+                )
             yield
         finally:
             managed_storage_task = getattr(
@@ -364,8 +420,6 @@ def create_app(
                 await asyncio.gather(
                     *app.state.transcription_tasks.values(), return_exceptions=True
                 )
-            if whisper_engine is not None:
-                await whisper_engine.close()
             sleep_prevention = getattr(app.state, "sleep_prevention", None)
             if sleep_prevention is not None:
                 await sleep_prevention.close()

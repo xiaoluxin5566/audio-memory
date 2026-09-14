@@ -24,6 +24,69 @@ def test_runtime_config_preserves_production_defaults(tmp_path: Path) -> None:
     assert config.paths.models == config.paths.root / "models"
     assert config.port == 8765
     assert config.keychain_service == "Audio Memory"
+    assert config.report_pipeline == "beta8_p1_p5_v1"
+    assert config.beta8_search_provider == "kimi"
+    assert config.beta8_search_model == "kimi-k2.6"
+
+
+def test_runtime_config_accepts_beta8_pipeline_and_independent_search(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home", project_root=tmp_path / "repo",
+        environ={
+            "AUDIO_MEMORY_REPORT_PIPELINE": "beta8_multi_scene_v1",
+            "AUDIO_MEMORY_BETA8_SEARCH_PROVIDER": "kimi",
+            "AUDIO_MEMORY_BETA8_SEARCH_MODEL": "kimi-k3",
+        },
+    )
+    assert config.report_pipeline == "beta8_multi_scene_v1"
+    assert config.beta8_search_provider == "kimi"
+    assert config.beta8_search_model == "kimi-k3"
+
+
+def test_runtime_config_accepts_indexed_beta8_pipeline(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={"AUDIO_MEMORY_REPORT_PIPELINE": "beta8_indexed_scene_v2"},
+    )
+
+    assert config.report_pipeline == "beta8_indexed_scene_v2"
+
+
+def test_runtime_config_accepts_p1_p5_beta8_pipeline(tmp_path: Path) -> None:
+    config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "repo",
+        environ={"AUDIO_MEMORY_REPORT_PIPELINE": "beta8_p1_p5_v1"},
+    )
+
+    assert config.report_pipeline == "beta8_p1_p5_v1"
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {"AUDIO_MEMORY_BETA8_SEARCH_PROVIDER": "kimi"},
+        {"AUDIO_MEMORY_BETA8_SEARCH_MODEL": "kimi-k3"},
+    ],
+)
+def test_runtime_config_rejects_half_specified_beta8_search_binding(
+    tmp_path: Path, environ: dict[str, str]
+) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="must be configured together"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home",
+            project_root=tmp_path / "repo",
+            environ=environ,
+        )
+
+
+def test_runtime_config_rejects_unknown_report_pipeline(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="AUDIO_MEMORY_REPORT_PIPELINE"):
+        RuntimeConfig.from_environment(
+            home=tmp_path / "home", project_root=tmp_path / "repo",
+            environ={"AUDIO_MEMORY_REPORT_PIPELINE": "future"},
+        )
 
 
 def test_runtime_config_uses_data_root_override_for_default_model_root(

@@ -14,7 +14,26 @@ function validateConfiguredProvidersOnce() {
 }
 
 
-export function useProviders() {
+export function isWritingV1Preview(search = '') {
+  return new URLSearchParams(search).get('writingV1Preview') === '1'
+}
+
+
+export async function loadInitialProviderState({
+  refresh,
+  poll,
+  autoValidate = true,
+  validate = validateConfiguredProvidersOnce,
+  isCancelled = () => false,
+}) {
+  await refresh()
+  if (isCancelled()) return
+  if (autoValidate) await validate()
+  if (!isCancelled()) await poll()
+}
+
+
+export function useProviders({ autoValidate = true } = {}) {
   const [providerState, setProviderState] = useState(() => normalizeProviders({ providers: [] }))
   const [loading, setLoading] = useState(true)
 
@@ -41,15 +60,13 @@ export function useProviders() {
     }
     const loadInitialState = async () => {
       try {
-        await refresh()
-        await validateConfiguredProvidersOnce()
-        await poll()
+        await loadInitialProviderState({ refresh, poll, autoValidate, isCancelled: () => cancelled })
       } catch {
         if (!cancelled) setLoading(false)
       }
     }
     loadInitialState()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [refresh])
+  }, [refresh, autoValidate])
   return { ...providerState, loading, refresh }
 }

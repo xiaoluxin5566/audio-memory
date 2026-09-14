@@ -26,26 +26,9 @@ def service_from(request: Request):
     return request.app.state.reanalysis_service
 
 
-@router.get("/preview")
-async def preview_reanalysis(
-    request: Request,
-    source_batch_ids: list[str] | None = Query(default=None),
-) -> dict[str, object]:
-    try:
-        preview = await service_from(request).preview(
-            None if source_batch_ids is None else tuple(source_batch_ids)
-        )
-    except ReanalysisSourceSelectionError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
-    except LookupError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "provider_unavailable", "message": str(exc)},
-        ) from exc
+def _preview_payload(preview) -> dict[str, object]:
     return {
+        "pipeline_kind": preview.snapshot.pipeline_kind,
         "source_batch_ids": list(preview.source_batch_ids),
         "source_batch_count": preview.source_batch_count,
         "audio_file_count": preview.audio_file_count,
@@ -67,6 +50,40 @@ async def preview_reanalysis(
         "snapshot_hash": preview.snapshot_hash,
         "expires_at": preview.expires_at,
     }
+
+
+@router.get("/preview")
+async def preview_reanalysis(
+    request: Request,
+    source_batch_ids: list[str] | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        preview = await service_from(request).preview(
+            None if source_batch_ids is None else tuple(source_batch_ids)
+        )
+    except ReanalysisSourceSelectionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "provider_unavailable", "message": str(exc)},
+        ) from exc
+    return _preview_payload(preview)
+
+
+@router.get("/preview-options")
+async def preview_reanalysis_options(request: Request) -> dict[str, object]:
+    try:
+        previews = await service_from(request).preview_options()
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "provider_unavailable", "message": str(exc)},
+        ) from exc
+    return {"groups": [_preview_payload(preview) for preview in previews]}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

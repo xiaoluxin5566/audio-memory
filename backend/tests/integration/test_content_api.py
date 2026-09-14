@@ -175,6 +175,92 @@ async def test_feed_exposes_safe_card_evidence_and_audio_supports_ranges(
 
 
 @pytest.mark.asyncio
+async def test_writing_v1_cards_use_their_own_payload_evidence_in_shared_scene(
+    content_client,
+) -> None:
+    client, _, database, fixture_ids = content_client
+    second_card_id = str(uuid4())
+    async with database.session() as session:
+        first_card = await session.get(Card, fixture_ids["card_id"])
+        batch = await session.get(Batch, fixture_ids["batch_id"])
+        assert first_card is not None
+        assert batch is not None
+        version = await session.get(AnalysisVersion, batch.current_analysis_version_id)
+        file = await session.scalar(
+            select(JobFile).where(JobFile.job_id == batch.job_id)
+        )
+        assert version is not None
+        assert file is not None
+        first_shell = {"title": "第一张", "evidence_segment_ids": ["seg_0_0"]}
+        second_shell = {"title": "第二张", "evidence_segment_ids": ["seg_0_2"]}
+        first_card.payload_json = json.dumps(
+            {"writingV1": True, "cards": [first_shell]}, ensure_ascii=False
+        )
+        session.add(
+            Transcript(
+                id=str(uuid4()),
+                job_file_id=file.id,
+                segment_index=2,
+                start_ms=2000,
+                end_ms=3000,
+                text="第二张卡的独立证据",
+                words_json="[]",
+                risk_classified=True,
+                is_reliable=True,
+            )
+        )
+        session.add(
+            Card(
+                id=second_card_id,
+                batch_id=batch.id,
+                analysis_version_id=version.id,
+                scene_id="meeting",
+                position=1,
+                payload_json=json.dumps(
+                    {"writingV1": True, "cards": [second_shell]}, ensure_ascii=False
+                ),
+            )
+        )
+        version.staged_results_json = json.dumps(
+            {"meeting": {"cards": [first_shell, second_shell]}},
+            ensure_ascii=False,
+        )
+        await session.commit()
+
+    feed = (await client.get("/api/feed")).json()
+    cards = {
+        card["id"]: card
+        for day in feed["days"]
+        for card in day["cards"]
+    }
+
+    assert [
+        item["segment_id"] for item in cards[fixture_ids["card_id"]]["evidence"][0]["segments"]
+    ] == ["seg_0_0"]
+    assert cards[fixture_ids["card_id"]]["evidence"][0]["card_index"] == 0
+    assert [
+        item["segment_id"] for item in cards[second_card_id]["evidence"][0]["segments"]
+    ] == ["seg_0_2"]
+    assert cards[second_card_id]["evidence"][0]["card_index"] == 0
+
+    first_audio = await client.get(
+        f"/api/cards/{fixture_ids['card_id']}/evidence/seg_0_0/audio",
+        headers={"Range": "bytes=0-3"},
+    )
+    second_audio = await client.get(
+        f"/api/cards/{second_card_id}/evidence/seg_0_2/audio",
+        headers={"Range": "bytes=0-3"},
+    )
+    cross_card_audio = await client.get(
+        f"/api/cards/{fixture_ids['card_id']}/evidence/seg_0_2/audio"
+    )
+
+    assert first_audio.status_code == 206
+    assert second_audio.status_code == 206
+    assert cross_card_audio.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_unclassified_legacy_transcript_hides_derived_content_and_blocks_qa(
     content_client,
 ) -> None:

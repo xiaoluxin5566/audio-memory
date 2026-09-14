@@ -45,8 +45,10 @@ class ProviderAnalysisError(RuntimeError):
         retriable: bool = False,
         code: str = "model_analysis_failed",
         pause_batch: bool = False,
+        partial_response: str | None = None,
     ) -> None:
         super().__init__(message)
         self.retriable = retriable
         self.code = code
         self.pause_batch = pause_batch
+        self.partial_response = partial_response

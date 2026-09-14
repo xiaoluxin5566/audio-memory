@@ -22,6 +22,11 @@ from audio_memory.models import (
     ReanalysisItem,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.beta8_composer import Beta8PromptComposer
+from audio_memory.analysis.pipeline_identity import (
+    InvalidPipelineIdentityError,
+    build_pipeline_parameters,
+)
 
 
 def request(job_id: str, *, batch_id: str | None, priority: int) -> AnalysisRequest:
@@ -41,6 +46,91 @@ async def seed_jobs(database: Database, *job_ids: str) -> None:
     async with database.session() as session:
         session.add_all(AnalysisJob(id=job_id, stage="analyzing") for job_id in job_ids)
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_beta8_request_freezes_pipeline_and_independent_search_snapshot(tmp_path) -> None:
+    database = Database(tmp_path / "beta8-snapshot.sqlite3")
+    await database.create_schema(); await seed_jobs(database, "job-1")
+    coordinator = AnalysisTaskCoordinator(database)
+    version_id = await coordinator.submit_new_upload(replace(
+        request("job-1", batch_id=None, priority=0),
+        pipeline_kind="beta8_multi_scene_v1",
+        search_provider_id="kimi", search_model_id="kimi-k3",
+    ))
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, version_id)
+    parameters = json.loads(version.pipeline_parameters_json)
+    assert parameters["pipeline_kind"] == "beta8_multi_scene_v1"
+    assert parameters["search_provider_id"] == "kimi"
+    assert parameters["search_model_id"] == "kimi-k3"
+    assert parameters["fixed_rules_hash"] == Beta8PromptComposer.fixed_rules_hash()
+    assert parameters["prompt_manifest"] == [
+        {"prompt_id": item["prompt_id"], "sha256": item["sha256"]}
+        for item in Beta8PromptComposer.prompt_manifest()
+    ]
+    claimed = await coordinator.next_request()
+    assert claimed.pipeline_kind == "beta8_multi_scene_v1"
+    assert claimed.search_provider_id == "kimi"
+    assert claimed.search_model_id == "kimi-k3"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_indexed_beta8_request_freezes_new_pipeline_identity(tmp_path) -> None:
+    database = Database(tmp_path / "indexed-beta8-snapshot.sqlite3")
+    await database.create_schema(); await seed_jobs(database, "job-1")
+    coordinator = AnalysisTaskCoordinator(database)
+    version_id = await coordinator.submit_new_upload(replace(
+        request("job-1", batch_id=None, priority=0),
+        pipeline_kind="beta8_indexed_scene_v2",
+        search_provider_id="kimi", search_model_id="kimi-k3",
+    ))
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, version_id)
+    parameters = json.loads(version.pipeline_parameters_json)
+    assert parameters["pipeline_kind"] == "beta8_indexed_scene_v2"
+    assert parameters["fixed_rules_hash"] == Beta8PromptComposer.fixed_rules_hash()
+    assert parameters["prompt_manifest"] == [
+        {"prompt_id": item["prompt_id"], "sha256": item["sha256"]}
+        for item in Beta8PromptComposer.prompt_manifest()
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_pipeline_kind_is_rejected_before_version_creation(tmp_path) -> None:
+    database = Database(tmp_path / "unknown-pipeline.sqlite3")
+    await database.create_schema(); await seed_jobs(database, "job-1")
+    coordinator = AnalysisTaskCoordinator(database)
+    with pytest.raises(ValueError, match="Unknown report pipeline"):
+        await coordinator.submit_new_upload(replace(
+            request("job-1", batch_id=None, priority=0), pipeline_kind="future"
+        ))
+    async with database.session() as session:
+        versions = list(await session.scalars(select(AnalysisVersion)))
+    assert versions == []
+    await database.dispose()
+
+
+@pytest.mark.parametrize(
+    ("search_provider_id", "search_model_id"),
+    [("kimi", None), (None, "kimi-k3")],
+)
+def test_pipeline_parameter_builder_rejects_half_search_binding(
+    search_provider_id: str | None,
+    search_model_id: str | None,
+) -> None:
+    with pytest.raises(InvalidPipelineIdentityError, match="configured together"):
+        build_pipeline_parameters(
+            pipeline_kind="beta8_indexed_scene_v2",
+            provider_id="kimi",
+            model_id="kimi-k3",
+            credential_generation=3,
+            search_provider_id=search_provider_id,
+            search_model_id=search_model_id,
+        )
 
 
 async def seed_active_history(
@@ -280,7 +370,7 @@ async def test_new_upload_completion_releases_its_runtime_resources(
     monkeypatch.setattr(
         PromptComposer,
         "final_report_prompt_manifest",
-        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+        lambda: [{"role": "generation", "files": ["generation.md"], "sha256": "a" * 64}],
     )
 
     async def release(job_id: str) -> None:
@@ -324,7 +414,7 @@ async def test_running_upload_cannot_be_discarded_across_publication_boundary(
     monkeypatch.setattr(
         PromptComposer,
         "final_report_prompt_manifest",
-        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+        lambda: [{"role": "generation", "files": ["generation.md"], "sha256": "a" * 64}],
     )
     running = asyncio.Event()
     finish = asyncio.Event()
@@ -378,7 +468,7 @@ async def test_running_upload_can_be_cancelled_before_publication_and_worker_con
     monkeypatch.setattr(
         PromptComposer,
         "final_report_prompt_manifest",
-        lambda: [{"role": "generation", "files": [], "sha256": "a" * 64}],
+        lambda: [{"role": "generation", "files": ["generation.md"], "sha256": "a" * 64}],
     )
     auditing = asyncio.Event()
     cancelled = asyncio.Event()
@@ -619,9 +709,254 @@ async def test_retry_requeues_legacy_completed_unaudited_version(tmp_path) -> No
     async with database.session() as session:
         version = await session.get(AnalysisVersion, "version-legacy")
         job = await session.get(AnalysisJob, "job-legacy")
-    assert resumed == "version-legacy"
+    assert resumed.status == "resumed"
+    assert resumed.version_id == "version-legacy"
     assert version is not None and version.status == "pending"
     assert job is not None and job.stage == "analyzing"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_requeues_failed_beta8_version_without_changing_pipeline_kind(tmp_path) -> None:
+    database = Database(tmp_path / "beta8-retry.sqlite3")
+    await database.create_schema()
+    parameters, parameters_json, parameters_hash = build_pipeline_parameters(
+        pipeline_kind="beta8_multi_scene_v1",
+        provider_id="kimi",
+        model_id="kimi-k3",
+        credential_generation=3,
+        search_provider_id=None,
+        search_model_id=None,
+    )
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-beta8", stage="failed", error_code="model_analysis_failed"))
+        session.add(AnalysisVersion(
+            id="version-beta8", source_job_id="job-beta8", provider_id="kimi",
+            model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash=parameters["fixed_rules_hash"],
+            staged_results_json="{}",
+            pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=parameters_hash,
+            status="failed",
+        ))
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+    resumed = await coordinator.retry_failed_upload_in_place(
+        source_job_id="job-beta8", provider_id="kimi", model_id="kimi-k3",
+        credential_generation=3,
+    )
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-beta8")
+    assert resumed.status == "resumed"
+    assert resumed.version_id == "version-beta8"
+    assert version.status == "pending"
+    assert json.loads(version.pipeline_parameters_json)["pipeline_kind"] == "beta8_multi_scene_v1"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_requeues_failed_indexed_beta8_without_treating_it_as_legacy(tmp_path) -> None:
+    database = Database(tmp_path / "indexed-beta8-retry.sqlite3")
+    await database.create_schema()
+    parameters, parameters_json, parameters_hash = build_pipeline_parameters(
+        pipeline_kind="beta8_indexed_scene_v2",
+        provider_id="kimi",
+        model_id="kimi-k3",
+        credential_generation=3,
+        search_provider_id=None,
+        search_model_id=None,
+    )
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-beta8", stage="failed", error_code="model_analysis_failed"))
+        session.add(AnalysisVersion(
+            id="version-beta8", source_job_id="job-beta8", provider_id="kimi",
+            model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash=parameters["fixed_rules_hash"],
+            staged_results_json="{}",
+            pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=parameters_hash,
+            status="failed",
+        ))
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+
+    resumed = await coordinator.retry_failed_upload_in_place(
+        source_job_id="job-beta8", provider_id="kimi", model_id="kimi-k3",
+        credential_generation=3,
+    )
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-beta8")
+    assert resumed.status == "resumed"
+    assert resumed.version_id == "version-beta8"
+    assert version.status == "pending"
+    assert json.loads(version.pipeline_parameters_json)["pipeline_kind"] == "beta8_indexed_scene_v2"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_requires_fresh_version_for_valid_previous_prompt_binding(
+    tmp_path,
+) -> None:
+    from hashlib import sha256
+
+    database = Database(tmp_path / "old-modern-binding.sqlite3")
+    await database.create_schema()
+    parameters = {
+        "pipeline_kind": "beta8_indexed_scene_v2",
+        "provider_id": "kimi",
+        "model_id": "kimi-k3",
+        "search_provider_id": "frozen-search",
+        "search_model_id": "frozen-search-model",
+        "credential_generation": 3,
+        "fixed_rules_hash": "1" * 64,
+        "prompt_manifest": [{"prompt_id": "event_index", "sha256": "2" * 64}],
+    }
+    parameters_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-old-binding", stage="failed"))
+        session.add(AnalysisVersion(
+            id="version-old-binding", source_job_id="job-old-binding",
+            provider_id="kimi", model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash="1" * 64, staged_results_json="{}",
+            pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=sha256(parameters_json.encode()).hexdigest(),
+            status="failed",
+        ))
+        await session.commit()
+
+    result = await AnalysisTaskCoordinator(database).retry_failed_upload_in_place(
+        source_job_id="job-old-binding", provider_id="kimi", model_id="kimi-k3",
+        credential_generation=3,
+    )
+
+    assert result.status == "fresh_required"
+    assert result.identity is not None
+    assert result.identity.pipeline_kind == "beta8_indexed_scene_v2"
+    assert result.identity.search_provider_id == "frozen-search"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-old-binding")
+    assert version is not None and version.status == "failed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_requires_fresh_version_for_old_fingerprintless_beta8_binding(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "old-beta8-binding.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-old-beta8", stage="failed"))
+        session.add(AnalysisVersion(
+            id="version-old-beta8", source_job_id="job-old-beta8",
+            provider_id="kimi", model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash="1" * 64, staged_results_json="{}",
+            pipeline_parameters_json=json.dumps({
+                "pipeline_kind": "beta8_multi_scene_v1",
+                "search_provider_id": "frozen-search",
+                "search_model_id": "frozen-search-model",
+            }),
+            status="failed",
+        ))
+        await session.commit()
+
+    result = await AnalysisTaskCoordinator(database).retry_failed_upload_in_place(
+        source_job_id="job-old-beta8", provider_id="kimi", model_id="kimi-k3",
+        credential_generation=3,
+    )
+
+    assert result.status == "fresh_required"
+    assert result.identity is not None
+    assert result.identity.pipeline_kind == "beta8_multi_scene_v1"
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-old-beta8")
+    assert version is not None and version.status == "failed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_empty_modern_prompt_manifest(tmp_path) -> None:
+    from hashlib import sha256
+
+    database = Database(tmp_path / "retry-empty-modern-manifest.sqlite3")
+    await database.create_schema()
+    parameters, _parameters_json, _fingerprint = build_pipeline_parameters(
+        pipeline_kind="beta8_indexed_scene_v2",
+        provider_id="kimi",
+        model_id="kimi-k3",
+        credential_generation=3,
+        search_provider_id=None,
+        search_model_id=None,
+    )
+    parameters["prompt_manifest"] = []
+    parameters_json = json.dumps(
+        parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    async with database.session() as session:
+        session.add(AnalysisJob(id="job-empty-manifest", stage="failed"))
+        session.add(AnalysisVersion(
+            id="version-empty-manifest", source_job_id="job-empty-manifest",
+            provider_id="kimi", model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash=parameters["fixed_rules_hash"],
+            staged_results_json="{}", pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=sha256(
+                parameters_json.encode()
+            ).hexdigest(),
+            status="failed",
+        ))
+        await session.commit()
+
+    with pytest.raises(InvalidPipelineIdentityError, match="must not be empty"):
+        await AnalysisTaskCoordinator(database).retry_failed_upload_in_place(
+            source_job_id="job-empty-manifest",
+            provider_id="kimi",
+            model_id="kimi-k3",
+            credential_generation=3,
+        )
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-empty-manifest")
+    assert version is not None and version.status == "failed"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_does_not_downgrade_non_object_pipeline_parameters(tmp_path) -> None:
+    database = Database(tmp_path / "invalid-pipeline-retry.sqlite3")
+    await database.create_schema()
+    async with database.session() as session:
+        session.add(
+            AnalysisJob(
+                id="job-invalid",
+                stage="failed",
+                error_code="model_analysis_failed",
+            )
+        )
+        session.add(AnalysisVersion(
+            id="version-invalid", source_job_id="job-invalid", provider_id="kimi",
+            model_id="kimi-k3", credential_generation=3,
+            prompt_snapshot_json="{}", profile_snapshot_json="[]",
+            fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+            staged_results_json="{}", pipeline_parameters_json="[]", status="failed",
+        ))
+        await session.commit()
+    coordinator = AnalysisTaskCoordinator(database)
+
+    with pytest.raises(InvalidPipelineIdentityError, match="must be an object"):
+        await coordinator.retry_failed_upload_in_place(
+            source_job_id="job-invalid", provider_id="kimi", model_id="kimi-k3",
+            credential_generation=3,
+        )
+
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-invalid")
+    assert version is not None and version.status == "failed"
     await database.dispose()
 
 

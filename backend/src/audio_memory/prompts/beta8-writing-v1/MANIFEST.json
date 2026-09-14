@@ -1,0 +1,47 @@
+{
+  "version": "beta8-writing-v1-2026-09-09-r2",
+  "prompts": [
+    {
+      "prompt_id": "P1",
+      "sha256": "2fd61c41d1c89c7660f57ec1e273a9c66c8830b4b347c99c58e6487c7ff12f0b"
+    },
+    {
+      "prompt_id": "P2",
+      "sha256": "ca1d93107398947963c5d903d05b2a0c293cc563adb2373c7c36c4355dd87d3d"
+    },
+    {
+      "prompt_id": "P3",
+      "sha256": "fbb55076dfaaf7da37070123cdc6d59f7e0107316e93029fc8f5e21acf768a73"
+    },
+    {
+      "prompt_id": "P4-work_communication",
+      "sha256": "cf4302cecca6fb7efa1f1b27c4466ea7f7f120efc79829615bf0c9e2675d3e59"
+    },
+    {
+      "prompt_id": "P4-parenting_family",
+      "sha256": "af3f279f0614a10b6d996c976d80768602411ce35f9f69dd48ee7117c9612a16"
+    },
+    {
+      "prompt_id": "P4-health_state",
+      "sha256": "883ce6adaf18a58b86393fda4f536d20eb042e0d92819b878f144a1521b892f8"
+    },
+    {
+      "prompt_id": "P4-content_consumption",
+      "sha256": "47be5c6a90bf356fff6eae920181ecf8b0c429fae8195c1a334e5d0f2d003552"
+    },
+    {
+      "prompt_id": "P4-inspiration_insight",
+      "sha256": "1983b118fe19c261cfc63048e83daadd08bace938af2c686246f2466e80d3624"
+    },
+    {
+      "prompt_id": "P4-self_growth",
+      "sha256": "19d91375629ce79045a4f5c37ed69f9198ad7a265362b11bc50d7f0db1c88801"
+    },
+    {
+      "prompt_id": "P4-life_decisions",
+      "sha256": "f197b5ff24fc78f606e5d82a113aea8531ffb2e00e70683c655ce77edfab43e8"
+    }
+  ],
+  "input_template_sha256": "115970ecb31ac1ea50d9533d346ffa892c3b7bb455f5cac8019654a2d9b04c04",
+  "rubric_sha256": "2a0b926869430fbc1b4a6795b14dd5d0371a3fe4a08e4adaac8a6738459510b9"
+}

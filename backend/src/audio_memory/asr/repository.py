@@ -104,6 +104,7 @@ class AsrRepository:
                 return
             task.remote_task_id = remote_task_id
             task.status = "submitted"
+            task.error_code = None
             task.updated_at = utc_now()
             await session.commit()
 

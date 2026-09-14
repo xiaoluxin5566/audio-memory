@@ -757,3 +757,23 @@ def test_adopt_requires_exact_preview_digest_before_writing(
     adopted = service.adopt("legacy", "v0.1.0-beta.3", digest)
     assert adopted.record.status == "in_progress"
     assert service.store.load("legacy") == adopted.record
+
+
+def test_adopt_supports_a_git_registered_external_codex_worktree(
+    git_repository: Path,
+) -> None:
+    feature_id = "external-track"
+    feature_path = git_repository.parent / "codex-worktrees" / feature_id / "repository"
+    git(
+        git_repository,
+        "worktree", "add", "-b", f"codex/{feature_id}",
+        str(feature_path), "main",
+    )
+    service = FeatureService(GitRepository(feature_path))
+
+    record, digest = service.adopt_preview(feature_id, "v0.1.0-beta.3")
+    adopted = service.adopt(feature_id, "v0.1.0-beta.3", digest)
+
+    assert record.worktree == str(feature_path.resolve())
+    assert adopted.path == feature_path.resolve()
+    assert adopted.valid is True

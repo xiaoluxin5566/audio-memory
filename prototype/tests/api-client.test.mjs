@@ -3,6 +3,38 @@ import test from 'node:test'
 
 import { apiRequest } from '../src/api/client.js'
 
+test('reanalysis UI reads grouped options and creates with the selected source IDs', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url, options })
+    if (url === '/api/session') return Response.json({ token: 'selection-session' })
+    if (url === '/api/history/reanalysis-batches/preview-options') {
+      return Response.json({ groups: [] })
+    }
+    if (url === '/api/history/reanalysis-batches') {
+      return Response.json({ id: 'created' }, { status: 201 })
+    }
+    return Response.json({ detail: 'not found' }, { status: 404 })
+  }
+  try {
+    const client = await import(`../src/api/client.js?reanalysis-selection=${Date.now()}`)
+    await client.api.reanalysisPreviewOptions()
+    await client.api.createReanalysis(
+      'selected-token', ['batch-2'], 'selected-reanalysis-action',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(requests[0].url, '/api/history/reanalysis-batches/preview-options')
+  const create = requests.find((request) => request.url === '/api/history/reanalysis-batches')
+  assert.deepEqual(JSON.parse(create.options.body), {
+    preview_token: 'selected-token',
+    source_batch_ids: ['batch-2'],
+  })
+})
+
 
 test('plain-text server failures become readable request errors', async () => {
   const originalFetch = globalThis.fetch
@@ -363,6 +395,11 @@ test('expired XHR upload session refreshes and retries the explicit action key',
     const upload = await import(`../src/api/upload.js?xhr-security=${Date.now()}`)
     const file = new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' })
     await upload.uploadFile('job/unsafe', file, { idempotencyKey: 'upload-retry-key' })
+    assert.equal(requests[0].body.get('file_modified'), String(file.lastModified))
+    assert.equal(
+      requests[0].body.get('timezone'),
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    )
   } finally {
     globalThis.fetch = originalFetch
     globalThis.XMLHttpRequest = OriginalXHR

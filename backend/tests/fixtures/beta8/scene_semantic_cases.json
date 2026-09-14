@@ -1,0 +1,98 @@
+{
+  "cases": [
+    {
+      "case_id": "third_party_case_in_work_meeting",
+      "transcript": "<segment id=\"seg-1\">会议里我讲了一个其他公司员工离职的案例，用来说明我们的产品需要提前识别使用阻力。</segment>",
+      "expected_scene_id": "work_communication",
+      "required_scene_fragments": [
+        "一张卡对应一个具体项目、工作目标或独立工作事件，不对应录音文件或单次会议"
+      ],
+      "shared_instruction_fragments": [
+        "会议中用于支持产品、项目或业务判断的第三方案例，是工作沟通的论据"
+      ],
+      "forbidden_scene_ids": [
+        "self_growth",
+        "health_state"
+      ]
+    },
+    {
+      "case_id": "users_own_state_in_casual_chat",
+      "transcript": "<segment id=\"seg-2\">跟朋友聊天时我说，我发现自己不是真想离职，而是想有权拒绝晚上的临时会；这两周我第一次明确说了不。</segment>",
+      "expected_scene_id": "self_growth",
+      "required_scene_fragments": [
+        "当前只分析本次提供的可靠输入",
+        "观察方法、低负担小实验、沟通或边界尝试"
+      ],
+      "shared_instruction_fragments": [
+        "用户在任何语境中真实表达自己的离职、疲惫、疏离或类似体验"
+      ],
+      "forbidden_scene_ids": [
+        "work_communication"
+      ]
+    },
+    {
+      "case_id": "autoplay_podcast_without_user_response",
+      "transcript": "<segment id=\"seg-3\">车载系统自动播放播客，主播说人应该辞职去旅行，用户没有回应。</segment>",
+      "expected_scene_id": "content_consumption",
+      "required_scene_fragments": [
+        "播放不等于喜欢，单次消费不等于长期偏好"
+      ],
+      "shared_instruction_fragments": [
+        "播客、视频、节目、音乐或自动播放内容必须先与用户自身表达分离"
+      ],
+      "forbidden_scene_ids": [
+        "self_growth",
+        "health_state"
+      ]
+    },
+    {
+      "case_id": "podcast_with_explicit_user_evaluation",
+      "transcript": "<segment id=\"seg-4\">听完后我说，我不同意主播把离职当成唯一解法，因为我现在的约束不一样。</segment>",
+      "expected_scene_id": "content_consumption",
+      "required_scene_fragments": [
+        "用户明确评价、追问、反驳、复述或把内容联系到自己的处境时",
+        "只有可靠确认观点属于用户时，才写成用户的理解、判断或反应"
+      ],
+      "forbidden_scene_ids": [
+        "self_growth",
+        "work_communication"
+      ]
+    },
+    {
+      "case_id": "sustained_fatigue_and_venting",
+      "transcript": "<segment id=\"seg-5\">我已经连续两周下午困得工作不下去，每天下班后还要对同一件事宣泄很久，但没有恢复。</segment>",
+      "expected_scene_id": "health_state",
+      "required_scene_fragments": [
+        "长期吐槽、反复依赖宣泄却没有恢复、持续困倦",
+        "它们不自动等于心理或身体疾病"
+      ]
+    },
+    {
+      "case_id": "parent_child_conflict",
+      "transcript": "<segment id=\"seg-6\">孩子说不想写作业，我们争吵后他哭了，之后一直不说话。</segment>",
+      "expected_scene_id": "parenting_family",
+      "required_scene_fragments": [
+        "分析争吵、哭闹、冷战、回避、规则冲突或沟通失效等实质问题",
+        "建议必须对应当前问题机制，具体说明当下怎样停止升级"
+      ]
+    },
+    {
+      "case_id": "early_but_concrete_idea",
+      "transcript": "<segment id=\"seg-7\">我的想法还没完整：能不能让耳机在用户说‘等下再提醒我’时，自动把当前对话变成带上下文的提醒？</segment>",
+      "expected_scene_id": "inspiration_insight",
+      "required_scene_fragments": [
+        "用户明确提出且有具体内容的想法直接具有保存价值，不因普通、早期或暂不可行而拒绝出卡",
+        "先沿不同用户、场景、产品或服务形态、交互、机制、技术、商业方式、极端情况和跨领域连接充分发散"
+      ]
+    },
+    {
+      "case_id": "life_decision_with_material_unknowns",
+      "transcript": "<segment id=\"seg-8\">我在考虑要不要搬家，但还不知道新工作每周要去公司几天，房东也没确认续租价格。</segment>",
+      "expected_scene_id": "life_decisions",
+      "required_scene_fragments": [
+        "关键事实缺失时给出当前最佳判断，并说明什么结果会改变推荐",
+        "会改变结论时说明需要确认什么以及不同结果分别意味着什么"
+      ]
+    }
+  ]
+}

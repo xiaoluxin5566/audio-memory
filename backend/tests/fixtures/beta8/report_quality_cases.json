@@ -1,0 +1,58 @@
+{
+  "fixture_version": 1,
+  "cases": [
+    {
+      "case_id": "single_communication_multiple_topics",
+      "global_expectations": ["one communication event remains one work-communication card", "multiple topics are organized inside the card"]
+    },
+    {
+      "case_id": "same_project_separate_communications",
+      "global_expectations": ["separate communication events are not merged merely because their project is the same"]
+    },
+    {
+      "case_id": "third_party_case_in_communication",
+      "global_expectations": ["third-party examples used as communication evidence are not attributed as the user's own state"]
+    },
+    {
+      "case_id": "user_direct_self_statement",
+      "global_expectations": ["a supported direct self-statement remains eligible for appropriate analysis regardless of setting"]
+    },
+    {
+      "case_id": "podcast_playback",
+      "global_expectations": ["media playback is separated from user viewpoint and is not silently omitted by value filtering"]
+    },
+    {
+      "case_id": "date_calculation_without_value",
+      "global_expectations": ["a simple date calculation without independent help value does not become a card"]
+    },
+    {
+      "case_id": "six_independent_high_value_non_work_events",
+      "event_count": 6,
+      "global_expectations": ["all independently valuable non-work events remain eligible", "no fixed card-count cap removes a valuable event"]
+    },
+    {
+      "case_id": "third_party_reporting_tone",
+      "global_expectations": ["visible prose addresses the user directly and leads with the conclusion rather than reporting on material"]
+    },
+    {
+      "case_id": "abstract_advice",
+      "global_expectations": ["advice needs a usable, situation-matched carrier such as a template, script, table, checklist, steps, experiment, or verification method"]
+    },
+    {
+      "case_id": "presentation_mappings",
+      "global_expectations": ["presentation matches the information shape without forcing empty formatting"],
+      "required_mappings": [
+        "multiple_conclusions_to_bullets_or_conclusion_table",
+        "multiple_topics_to_hierarchical_headings",
+        "option_comparison_to_comparison_table",
+        "time_progression_to_timeline",
+        "causal_relationship_to_causal_chain",
+        "explicit_actions_to_action_table",
+        "risks_and_responses_to_risk_impact_countermeasure_table",
+        "communication_advice_to_copyable_script",
+        "review_advice_to_fillable_record_template",
+        "operational_advice_to_ordered_steps"
+      ]
+    }
+  ]
+}

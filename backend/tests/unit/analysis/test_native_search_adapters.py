@@ -25,6 +25,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
             return httpx.Response(
                 200,
                 json={
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 30},
                     "choices": [
                         {
                             "finish_reason": "tool_calls",
@@ -49,6 +50,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
         return httpx.Response(
             200,
             json={
+                "usage": {"prompt_tokens": 180, "completion_tokens": 40},
                 "choices": [
                     {
                         "finish_reason": "stop",
@@ -78,7 +80,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
 
     assert result.available is True
     assert result.provider_id == "kimi"
-    assert result.model_id == "kimi-k3"
+    assert result.model_id == "kimi-k2.6"
     assert result.tool_name == "$web_search"
     assert result.errors == ()
     assert len(result.sources) == 1
@@ -91,6 +93,7 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
     assert requests[0]["tools"] == [
         {"type": "builtin_function", "function": {"name": "$web_search"}}
     ]
+    assert requests[0]["thinking"] == {"type": "disabled"}
     assert requests[1]["messages"][:2] == requests[0]["messages"]
     tool_message = requests[1]["messages"][-1]
     assert tool_message == {
@@ -98,6 +101,78 @@ async def test_kimi_native_search_echoes_official_tool_call_and_normalizes_citat
         "tool_call_id": "call_search_001",
         "name": "$web_search",
         "content": '{"query":"Kimi API web search"}',
+    }
+    assert provider.native_search_usage_totals == {
+        "input_tokens": 300,
+        "output_tokens": 70,
+        "token_usage_unavailable_reason": None,
+        "response_count": 2,
+        "tool_call_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_kimi_native_search_missing_usage_preserves_unknown_tokens_and_counts() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": "call_search_missing_usage",
+                                "type": "function",
+                                "function": {
+                                    "name": "$web_search",
+                                    "arguments": '{"query":"missing usage"}',
+                                },
+                            }],
+                        },
+                    }],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Result with a provider citation.",
+                        "citations": [{
+                            "id": "source-without-usage",
+                            "title": "Provider source",
+                            "url": "https://example.com/source",
+                            "snippet": "Evidence.",
+                        }],
+                    },
+                }],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.native_search(
+            "kimi", queries=["missing usage"], round_number=1
+        )
+
+    assert result.available is True
+    assert provider.native_search_usage_totals == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "token_usage_unavailable_reason": (
+            "native search provider response omitted usage"
+        ),
+        "response_count": 2,
+        "tool_call_count": 1,
     }
 
 
@@ -210,6 +285,105 @@ async def test_kimi_native_search_without_provider_citations_is_provenance_unava
     assert result.errors == (
         "Native web search returned no provider-issued structured citations.",
     )
+
+
+@pytest.mark.asyncio
+async def test_kimi_k2_6_native_search_parses_sources_from_official_completion_content() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "t-web_search-001",
+                                "type": "builtin_function",
+                                "function": {
+                                    "name": "$web_search",
+                                    "arguments": json.dumps({
+                                        "search_result": {"search_id": "search-001"},
+                                        "usage": {"total_tokens": 8000},
+                                    }),
+                                },
+                            }],
+                        },
+                    }],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            "### 1. Kimi 联网搜索文档\n"
+                            "- **ID**: `search-001`（搜索结果第1条）\n"
+                            "- **标题**: 使用 Kimi API 的联网搜索功能\n"
+                            "- **URL**: https://platform.kimi.com/docs/guide/use-web-search\n"
+                            "- **说明**: 官方文档介绍 builtin_function.$web_search。\n"
+                        ),
+                    },
+                }],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        result = await provider.native_search(
+            "kimi",
+            queries=["Kimi API 联网搜索官方文档"],
+            round_number=1,
+            model_id="kimi-k2.6",
+        )
+
+    assert result.available is True
+    assert result.errors == ()
+    assert len(result.sources) == 1
+    assert result.sources[0].provider_result_id == "search-001:1"
+    assert result.sources[0].title == "使用 Kimi API 的联网搜索功能"
+    assert result.sources[0].url == "https://platform.kimi.com/docs/guide/use-web-search"
+    assert result.sources[0].support_statement == (
+        "官方文档介绍 builtin_function.$web_search。"
+    )
+
+
+def test_kimi_k2_6_parses_unbulleted_numbered_source_blocks() -> None:
+    from audio_memory.providers.adapters.kimi import KimiAdapter
+    from audio_memory.providers.types import PROVIDER_CONFIGS
+
+    body = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": (
+                    "**ID**: 1\n"
+                    "**标题**: Kimi K2.6 快速入门\n"
+                    "**URL**: https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart\n"
+                    "**说明**: 官方文档说明工具参数兼容性。\n"
+                ),
+            },
+        }],
+    }
+
+    citations = KimiAdapter(PROVIDER_CONFIGS["kimi"]).native_search_citations(body)
+
+    assert citations == [{
+        "id": "1",
+        "title": "Kimi K2.6 快速入门",
+        "url": "https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart",
+        "snippet": "官方文档说明工具参数兼容性。",
+    }]
 
 
 @pytest.mark.asyncio

@@ -373,6 +373,8 @@ async def test_deepseek_length_finish_reason_is_typed_and_diagnostic_is_content_
             )
 
     assert raised.value.code == "model_output_truncated"
+    assert raised.value.partial_response == "PRIVATE_RESPONSE_TEXT"
+    assert "PRIVATE_RESPONSE_TEXT" not in repr(raised.value)
     assert len(provider.request_diagnostics) == 1
     diagnostic = provider.request_diagnostics[0]
     assert diagnostic.scene_id == "event-map"
@@ -423,6 +425,35 @@ async def test_transient_provider_failure_gets_two_extra_attempts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paid_single_attempt_policy_never_retries_a_transient_request() -> None:
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(
+            ConfiguredKeychain(),
+            client,
+            transient_total_attempts=1,
+        )
+        with pytest.raises(ProviderAnalysisError) as raised:
+            await provider.generate(
+                "deepseek",
+                system="rules",
+                user="data",
+                scene_id="paid-index",
+                max_tokens=16_384,
+                timeout_seconds=120,
+            )
+
+    assert raised.value.code == "provider_unavailable"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_transient_provider_failure_can_recover_on_third_attempt() -> None:
     calls = 0
 
@@ -449,6 +480,36 @@ async def test_transient_provider_failure_can_recover_on_third_attempt() -> None
 
     assert result == "recovered"
     assert calls == 3
+    diagnostics = provider.request_diagnostics
+    assert len({item.invocation_id for item in diagnostics}) == 1
+    assert [item.attempt_index for item in diagnostics] == [0, 1, 2]
+    assert [item.status_category for item in diagnostics] == ["5xx", "5xx", "2xx"]
+    assert all(item.started_at <= item.finished_at for item in diagnostics)
+    assert all(item.input_tokens is None for item in diagnostics)
+    assert all(item.output_tokens is None for item in diagnostics)
+    assert all(item.token_usage_unavailable_reason for item in diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_success_without_usage_preserves_unknown_tokens() -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ProviderAnalysisClient(ConfiguredKeychain(), client)
+        await provider.generate(
+            "deepseek", system="rules", user="data", scene_id="event_index"
+        )
+
+    diagnostic = provider.request_diagnostics[0]
+    assert diagnostic.input_tokens is None
+    assert diagnostic.output_tokens is None
+    assert diagnostic.token_usage_unavailable_reason == "provider response omitted usage"
 
 
 @pytest.mark.asyncio

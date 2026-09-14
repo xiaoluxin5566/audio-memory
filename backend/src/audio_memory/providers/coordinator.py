@@ -80,7 +80,7 @@ class ProviderStateCoordinator:
     def state(self, provider_id: str) -> ProviderState:
         return self._states[provider_id]
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, validate_credentials: bool = True) -> None:
         if self._metadata is not None:
             await self._metadata.ensure_defaults(
                 {
@@ -96,11 +96,15 @@ class ProviderStateCoordinator:
                 self._generations[provider_id] = int(
                     getattr(row, "credential_generation", 0)
                 )
+                if not validate_credentials:
+                    self._restore_persisted_state(provider_id, row)
                 if (
                     getattr(row, "active", False)
                     and provider_id in CONFIGURABLE_PROVIDER_IDS
                 ):
                     self._set_active(provider_id)
+        if not validate_credentials:
+            return
         await asyncio.gather(
             *(
                 self.validate_saved(provider_id)
@@ -120,6 +124,46 @@ class ProviderStateCoordinator:
                 if self._metadata is not None:
                     await self._metadata.activate(fallback)
                 self._set_active(fallback)
+
+    def _restore_persisted_state(self, provider_id: str, row: object) -> None:
+        old = self._states[provider_id]
+        try:
+            state = ProviderStateName(str(getattr(row, "validation_status", "")))
+        except ValueError:
+            state = ProviderStateName.INITIALIZING
+
+        validated_at_raw = getattr(row, "last_validated_at", None)
+        try:
+            validated_at = (
+                datetime.fromisoformat(str(validated_at_raw))
+                if validated_at_raw
+                else None
+            )
+        except ValueError:
+            validated_at = None
+
+        error_code_raw = getattr(row, "last_validation_error_code", None)
+        try:
+            error_code = (
+                ValidationErrorCode(str(error_code_raw)) if error_code_raw else None
+            )
+        except ValueError:
+            error_code = ValidationErrorCode.UNKNOWN
+        error_message_raw = getattr(row, "last_validation_error_message", None)
+
+        self._states[provider_id] = ProviderState(
+            provider_id=old.provider_id,
+            display_name=old.display_name,
+            model_id=old.model_id,
+            active=old.active,
+            state=state,
+            last_validated_at=validated_at,
+            error_code=error_code,
+            error_message=(
+                str(error_message_raw) if error_message_raw is not None else None
+            ),
+            cooldown_until=None,
+        )
 
     async def activate(self, provider_id: str) -> ProviderState:
         async with self._activation_lock:

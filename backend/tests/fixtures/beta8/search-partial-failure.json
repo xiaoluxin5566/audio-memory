@@ -1,0 +1,7 @@
+{
+  "packets": [
+    {"search_task_id": "search-1", "status": "success", "source_ids": ["source-1"]},
+    {"search_task_id": "search-2", "status": "failed", "source_ids": [], "error_summary": "provider unavailable"}
+  ],
+  "expected_degradation": "transcript_only_for_search_2"
+}

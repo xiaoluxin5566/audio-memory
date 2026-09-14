@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/client.js'
-import { isActiveReanalysis, normalizeReanalysisPreview } from '../api/state.js'
+import { isActiveReanalysis, normalizeReanalysisPreviewOptions } from '../api/state.js'
 
 function actionKey() {
   return crypto.randomUUID()
@@ -9,6 +9,7 @@ function actionKey() {
 export function useReanalysis() {
   const [current, setCurrent] = useState(null)
   const [preview, setPreview] = useState(null)
+  const [previewOptions, setPreviewOptions] = useState([])
   const [loadingPreview, setLoadingPreview] = useState(false)
   const [error, setError] = useState('')
   const currentRef = useRef(null)
@@ -60,11 +61,17 @@ export function useReanalysis() {
     setLoadingPreview(true)
     setError('')
     setPreview(null)
+    setPreviewOptions([])
     try {
-      const next = normalizeReanalysisPreview(await api.reanalysisPreview())
+      const nextOptions = normalizeReanalysisPreviewOptions(
+        await api.reanalysisPreviewOptions(),
+      )
       if (!isLatestRequest('preview', token)) return null
+      setPreviewOptions(nextOptions)
+      const next = nextOptions.length === 1 ? nextOptions[0] : null
       setPreview(next)
-      return next
+      if (nextOptions.length === 0) setError('没有可重新分析的兼容历史')
+      return nextOptions
     } catch (nextError) {
       if (!isLatestRequest('preview', token)) return null
       setError(nextError.message)
@@ -74,12 +81,23 @@ export function useReanalysis() {
     }
   }, [])
 
-  const start = useCallback(async (previewToken) => {
-    const batch = await api.createReanalysis(previewToken, actionKey())
+  const selectPreview = useCallback((pipelineKind) => {
+    setPreview((currentPreview) => previewOptions.find(
+      (option) => option.pipelineKind === pipelineKind,
+    ) ?? currentPreview)
+  }, [previewOptions])
+
+  const start = useCallback(async () => {
+    if (!preview?.previewToken) return null
+    const batch = await api.createReanalysis(
+      preview.previewToken,
+      preview.sourceBatchIds,
+      actionKey(),
+    )
     currentRef.current = batch
     setCurrent(batch)
     return batch
-  }, [])
+  }, [preview])
   const stop = useCallback(async () => {
     if (!currentRef.current?.id) return null
     const batch = await api.stopReanalysis(currentRef.current.id, actionKey())
@@ -107,15 +125,17 @@ export function useReanalysis() {
     currentRef.current = null
     setCurrent(null)
     setPreview(null)
+    setPreviewOptions([])
     setError('')
   }, [])
 
   const dismissPreview = useCallback(() => {
     invalidatePreviewRequest()
     setPreview(null)
+    setPreviewOptions([])
     setError('')
     setLoadingPreview(false)
   }, [])
 
-  return { current, preview, loadingPreview, error, refreshCurrent, loadPreview, start, stop, resume, retryProfile, clearState, dismissPreview }
+  return { current, preview, previewOptions, loadingPreview, error, refreshCurrent, loadPreview, selectPreview, start, stop, resume, retryProfile, clearState, dismissPreview }
 }

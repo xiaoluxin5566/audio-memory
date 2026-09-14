@@ -112,7 +112,13 @@ class FeatureRecord:
                 raise ValueError
             if status_value not in cls.VALID_STATUSES:
                 raise ValueError
-            if worktree != f".worktrees/{feature_id}":
+            standard_worktree = f".worktrees/{feature_id}"
+            worktree_path = Path(worktree) if isinstance(worktree, str) else None
+            if worktree != standard_worktree and (
+                worktree_path is None
+                or not worktree_path.is_absolute()
+                or str(worktree_path.resolve()) != worktree
+            ):
                 raise ValueError
             if not isinstance(base_commit, str) or not cls._SHA.fullmatch(base_commit):
                 raise ValueError
@@ -487,22 +493,33 @@ class FeatureService:
         if self.store.exists(feature_id):
             raise GovernanceError("功能轨道已经纳管。")
         expected_branch = f"codex/{feature_id}"
-        expected_path = (
+        standard_path = (
             self.repository.repository_root / ".worktrees" / feature_id
         ).resolve()
+        registered = any(
+            item.path == self.repository.top_level
+            and item.branch == expected_branch
+            for item in self.repository.worktrees()
+        )
         if (
             self.repository.current_branch != expected_branch
-            or self.repository.top_level != expected_path
+            or not registered
             or not self.repository.is_clean
         ):
             raise GovernanceError(
                 "审计纳管必须从同名、干净的功能 worktree 执行。"
             )
         base_commit = self.repository._git("merge-base", "main", "HEAD")
+        worktree_value = (
+            f".worktrees/{feature_id}"
+            if self.repository.top_level == standard_path
+            else str(self.repository.top_level)
+        )
         record = replace(
             FeatureRecord.new(
                 feature_id, base_commit, target_version=target_version
             ),
+            worktree=worktree_value,
             head_commit=self.repository.head_commit,
             current_step="已审计现有轨道，等待继续开发",
         )
@@ -556,7 +573,12 @@ class FeatureService:
         )
 
     def _expected_path(self, record: FeatureRecord) -> Path:
-        return (self.repository.repository_root / record.worktree).resolve()
+        path = Path(record.worktree)
+        return (
+            path.resolve()
+            if path.is_absolute()
+            else (self.repository.repository_root / path).resolve()
+        )
 
 
 @dataclass(frozen=True, slots=True)
