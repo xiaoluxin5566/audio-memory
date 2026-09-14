@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 
 from audio_memory.db import Database
+from audio_memory.analysis.pipeline_identity import build_pipeline_parameters
 from audio_memory.content.clear import HistoryCleaner
 from audio_memory.models import (
     AnalysisJob,
@@ -350,6 +351,58 @@ async def test_subset_preview_and_create_are_bound_to_exact_completed_batch_ids(
     assert omitted_selection.json()["detail"]["code"] == "snapshot_changed"
     assert wrong_selection.status_code == 409
     assert wrong_selection.json()["detail"]["code"] == "snapshot_changed"
+    assert created.status_code == 201
+    assert [item["source_batch_id"] for item in created.json()["items"]] == [
+        "batch-2"
+    ]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mixed_history_preview_options_create_exact_selected_pipeline_group(
+    tmp_path: Path,
+) -> None:
+    app, database, _publisher = await build_app(tmp_path)
+    await seed_second_source(database)
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "version-2")
+        assert version is not None
+        parameters, parameters_json, fingerprint = build_pipeline_parameters(
+            pipeline_kind="beta8_indexed_scene_v2",
+            provider_id=version.provider_id,
+            model_id=version.model_id,
+            credential_generation=version.credential_generation,
+            search_provider_id="kimi",
+            search_model_id="kimi-k2.5-search",
+        )
+        version.fixed_rules_hash = parameters["fixed_rules_hash"]
+        version.pipeline_parameters_json = parameters_json
+        version.pipeline_parameters_fingerprint = fingerprint
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        options_response = await client.get(
+            "/api/history/reanalysis-batches/preview-options"
+        )
+        assert options_response.status_code == 200
+        groups = options_response.json()["groups"]
+        assert [group["pipeline_kind"] for group in groups] == [
+            "beta8_indexed_scene_v2",
+            "single_report_v1",
+        ]
+        indexed = groups[0]
+        assert indexed["source_batch_ids"] == ["batch-2"]
+
+        created = await client.post(
+            "/api/history/reanalysis-batches",
+            headers=await session_headers(client, "mixed-selected-indexed"),
+            json={
+                "preview_token": indexed["preview_token"],
+                "source_batch_ids": indexed["source_batch_ids"],
+            },
+        )
+
     assert created.status_code == 201
     assert [item["source_batch_id"] for item in created.json()["items"]] == [
         "batch-2"

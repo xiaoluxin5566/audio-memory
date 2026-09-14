@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Beta 8 当前完整链路</title>
+  <style>
+    :root{--bg:#f6f5f2;--paper:#fff;--ink:#202124;--muted:#6f7378;--line:#e5e3de;--blue:#3370ff;--blue-soft:#eef3ff;--green:#168f5b;--green-soft:#eaf8f1;--amber:#b96800;--amber-soft:#fff4df;--red:#c33b32;--red-soft:#fff0ee;--shadow:0 8px 28px rgba(31,35,41,.07)}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    main{width:min(1180px,calc(100% - 40px));margin:0 auto;padding:48px 0 80px}.hero{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:34px 38px;box-shadow:var(--shadow)}
+    h1{font-size:32px;line-height:1.28;margin:0 0 10px;letter-spacing:-.02em}h2{font-size:22px;margin:42px 0 16px}h3{font-size:17px;margin:0 0 8px}p{margin:7px 0}.muted{color:var(--muted)}
+    .status{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}.pill{border-radius:999px;padding:5px 12px;font-size:13px;font-weight:650}.ok{color:var(--green);background:var(--green-soft)}.bad{color:var(--red);background:var(--red-soft)}.warn{color:var(--amber);background:var(--amber-soft)}
+    .facts{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:24px}.fact{background:#fafafa;border:1px solid var(--line);border-radius:12px;padding:14px}.fact b{display:block;font-size:20px}.fact span{color:var(--muted);font-size:12px}
+    .flow{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}.stage{position:relative;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:18px 16px;min-height:230px;box-shadow:0 3px 14px rgba(31,35,41,.04)}
+    .stage:not(:last-child):after{content:"\2192";position:absolute;right:-15px;top:28px;width:18px;height:18px;display:grid;place-items:center;background:var(--bg);color:#9aa0a6;z-index:2}.num{font-size:12px;color:var(--blue);font-weight:750;text-transform:uppercase}.stage ul{padding-left:18px;margin:10px 0 0}.stage li{margin:4px 0}.io{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:13px}.io b{color:#4d5156}
+    .formula{background:#1f2329;color:#eef1f5;border-radius:14px;padding:20px 24px;font:14px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:auto}.formula strong{color:#8db4ff}
+    table{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:table}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{background:#fafafa;font-size:13px;color:#555}tr:last-child td{border-bottom:0}.n{font-variant-numeric:tabular-nums;white-space:nowrap}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:20px}.panel ul{margin:8px 0 0;padding-left:20px}.callout{border-left:4px solid var(--amber);background:var(--amber-soft);padding:14px 16px;border-radius:0 10px 10px 0}.gate{display:grid;grid-template-columns:180px 1fr;gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden}.gate div{padding:13px 16px;border-bottom:1px solid var(--line)}.gate div:nth-last-child(-n+2){border-bottom:0}.gate .label{background:#fafafa;font-weight:700}
+    code{background:#f1f2f3;border-radius:5px;padding:2px 5px;font-size:.92em}.foot{margin-top:40px;color:var(--muted);font-size:13px}
+    @media(max-width:980px){.flow{grid-template-columns:repeat(2,1fr)}.stage:not(:last-child):after{display:none}.facts{grid-template-columns:repeat(2,1fr)}}@media(max-width:620px){main{width:min(100% - 24px,1180px);padding-top:20px}.hero{padding:24px}.flow,.grid{grid-template-columns:1fr}.facts{grid-template-columns:1fr}.gate{grid-template-columns:1fr}.gate .label{border-bottom:0}}
+  </style>
+</head>
+<body><main>
+  <section class="hero">
+    <div class="num">Beta 8 / Real audio walkthrough</div>
+    <h1>Beta 8 当前完整链路</h1>
+    <p class="muted">基于 2026-09-11 的 28 分 56.6 秒真实音频走查，同时说明每个阶段的目的、输入、输出和 API 调用逻辑。</p>
+    <div class="status"><span class="pill ok">技术链路已跑通</span><span class="pill bad">报告质量未通过</span><span class="pill warn">尚不可封板</span></div>
+    <div class="facts"><div class="fact"><b>28:56.6</b><span>真实 AAC 音频</span></div><div class="fact"><b>304</b><span>转写 segments</span></div><div class="fact"><b>4</b><span>发布主卡</span></div><div class="fact"><b>11</b><span>报告请求意图，含 1 次中断</span></div></div>
+  </section>
+
+  <h2>1. 全链路和阶段职责</h2>
+  <section class="flow">
+    <article class="stage"><div class="num">P0 转写</div><h3>把音频变成可追溯原文</h3><p>调用豆包录音文件识别 2.0，保留相对时间、segment 和说话人聚类。</p><div class="io"><b>输入</b>：AAC/MP3<br><b>输出</b>：完整转写<br><b>调用</b>：每个音频 1 个 ASR 任务</div></article>
+    <article class="stage"><div class="num">P1 理解</div><h3>高召回地理解内容</h3><p>识别 Activities、Topics、Anchors、Attention Signals 和 Commitments，不做最终卡片取舍。</p><div class="io"><b>输入</b>：一个完整转写窗口<br><b>输出</b>：内容索引<br><b>调用</b>：每窗口 1 次 DeepSeek</div></article>
+    <article class="stage"><div class="num">P2 规划</div><h3>整合事件并决定什么出卡</h3><p>只做三件事：Activity 整合与判断、Topic 出卡取舍、搜索需求。</p><div class="io"><b>输入</b>：全部 P1 索引与可回读原文<br><b>输出</b>：卡片计划 + research tasks<br><b>调用</b>：固定 1 次 DeepSeek</div></article>
+    <article class="stage"><div class="num">P3 搜索</div><h3>补充会改变决策的公开信息</h3><p>按 P2 的独立 research task 聚焦搜索，验证原始页面和引文。</p><div class="io"><b>输入</b>：公开化搜索问题<br><b>输出</b>：查证结论 + 来源<br><b>调用</b>：每任务 1–3 个子搜索，每个 1–2 次 Kimi 响应</div></article>
+    <article class="stage"><div class="num">P4 写作</div><h3>用完整 Activity 原文写主卡</h3><p>按场景 Prompt 选择表格、时间线、因果链、清单等表达，同时引用原文和搜索来源。</p><div class="io"><b>输入</b>：卡片计划 + 完整源 Activity + P3<br><b>输出</b>：Markdown 主卡<br><b>调用</b>：每张卡 1 次 DeepSeek</div></article>
+    <article class="stage"><div class="num">P5 评分</div><h3>独立验收每张主卡</h3><p>按 15/15/25/30/15 评分，列出扣分项和缺失内容；不修改报告。</p><div class="io"><b>输入</b>：主卡 + 计划 + 完整证据<br><b>输出</b>：五维分数 + 扣分<br><b>调用</b>：每张卡 1 次 DeepSeek</div></article>
+  </section>
+
+  <h2>2. API 调用次数如何计算</h2>
+  <div class="formula"><strong>DeepSeek 正常报告调用</strong> = P1 窗口数 W + P2 的 1 次 + P4 卡片数 C + P5 卡片数 C<br><strong>Kimi 搜索响应</strong> = 研究任务数 R × 每任务 1–3 个聚焦子任务 × 每子任务 1–2 次响应<br><strong>本次理论值</strong> = 1 + 1 + 4 + 4 = 10 次 DeepSeek，Kimi = 0<br><strong>本次账本值</strong> = 11 次请求意图：10 次有效结果 + 1 次 P4 中断（是否计费不确定）</div>
+  <p class="muted">P1 窗口数由转写文本的 UTF-8 字节量与 80 KB 核心预算决定，不是按音频时长直接切。时长只会通过字数间接影响 W。</p>
+
+  <h2>3. 本次真实走查结果</h2>
+  <table><thead><tr><th>阶段</th><th>实际调用</th><th>产出</th><th>判定</th></tr></thead><tbody>
+    <tr><td>P0</td><td class="n">1 个 ASR 任务</td><td>304 segments</td><td><span class="pill ok">通过</span></td></tr>
+    <tr><td>P1</td><td class="n">1</td><td>2 Activities、7 Topics、8 Signals、4 Commitments</td><td><span class="pill ok">通过</span></td></tr>
+    <tr><td>P2</td><td class="n">1</td><td>4 张卡；7 个 Topic 全部有归宿；0 个搜索需求</td><td><span class="pill bad">搜索判断失败</span></td></tr>
+    <tr><td>P3</td><td class="n">0</td><td>无搜索、无来源、无返回结果</td><td><span class="pill bad">上游未创建任务</span></td></tr>
+    <tr><td>P4</td><td class="n">4 成功 + 1 中断</td><td>4 张 Markdown 主卡</td><td><span class="pill bad">一处人名错写</span></td></tr>
+    <tr><td>P5</td><td class="n">4</td><td>100 / 100 / 87 / 100</td><td><span class="pill bad">漏检人名错误</span></td></tr>
+  </tbody></table>
+
+  <h2>4. 为什么搜索是 0</h2>
+  <div class="grid"><section class="panel"><h3>当前 P2 的错误推理</h3><ul><li>公司内部平台、人员和项目数据无法公开搜索。</li><li>因此对 4 张卡全部判定 <code>no_search</code>。</li><li>P3 根本没有收到任务，Kimi 没有执行机会。</li></ul></section><section class="panel"><h3>应当的判断</h3><ul><li>内部事实不搜索。</li><li>抽样方式、错误率、置信阈值等公开方法需要搜索。</li><li>P4 只能把公开方法作为建议补充，不得替换内部项目事实。</li></ul></section></div>
+
+  <h2>5. 本地已修复的问题</h2>
+  <table><thead><tr><th>问题</th><th>修复</th><th>状态</th></tr></thead><tbody>
+    <tr><td>制品子目录创建失败</td><td>通过安全写入边界逐级创建目录</td><td><span class="pill ok">已验证</span></td></tr>
+    <tr><td>P4 高强度 reasoning 曾发生断连，但没有达到 token 上限的证据</td><td>P1/P2/P4 使用 high，P4 总生成上限为 24,000 tokens并按单卡保存检查点，P5 关闭思考</td><td><span class="pill warn">待真实复验</span></td></tr>
+    <tr><td>不确定请求无法续跑</td><td>仅在用户明确重试后创建新 key，原请求保留</td><td><span class="pill ok">已验证</span></td></tr>
+    <tr><td>V1 原音证据 404</td><td>按当前卡片的 evidence IDs 校验</td><td><span class="pill ok">HTTP 206</span></td></tr>
+    <tr><td>运行时间和调用明细显示为 0</td><td>从不可变请求账本生成明细统计</td><td><span class="pill ok">页面已显示 67.5 秒</span></td></tr>
+    <tr><td>上传未传本地时间和时区</td><td>正常上传传入 <code>file_modified</code> 和 timezone</td><td><span class="pill ok">已测试</span></td></tr>
+  </tbody></table>
+
+  <h2>6. 质量修复和封板门禁</h2>
+  <div class="callout"><strong>当前结论：不封板。</strong> 当前页面是修复链路 bug 后完成的真实用户结果，但 P2/P4/P5 的新质量 Prompt 是走查后才更新的，还没用付费模型复验。</div>
+  <div class="gate" style="margin-top:16px"><div class="label">P2 门禁</div><div>公开方法缺口必须创建搜索任务；候选卡两两检查重叠。</div><div class="label">P4 门禁</div><div>人名、时间、数字、责任人必须与原文逐项一致。</div><div class="label">P5 门禁</div><div>实体不一致必须扣分；单卡分数不代表全天覆盖通过。</div><div class="label">真实复验</div><div>复用已有转写，创建新分析版本跑完 P1–P5；检查有效搜索、无实体错误、扣分与缺口一致。</div></div>
+  <p class="foot">Version: b1cb2274-c4d0-495c-9c2a-a996a3709953 · 文档日期：2026-09-11 · 本页不包含 API Key 或原始音频内容。</p>
+</main></body></html>

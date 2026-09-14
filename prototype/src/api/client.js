@@ -232,9 +232,20 @@ export const api = {
     : apiRequest('/feed'),
   history: () => isReportPreview() ? Promise.resolve({ days: [] }) : apiRequest('/history'),
   reanalysisPreview: () => apiRequest('/history/reanalysis-batches/preview'),
+  reanalysisPreviewOptions: async () => {
+    try {
+      return await apiRequest('/history/reanalysis-batches/preview-options')
+    } catch (error) {
+      if (error.status !== 404) throw error
+      return { groups: [await apiRequest('/history/reanalysis-batches/preview')] }
+    }
+  },
   currentReanalysis: () => apiRequest('/history/reanalysis-batches/current'),
-  createReanalysis: (previewToken, idempotencyKey) => apiRequest('/history/reanalysis-batches', {
-    method: 'POST', idempotencyKey, body: JSON.stringify({ preview_token: previewToken }),
+  createReanalysis: (previewToken, sourceBatchIds, idempotencyKey) => apiRequest('/history/reanalysis-batches', {
+    method: 'POST', idempotencyKey, body: JSON.stringify({
+      preview_token: previewToken,
+      ...(Array.isArray(sourceBatchIds) ? { source_batch_ids: sourceBatchIds } : {}),
+    }),
   }),
   stopReanalysis: (id, idempotencyKey) => apiRequest(`/history/reanalysis-batches/${id}/stop`, {
     method: 'POST', idempotencyKey,

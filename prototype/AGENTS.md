@@ -7,3 +7,11 @@ Before making substantial visual changes, use the Product Design plugin's `get-c
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
 
 Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts/prepare-sites-build.mjs`, and `tests/sites-worker.test.mjs` intact so the same local prototype can be handed to Sites. Before a Sites handoff, run `npm run build` and `npm run test:sites`; the build must leave `dist/client/index.html`, `dist/server/index.js`, and `dist/.openai/hosting.json`.
+
+## 模型可用性
+
+进入页面和开发环境启动时自动校验模型可用性是正常产品需求，必须保留；不要为了控制报告实验的模型用量而关闭自动校验。
+
+## 报告阅读样式
+
+报告详情参考飞书文档的简洁长文体验：白底、中性文字、约 800px 正文宽度，标题通过字号、留白和自动章节编号建立层级。章节编号必须继承对应标题的字号、字重和颜色，不得缩小或弱化；二级标题之间不得使用分割线。表格、引用、评分和运行信息保持克制，不使用渐变、厚重阴影或装饰性卡片。

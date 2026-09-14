@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import replace
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -11,7 +12,12 @@ from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy import select
 
 from audio_memory.analysis.errors import ANALYSIS_RETRYABLE_ERROR_CODES
-from audio_memory.analysis.task_coordinator import AlreadyRunningError, AnalysisRequest
+from audio_memory.analysis.pipeline_state import PipelineMetrics
+from audio_memory.analysis.pipeline_identity import InvalidPipelineIdentityError
+from audio_memory.analysis.task_coordinator import (
+    AlreadyRunningError,
+    AnalysisRequest,
+)
 from audio_memory.domain import JobStage
 from audio_memory.models import AnalysisJob, AnalysisVersion, AsrFileTask
 from audio_memory.observability import emit_analysis_event
@@ -76,6 +82,7 @@ class JobView(BaseModel):
     sleep_prevention_status: str | None = None
     analysis_phase: str | None = None
     analysis_detail_phase: str | None = None
+    analysis_metrics: PipelineMetrics | None = None
     transcription_mode: str = "local"
 
 
@@ -222,8 +229,24 @@ async def job_view_with_sleep_status(request: Request, job) -> JobView:
                 .order_by(AnalysisVersion.created_at.desc())
                 .limit(1)
             )
+        if version is not None:
+            try:
+                view.analysis_metrics = PipelineMetrics.model_validate_json(
+                    version.pipeline_metrics_json or "{}"
+                )
+            except ValueError:
+                view.analysis_metrics = None
+        try:
+            writing_checkpoint = json.loads(version.pipeline_checkpoints_json or "{}") if version else {}
+        except (TypeError, ValueError):
+            writing_checkpoint = {}
+        if not isinstance(writing_checkpoint, dict):
+            writing_checkpoint = {}
         if job.stage == JobStage.FAILED.value:
             view.analysis_phase = "failed"
+        elif version is not None and version.status == "paused" and writing_checkpoint.get("writing_only"):
+            view.analysis_phase = "paused"
+            view.analysis_detail_phase = writing_checkpoint.get("report_phase")
         elif version is not None and version.status in {"pending", "running"}:
             view.analysis_phase = version.status
             if version.status == "running":
@@ -297,6 +320,7 @@ async def run_pipeline(
                 job_id=job_id,
                 analysis_request=analysis_request,
                 analysis_submitter=request.app.state.analysis_task_coordinator,
+                reconcile_unknown_submissions=resume,
             )
             submitted = True
             emit_analysis_event(
@@ -404,6 +428,7 @@ async def snapshot_analysis_request(
         }
         for fact in facts
     ]
+    runtime_config = getattr(request.app.state, "runtime_config", None)
     return AnalysisRequest(
         source_job_id=job_id,
         source_batch_id=None,
@@ -413,6 +438,9 @@ async def snapshot_analysis_request(
         prompt_snapshot=prompts,
         profile_snapshot=profile,
         priority=0,
+        pipeline_kind=getattr(runtime_config, "report_pipeline", "single_report_v1"),
+        search_provider_id=getattr(runtime_config, "beta8_search_provider", None),
+        search_model_id=getattr(runtime_config, "beta8_search_model", None),
     )
 
 
@@ -607,7 +635,12 @@ async def resume_job(job_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     cloud_asr_retry = (
         job.stage == JobStage.FAILED.value
-        and job.error_code in {"cloud_asr_failed", "managed_storage_unavailable"}
+        and job.error_code in {
+            "cloud_asr_failed",
+            "cloud_asr_submission_unknown",
+            "managed_storage_unavailable",
+            "transcript_finalize_failed",
+        }
     )
     if cloud_asr_retry:
         await ensure_pipeline_ready(request)
@@ -728,7 +761,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
         ) from exc
 
     try:
-        resumed_version = (
+        retry_result = (
             await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
                 source_job_id=job_id,
                 provider_id=provider.provider_id,
@@ -743,7 +776,15 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
             "stage": JobStage.ANALYZING.value,
             "already_running": True,
         }
-    if resumed_version is not None:
+    except InvalidPipelineIdentityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invalid_pipeline_identity",
+                "message": str(exc),
+            },
+        ) from exc
+    if retry_result.status == "resumed":
         emit_accepted_retry(job_id, "failed_upload_resume")
         return {"id": job_id, "stage": JobStage.ANALYZING.value}
 
@@ -754,11 +795,19 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
         model_id=provider.model_id,
         credential_generation=credential_generation,
     )
+    if retry_result.status == "fresh_required":
+        assert retry_result.identity is not None
+        analysis_request = replace(
+            analysis_request,
+            pipeline_kind=retry_result.identity.pipeline_kind,
+            search_provider_id=retry_result.identity.search_provider_id,
+            search_model_id=retry_result.identity.search_model_id,
+        )
     sleep_status = await protect_job_if_enabled(request, job_id)
     submitted = False
     try:
         if (job.error_code or "").startswith("autonomous_"):
-            resumed_version = (
+            autonomous_retry = (
                 await request.app.state.analysis_task_coordinator.retry_failed_upload_in_place(
                     source_job_id=job_id,
                     provider_id=provider.provider_id,
@@ -766,7 +815,7 @@ async def retry_analysis(job_id: str, request: Request) -> dict[str, str | bool]
                     credential_generation=credential_generation,
                 )
             )
-            if resumed_version is not None:
+            if autonomous_retry.status == "resumed":
                 submitted = True
                 emit_accepted_retry(job_id, "autonomous_resume")
                 return {

@@ -20,6 +20,12 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.analysis.pipeline_identity import (
+    InvalidPipelineIdentityError,
+    prompt_binding,
+    validate_version_pipeline_identity,
+    verified_pipeline_identity_hash,
+)
 from audio_memory.prompts.store import PROMPT_SCENES, PromptStore
 from audio_memory.providers.types import ProviderState, ProviderStateName
 from audio_memory.reanalysis.types import (
@@ -79,6 +85,19 @@ def current_fixed_rule_hashes() -> dict[str, str]:
     return hashes
 
 
+def fixed_rule_hashes_for_pipeline(pipeline_kind: str) -> dict[str, str]:
+    if pipeline_kind == "single_report_v1":
+        return current_fixed_rule_hashes()
+    fixed_rules_hash, manifest = prompt_binding(pipeline_kind)
+    return {
+        "fixed_rules_hash": fixed_rules_hash,
+        **{
+            str(item["prompt_id"]): str(item["sha256"])
+            for item in manifest
+        },
+    }
+
+
 async def transcript_fingerprint(database: Database, job_id: str) -> str:
     async with database.session() as session:
         return await transcript_fingerprint_from_session(session, job_id)
@@ -111,6 +130,8 @@ class PreviewSigner:
             "prompt_bindings": snapshot_payload["prompt_bindings"],
             "fixed_rule_hashes": snapshot.fixed_rule_hashes,
             "fixed_rules_hash": snapshot.fixed_rules_hash,
+            "pipeline_kind": snapshot.pipeline_kind,
+            "prompt_manifest": list(snapshot.prompt_manifest),
             "profile_hash": snapshot.profile_hash,
             "counts": snapshot_payload["counts"],
             "snapshot_hash": snapshot_hash,
@@ -183,7 +204,7 @@ class ReanalysisPreviewBuilder:
                     state=ProviderStateName.UNCONFIGURED,
                 )
                 generation = 0
-        sources = await self._completed_sources(source_batch_ids)
+        sources, pipeline_kind = await self._completed_sources(source_batch_ids)
         prompt_documents = {
             scene_id: self.prompt_store.get(scene_id) for scene_id in PROMPT_SCENES
         }
@@ -199,7 +220,8 @@ class ReanalysisPreviewBuilder:
             scene_id: str(value["sha256"])
             for scene_id, value in prompt_snapshot.items()
         }
-        fixed_rule_hashes = current_fixed_rule_hashes()
+        fixed_rules_hash, prompt_manifest = prompt_binding(pipeline_kind)
+        fixed_rule_hashes = fixed_rule_hashes_for_pipeline(pipeline_kind)
         profile_snapshot = tuple(await self._profile_snapshot())
         profile_hash = canonical_hash(profile_snapshot)
         source_count = len(sources)
@@ -214,7 +236,9 @@ class ReanalysisPreviewBuilder:
             prompt_snapshot=prompt_snapshot,
             prompt_hashes=prompt_hashes,
             fixed_rule_hashes=fixed_rule_hashes,
-            fixed_rules_hash=PromptComposer.fixed_rules_hash(),
+            fixed_rules_hash=fixed_rules_hash,
+            pipeline_kind=pipeline_kind,
+            prompt_manifest=tuple(prompt_manifest),
             profile_snapshot=profile_snapshot,
             profile_hash=profile_hash,
             source_batch_count=source_count,
@@ -261,20 +285,12 @@ class ReanalysisPreviewBuilder:
             snapshot=snapshot,
         )
 
-    async def _completed_sources(
-        self, source_batch_ids: tuple[str, ...] | None = None
-    ) -> list[SourceSnapshot]:
-        if source_batch_ids is not None and len(source_batch_ids) != len(
-            set(source_batch_ids)
-        ):
-            raise ReanalysisSourceSelectionError(
-                "duplicate_source_batch_ids",
-                "Selected source batch IDs must be unique",
-            )
+    async def completed_source_groups(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Return eligible history grouped by its stored report pipeline."""
         async with self.database.session() as session:
             rows = (
                 await session.execute(
-                    select(Batch.id, Batch.job_id)
+                    select(Batch.id, AnalysisVersion)
                     .join(
                         AnalysisVersion,
                         AnalysisVersion.id == Batch.current_analysis_version_id,
@@ -288,8 +304,61 @@ class ReanalysisPreviewBuilder:
                     .order_by(Batch.uploaded_at.desc(), Batch.id.desc())
                 )
             ).all()
+        grouped: dict[str, list[str]] = {}
+        for batch_id, version in rows:
+            try:
+                identity = validate_version_pipeline_identity(version)
+            except InvalidPipelineIdentityError:
+                # Corrupt identities are not selectable. A later explicit selection
+                # still fails closed, while unrelated bad rows cannot poison a valid
+                # homogeneous selection.
+                continue
+            grouped.setdefault(identity.pipeline_kind, []).append(batch_id)
+        return tuple(
+            (pipeline_kind, tuple(batch_ids))
+            for pipeline_kind, batch_ids in grouped.items()
+        )
+
+    async def _completed_sources(
+        self, source_batch_ids: tuple[str, ...] | None = None
+    ) -> tuple[list[SourceSnapshot], str]:
+        if source_batch_ids is not None and len(source_batch_ids) != len(
+            set(source_batch_ids)
+        ):
+            raise ReanalysisSourceSelectionError(
+                "duplicate_source_batch_ids",
+                "Selected source batch IDs must be unique",
+            )
+        async with self.database.session() as session:
+            statement = (
+                select(Batch.id, Batch.job_id, AnalysisVersion)
+                .join(
+                    AnalysisVersion,
+                    AnalysisVersion.id == Batch.current_analysis_version_id,
+                )
+                .join(AnalysisJob, AnalysisJob.id == Batch.job_id)
+                .where(
+                    AnalysisVersion.status == "completed",
+                    AnalysisJob.stage == "completed",
+                    ~pending_risk_review_exists(Batch.job_id),
+                )
+                .order_by(Batch.uploaded_at.desc(), Batch.id.desc())
+            )
+            if source_batch_ids is not None:
+                statement = statement.where(Batch.id.in_(source_batch_ids))
+            rows = (
+                await session.execute(statement)
+            ).all()
             sources_by_id: dict[str, SourceSnapshot] = {}
-            for batch_id, job_id in rows:
+            pipeline_kinds: set[str] = set()
+            for batch_id, job_id, version in rows:
+                try:
+                    identity = validate_version_pipeline_identity(version)
+                except InvalidPipelineIdentityError as exc:
+                    raise ReanalysisSourceSelectionError(
+                        "invalid_pipeline_identity", str(exc)
+                    ) from exc
+                pipeline_kinds.add(identity.pipeline_kind)
                 file_count = int(
                     await session.scalar(
                         select(func.count(JobFile.id)).where(JobFile.job_id == job_id)
@@ -310,23 +379,49 @@ class ReanalysisPreviewBuilder:
                 sources_by_id[batch_id] = SourceSnapshot(
                     batch_id=batch_id,
                     job_id=job_id,
+                    current_analysis_version_id=version.id,
+                    pipeline_identity_hash=verified_pipeline_identity_hash(
+                        version, identity
+                    ),
                     audio_file_count=file_count,
                     transcript_character_count=character_count,
                     transcript_sha256=transcript_sha256,
                 )
             if source_batch_ids is None:
-                return list(sources_by_id.values())
-            missing = [
-                batch_id
-                for batch_id in source_batch_ids
-                if batch_id not in sources_by_id
-            ]
-            if missing:
+                selected = list(sources_by_id.values())
+                selected_kinds = pipeline_kinds
+            else:
+                missing = [
+                    batch_id
+                    for batch_id in source_batch_ids
+                    if batch_id not in sources_by_id
+                ]
+                if missing:
+                    raise ReanalysisSourceSelectionError(
+                        "source_batch_not_completed",
+                        "Every selected source batch must be completed and eligible",
+                    )
+                selected = [sources_by_id[batch_id] for batch_id in source_batch_ids]
+                selected_versions = {
+                    batch_id: version
+                    for batch_id, _, version in rows
+                    if batch_id in source_batch_ids
+                }
+                selected_kinds = {
+                    validate_version_pipeline_identity(
+                        selected_versions[batch_id]
+                    ).pipeline_kind
+                    for batch_id in source_batch_ids
+                }
+            if len(selected_kinds) > 1:
                 raise ReanalysisSourceSelectionError(
-                    "source_batch_not_completed",
-                    "Every selected source batch must be completed and eligible",
+                    "mixed_pipeline_kinds",
+                    "Selected history uses multiple report pipelines",
                 )
-            return [sources_by_id[batch_id] for batch_id in source_batch_ids]
+            pipeline_kind = next(
+                iter(selected_kinds), "single_report_v1"
+            )
+            return selected, pipeline_kind
 
     async def _analysis_window_count(
         self, sources: list[SourceSnapshot]

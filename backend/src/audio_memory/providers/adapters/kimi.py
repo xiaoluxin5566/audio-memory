@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from audio_memory.providers.adapters.base import (
@@ -13,6 +14,14 @@ class KimiAdapter(ChatCompletionsAdapter):
         "type": "builtin_function",
         "function": {"name": "$web_search"},
     }
+    _CONTENT_CITATION_PATTERN = re.compile(
+        r"^(?:- )?\*\*ID\*\*:\s*`?([^`\s（]+)`?\s*"
+        r"(?:（搜索结果第(\d+)条）)?\s*$\n"
+        r"^(?:- )?\*\*标题\*\*:\s*(.+?)\s*$\n"
+        r"^(?:- )?\*\*URL\*\*:\s*(https?://\S+)\s*$\n"
+        r"^(?:- )?\*\*(?:说明|摘要)\*\*:\s*(.+?)\s*$",
+        re.MULTILINE,
+    )
 
     def native_search_capability(self, *, model_id: str) -> NativeSearchCapability:
         return NativeSearchCapability(
@@ -26,7 +35,7 @@ class KimiAdapter(ChatCompletionsAdapter):
         payload = super().validation_payload(model_id=model_id)
         payload.pop("temperature", None)
         payload.pop("max_tokens", None)
-        if (model_id or self.config.model_id) == self.config.model_id:
+        if (model_id or self.config.model_id) == "kimi-k3":
             payload["reasoning_effort"] = "low"
             payload["max_completion_tokens"] = 64
         else:
@@ -34,7 +43,7 @@ class KimiAdapter(ChatCompletionsAdapter):
         return payload
 
     def analysis_payload(self, payload: dict[str, object]) -> dict[str, object]:
-        if payload.get("model") != self.config.model_id:
+        if payload.get("model") != "kimi-k3":
             return payload
         normalized = {
             key: value
@@ -60,8 +69,9 @@ class KimiAdapter(ChatCompletionsAdapter):
                     "role": "system",
                     "content": (
                         "Use the built-in $web_search tool to find primary sources for "
-                        "the requested queries. Return citations with their original IDs, "
-                        "titles, and URLs."
+                        "the requested queries. Return every source as an exact four-line "
+                        "block using these labels: **ID**, **标题**, **URL**, **说明**. "
+                        "Do not omit the original search ID or result number."
                     ),
                 },
                 {
@@ -75,7 +85,9 @@ class KimiAdapter(ChatCompletionsAdapter):
             "stream": False,
             "tools": [self._WEB_SEARCH_TOOL],
         }
-        if model_id == self.config.model_id:
+        if model_id == "kimi-k2.6":
+            payload["thinking"] = {"type": "disabled"}
+        elif model_id == "kimi-k3":
             payload["reasoning_effort"] = "low"
         return payload
 
@@ -121,7 +133,27 @@ class KimiAdapter(ChatCompletionsAdapter):
         citations = message.get("citations", [])
         if not isinstance(citations, list):
             raise ValueError("Kimi native search citations are invalid.")
-        return citations
+        if citations:
+            return citations
+        content = message.get("content")
+        if not isinstance(content, str):
+            return []
+        parsed: list[object] = []
+        for ordinal, match in enumerate(
+            self._CONTENT_CITATION_PATTERN.finditer(content), start=1
+        ):
+            search_id, result_number, title, url, snippet = match.groups()
+            parsed.append({
+                "id": (
+                    f"{search_id}:{result_number}"
+                    if result_number is not None
+                    else search_id
+                ),
+                "title": title.strip(),
+                "url": url.rstrip(".,;)）。，；"),
+                "snippet": snippet.strip(),
+            })
+        return parsed
 
     def native_search_completed(self, body: object) -> bool:
         return self._choice(body).get("finish_reason") == "stop"

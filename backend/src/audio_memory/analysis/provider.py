@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import time
 from dataclasses import dataclass
 from hashlib import sha256
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -108,6 +110,8 @@ def parse_autonomous_final_analysis(
 
 @dataclass(frozen=True, slots=True)
 class ProviderRequestDiagnostic:
+    invocation_id: str
+    attempt_index: int
     provider_id: str
     model_id: str
     scene_id: str
@@ -115,8 +119,11 @@ class ProviderRequestDiagnostic:
     request_bytes: int
     response_bytes: int
     segment_count: int
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
+    token_usage_unavailable_reason: str | None
+    started_at: str
+    finished_at: str
     elapsed_seconds: float
     status_category: str
     finish_reason: str | None
@@ -163,12 +170,33 @@ class ProviderAnalysisClient:
         self,
         keychain: KeychainRepository,
         client: httpx.AsyncClient,
+        *,
+        transient_total_attempts: int = 3,
     ) -> None:
+        if not 1 <= transient_total_attempts <= 3:
+            raise ValueError("transient_total_attempts must be between 1 and 3")
         self.keychain = keychain
         self.client = client
+        self.transient_total_attempts = transient_total_attempts
         self._remote_lock = asyncio.Lock()
         self._parallel_audit_limit = asyncio.Semaphore(6)
         self.usage_totals = {"input_tokens": 0, "output_tokens": 0}
+        self.native_search_usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "token_usage_unavailable_reason": None,
+            "response_count": 0,
+            "tool_call_count": 0,
+        }
+        self._native_search_known_usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        self._native_search_usage_unavailable_counts = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        self._native_search_usage_unavailable_reasons: set[str] = set()
         self.request_diagnostics: list[ProviderRequestDiagnostic] = []
         self.parameter_fingerprint = _analysis_parameter_fingerprint()
         self.adapters = {
@@ -303,8 +331,13 @@ class ProviderAnalysisClient:
 
             try:
                 body = response.json()
+                usage = body.get("usage") if isinstance(body, dict) else None
+                self._record_native_search_usage(usage)
                 tool_messages = adapter.native_search_tool_messages(body)
                 if tool_messages is not None:
+                    self.native_search_usage_totals["tool_call_count"] += sum(
+                        1 for message in tool_messages if message.get("role") == "tool"
+                    )
                     messages.extend(tool_messages)
                     continue
                 if not adapter.native_search_completed(body):
@@ -337,6 +370,70 @@ class ProviderAnalysisClient:
             capability, "Native web search exceeded its tool-call limit."
         )
 
+    def _record_native_search_usage(self, usage: object) -> None:
+        input_tokens = (
+            self._usage_value(usage, "input_tokens", "prompt_tokens")
+            if isinstance(usage, dict)
+            else None
+        )
+        output_tokens = (
+            self._usage_value(usage, "output_tokens", "completion_tokens")
+            if isinstance(usage, dict)
+            else None
+        )
+        values = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+        missing = []
+        for key, value in values.items():
+            if value is None:
+                missing.append(key.removesuffix("_tokens"))
+                self._native_search_usage_unavailable_counts[key] += 1
+            else:
+                self._native_search_known_usage_totals[key] += value
+            self.native_search_usage_totals[key] = (
+                None
+                if self._native_search_usage_unavailable_counts[key]
+                else self._native_search_known_usage_totals[key]
+            )
+        if missing:
+            reason = (
+                "native search provider response omitted usage"
+                if not isinstance(usage, dict)
+                else (
+                    "native search provider response omitted "
+                    + " and ".join(missing)
+                    + " token usage"
+                )
+            )
+            self._native_search_usage_unavailable_reasons.add(reason)
+        self.native_search_usage_totals["token_usage_unavailable_reason"] = (
+            "; ".join(sorted(self._native_search_usage_unavailable_reasons)) or None
+        )
+        self.native_search_usage_totals["response_count"] += 1
+
+    def native_search_usage_snapshot(self) -> dict[str, object]:
+        return {
+            "known_input_tokens": self._native_search_known_usage_totals[
+                "input_tokens"
+            ],
+            "known_output_tokens": self._native_search_known_usage_totals[
+                "output_tokens"
+            ],
+            "input_unavailable_count": (
+                self._native_search_usage_unavailable_counts["input_tokens"]
+            ),
+            "output_unavailable_count": (
+                self._native_search_usage_unavailable_counts["output_tokens"]
+            ),
+            "token_usage_unavailable_reason": self.native_search_usage_totals[
+                "token_usage_unavailable_reason"
+            ],
+            "response_count": self.native_search_usage_totals["response_count"],
+            "tool_call_count": self.native_search_usage_totals["tool_call_count"],
+        }
+
     @staticmethod
     def _native_search_error(
         capability, error: str, *, retriable: bool = False
@@ -364,7 +461,9 @@ class ProviderAnalysisClient:
         repair_attempted: bool = False,
         thinking_enabled: bool | None = None,
         allow_parallel: bool = False,
+        diagnostic_invocation_id: str | None = None,
     ) -> str:
+        invocation_id = diagnostic_invocation_id or str(uuid4())
         lock = self._parallel_audit_limit if allow_parallel else self._remote_lock
         async with lock:
             started_at = time.monotonic()
@@ -389,6 +488,7 @@ class ProviderAnalysisClient:
                     segment_count=segment_count,
                     repair_attempted=repair_attempted,
                     thinking_enabled=thinking_enabled,
+                    diagnostic_invocation_id=invocation_id,
                 )
             except BaseException as error:
                 emit_analysis_event(
@@ -422,7 +522,9 @@ class ProviderAnalysisClient:
         max_tokens: int | None = None,
         timeout_seconds: float = 900,
         segment_count: int = 0,
+        diagnostic_invocation_id: str | None = None,
     ) -> str:
+        invocation_id = diagnostic_invocation_id or str(uuid4())
         async with self._remote_lock:
             started_at = time.monotonic()
             resolved_model = model_id or PROVIDER_CONFIGS[provider_id].model_id
@@ -448,6 +550,7 @@ class ProviderAnalysisClient:
                     thinking_enabled=True,
                     response_format="text",
                     reasoning_effort="high",
+                    diagnostic_invocation_id=invocation_id,
                 )
             except BaseException as error:
                 emit_analysis_event(
@@ -485,6 +588,7 @@ class ProviderAnalysisClient:
         thinking_enabled: bool | None = None,
         response_format: str = "json_object",
         reasoning_effort: str | None = None,
+        diagnostic_invocation_id: str,
     ) -> str:
         read = self.keychain.read(provider_id)
         if read.status is not KeychainStatus.CONFIGURED or read.secret is None:
@@ -494,7 +598,7 @@ class ProviderAnalysisClient:
                 pause_batch=True,
             )
         last_error: ProviderAnalysisError | None = None
-        for attempt in range(3):
+        for attempt in range(self.transient_total_attempts):
             try:
                 return await self._request(
                     provider_id,
@@ -510,10 +614,15 @@ class ProviderAnalysisClient:
                     thinking_enabled=thinking_enabled,
                     response_format=response_format,
                     reasoning_effort=reasoning_effort,
+                    diagnostic_invocation_id=diagnostic_invocation_id,
+                    diagnostic_attempt_index=attempt,
                 )
             except ProviderAnalysisError as exc:
                 last_error = exc
-                if not exc.retriable or attempt == 2:
+                if (
+                    not exc.retriable
+                    or attempt == self.transient_total_attempts - 1
+                ):
                     raise
                 await asyncio.sleep(0.25 * (2**attempt))
         raise last_error or ProviderAnalysisError("Provider request failed")
@@ -534,6 +643,8 @@ class ProviderAnalysisClient:
         thinking_enabled: bool | None,
         response_format: str,
         reasoning_effort: str | None,
+        diagnostic_invocation_id: str,
+        diagnostic_attempt_index: int,
     ) -> str:
         config = PROVIDER_CONFIGS[provider_id]
         resolved_model = model_id or config.model_id
@@ -573,6 +684,7 @@ class ProviderAnalysisClient:
             )
         )
         started = time.monotonic()
+        started_at = datetime.now(timezone.utc)
         try:
             response = await self.client.post(
                 config.endpoint,
@@ -584,15 +696,21 @@ class ProviderAnalysisClient:
                 timeout=timeout_seconds,
             )
         except httpx.RequestError as exc:
+            finished_at = datetime.now(timezone.utc)
             self._record_diagnostic(
+                invocation_id=diagnostic_invocation_id,
+                attempt_index=diagnostic_attempt_index,
                 provider_id=provider_id,
                 model_id=resolved_model,
                 scene_id=scene_id,
                 request_bytes=request_bytes,
                 response_bytes=0,
                 segment_count=segment_count,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=None,
+                output_tokens=None,
+                token_usage_unavailable_reason="request failed before usage was reported",
+                started_at=started_at.isoformat(),
+                finished_at=finished_at.isoformat(),
                 elapsed_seconds=time.monotonic() - started,
                 status_category="network_error",
                 finish_reason=None,
@@ -608,7 +726,8 @@ class ProviderAnalysisClient:
         if response.status_code == 402:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider account balance is unavailable",
@@ -618,7 +737,8 @@ class ProviderAnalysisClient:
         if response.status_code in {401, 403}:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider credential or account is unavailable",
@@ -628,7 +748,8 @@ class ProviderAnalysisClient:
         if response.status_code == 429:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider is temporarily unavailable",
@@ -639,7 +760,8 @@ class ProviderAnalysisClient:
         if response.status_code >= 500:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider is temporarily unavailable",
@@ -649,7 +771,8 @@ class ProviderAnalysisClient:
         if self._explicit_input_rejection(response):
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider explicitly rejected the analysis input size or context",
@@ -658,27 +781,45 @@ class ProviderAnalysisClient:
         if response.is_error:
             self._record_http_failure(
                 provider_id, resolved_model, scene_id, request_bytes, response_bytes,
-                segment_count, started, status_category, repair_attempted
+                segment_count, started, started_at, status_category, repair_attempted,
+                diagnostic_invocation_id, diagnostic_attempt_index,
             )
             raise ProviderAnalysisError(
                 "Provider rejected the analysis request", code="content_rejected"
             )
         try:
             body = response.json()
-            usage = body.get("usage", {}) if isinstance(body, dict) else {}
+            usage = body.get("usage") if isinstance(body, dict) else None
             input_tokens = (
                 self._usage_value(usage, "input_tokens", "prompt_tokens")
                 if isinstance(usage, dict)
-                else 0
+                else None
             )
             output_tokens = (
                 self._usage_value(usage, "output_tokens", "completion_tokens")
                 if isinstance(usage, dict)
-                else 0
+                else None
             )
-            if isinstance(usage, dict):
+            if input_tokens is not None:
                 self.usage_totals["input_tokens"] += input_tokens
+            if output_tokens is not None:
                 self.usage_totals["output_tokens"] += output_tokens
+            unavailable_parts = []
+            if input_tokens is None:
+                unavailable_parts.append("input")
+            if output_tokens is None:
+                unavailable_parts.append("output")
+            token_usage_unavailable_reason = (
+                "provider response omitted usage"
+                if not isinstance(usage, dict)
+                else (
+                    "provider response omitted "
+                    + " and ".join(unavailable_parts)
+                    + " token usage"
+                    if unavailable_parts
+                    else None
+                )
+            )
             finish_reason: str | None = None
             if config.api_style == "responses":
                 text = self.adapters[provider_id].extract_text(body)
@@ -687,6 +828,8 @@ class ProviderAnalysisClient:
                 text = result.text
                 finish_reason = result.finish_reason
             self._record_diagnostic(
+                invocation_id=diagnostic_invocation_id,
+                attempt_index=diagnostic_attempt_index,
                 provider_id=provider_id,
                 model_id=resolved_model,
                 scene_id=scene_id,
@@ -695,6 +838,9 @@ class ProviderAnalysisClient:
                 segment_count=segment_count,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                token_usage_unavailable_reason=token_usage_unavailable_reason,
+                started_at=started_at.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
                 elapsed_seconds=time.monotonic() - started,
                 status_category=status_category,
                 finish_reason=finish_reason,
@@ -702,7 +848,9 @@ class ProviderAnalysisClient:
             )
             if finish_reason == "length":
                 raise ProviderAnalysisError(
-                    "Provider output was truncated", code="model_output_truncated"
+                    "Provider output was truncated",
+                    code="model_output_truncated",
+                    partial_response=text,
                 )
             if finish_reason in {"content_filter", "content_rejected"}:
                 raise ProviderAnalysisError(
@@ -713,14 +861,19 @@ class ProviderAnalysisClient:
             raise
         except (ValueError, TypeError) as exc:
             self._record_diagnostic(
+                invocation_id=diagnostic_invocation_id,
+                attempt_index=diagnostic_attempt_index,
                 provider_id=provider_id,
                 model_id=resolved_model,
                 scene_id=scene_id,
                 request_bytes=request_bytes,
                 response_bytes=response_bytes,
                 segment_count=segment_count,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=None,
+                output_tokens=None,
+                token_usage_unavailable_reason="invalid provider response did not expose usage",
+                started_at=started_at.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
                 elapsed_seconds=time.monotonic() - started,
                 status_category=status_category,
                 finish_reason=None,
@@ -760,18 +913,26 @@ class ProviderAnalysisClient:
         response_bytes: int,
         segment_count: int,
         started: float,
+        started_at: datetime,
         status_category: str,
         repair_attempted: bool,
+        invocation_id: str,
+        attempt_index: int,
     ) -> None:
         self._record_diagnostic(
+            invocation_id=invocation_id,
+            attempt_index=attempt_index,
             provider_id=provider_id,
             model_id=model_id,
             scene_id=scene_id,
             request_bytes=request_bytes,
             response_bytes=response_bytes,
             segment_count=segment_count,
-            input_tokens=0,
-            output_tokens=0,
+            input_tokens=None,
+            output_tokens=None,
+            token_usage_unavailable_reason="request failed before usage was reported",
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
             elapsed_seconds=time.monotonic() - started,
             status_category=status_category,
             finish_reason=None,
@@ -787,7 +948,7 @@ class ProviderAnalysisClient:
         logger.info(
             "analysis_provider_request provider_id=%s model_id=%s scene_id=%s "
             "parameter_fingerprint=%s request_bytes=%d response_bytes=%d "
-            "segment_count=%d input_tokens=%d output_tokens=%d elapsed_seconds=%.3f "
+            "segment_count=%d input_tokens=%s output_tokens=%s elapsed_seconds=%.3f "
             "status_category=%s finish_reason=%s repair_attempted=%s",
             diagnostic.provider_id,
             diagnostic.model_id,
@@ -805,12 +966,12 @@ class ProviderAnalysisClient:
         )
 
     @staticmethod
-    def _usage_value(usage: dict[object, object], *names: str) -> int:
+    def _usage_value(usage: dict[object, object], *names: str) -> int | None:
         for name in names:
             value = usage.get(name)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 return value
-        return 0
+        return None
 
 
 class RemoteSceneAnalyzer:

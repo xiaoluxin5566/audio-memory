@@ -1,0 +1,7 @@
+{
+  "cards": [
+    {"card_id": "card-work", "scene_id": "work_communication", "markdown": "# 方案讨论\n\n工作方案仍待确认。"},
+    {"card_id": "card-life", "scene_id": "life_decisions", "markdown": "# 是否接受调动\n\n职业选择仍待确认。"}
+  ],
+  "expected_primary_scene": "life_decisions"
+}

@@ -332,6 +332,9 @@ class RuntimeConfig:
     port: int
     keychain_service: str
     production_data_root: Path | None = field(default=None, repr=False, compare=False)
+    report_pipeline: str = "beta8_p1_p5_v1"
+    beta8_search_provider: str | None = "kimi"
+    beta8_search_model: str | None = "kimi-k2.6"
 
     @classmethod
     def from_environment(
@@ -389,6 +392,46 @@ class RuntimeConfig:
                 "AUDIO_MEMORY_KEYCHAIN_SERVICE must not be blank"
             )
 
+        report_pipeline = values.get(
+            "AUDIO_MEMORY_REPORT_PIPELINE", "beta8_p1_p5_v1"
+        ).strip()
+        if report_pipeline not in {
+            "single_report_v1",
+            "beta8_multi_scene_v1",
+            "beta8_indexed_scene_v2",
+            "beta8_writing_v1",
+            "beta8_p1_p5_v1",
+        }:
+            raise RuntimeConfigurationError(
+                "AUDIO_MEMORY_REPORT_PIPELINE must be exactly "
+                "'single_report_v1', 'beta8_multi_scene_v1', or "
+                "'beta8_indexed_scene_v2', 'beta8_writing_v1', or "
+                "'beta8_p1_p5_v1'"
+            )
+        search_binding_explicit = (
+            "AUDIO_MEMORY_BETA8_SEARCH_PROVIDER" in values
+            or "AUDIO_MEMORY_BETA8_SEARCH_MODEL" in values
+        )
+        beta8_search_provider = (
+            values.get(
+                "AUDIO_MEMORY_BETA8_SEARCH_PROVIDER",
+                "" if search_binding_explicit else "kimi",
+            ).strip()
+            or None
+        )
+        beta8_search_model = (
+            values.get(
+                "AUDIO_MEMORY_BETA8_SEARCH_MODEL",
+                "" if search_binding_explicit else "kimi-k2.6",
+            ).strip()
+            or None
+        )
+        if (beta8_search_provider is None) != (beta8_search_model is None):
+            raise RuntimeConfigurationError(
+                "AUDIO_MEMORY_BETA8_SEARCH_PROVIDER and "
+                "AUDIO_MEMORY_BETA8_SEARCH_MODEL must be configured together"
+            )
+
         port_value = values.get("AUDIO_MEMORY_PORT")
         if port_value is None:
             port = default_port
@@ -416,6 +459,9 @@ class RuntimeConfig:
             port=port,
             keychain_service=service_value,
             production_data_root=production_root,
+            report_pipeline=report_pipeline,
+            beta8_search_provider=beta8_search_provider,
+            beta8_search_model=beta8_search_model,
         )
         config.validate()
         return config
@@ -447,6 +493,13 @@ class RuntimeConfig:
         if not self.keychain_service.strip():
             raise RuntimeConfigurationError(
                 "AUDIO_MEMORY_KEYCHAIN_SERVICE must not be blank"
+            )
+        if (self.beta8_search_provider is None) != (
+            self.beta8_search_model is None
+        ):
+            raise RuntimeConfigurationError(
+                "AUDIO_MEMORY_BETA8_SEARCH_PROVIDER and "
+                "AUDIO_MEMORY_BETA8_SEARCH_MODEL must be configured together"
             )
         self.validate_keychain_isolation()
         self.validate_development_isolation()

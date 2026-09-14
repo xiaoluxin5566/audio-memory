@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="$PROJECT_ROOT/backend/.venv/bin/python"
+TOOLCHAIN_ROOT="${AUDIO_MEMORY_TOOLCHAIN_ROOT:-$PROJECT_ROOT}"
+PYTHON="$TOOLCHAIN_ROOT/backend/.venv/bin/python"
 
 if [ ! -x "$PYTHON" ]; then
   printf '读取功能轨道失败：运行环境不存在。\n' >&2

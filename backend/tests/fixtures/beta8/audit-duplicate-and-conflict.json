@@ -1,0 +1,10 @@
+{
+  "exact_duplicates": [
+    {"problem": "归属错误", "affected_excerpt": "你已经决定"},
+    {"problem": "归属错误", "affected_excerpt": "你已经决定"}
+  ],
+  "semantic_conflicts": [
+    {"problem": "归属错误", "affected_excerpt": "你已经决定"},
+    {"problem": "归属错误", "affected_excerpt": "你已经采纳方案"}
+  ]
+}

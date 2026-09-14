@@ -1,0 +1,7 @@
+{
+  "operation": "revise",
+  "source_card_ids": ["card-1"],
+  "requirement_ids": ["req-1"],
+  "unaffected_card_ids": ["card-2"],
+  "expected_revision_calls": 1
+}

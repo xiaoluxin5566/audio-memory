@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "source_sha256": "6cb6881073d769f91639eb478d5c8dadf96be0431016885ddddd7e8f16cb20b8",
+  "annotation_policy": {
+    "purpose": "记录可从逐字稿核对的边界、内容类型、主体和验收期望，不预写模型报告文案。",
+    "uncertainty_rule": "只标注可识别事件；稀疏或严重错字片段保留原始范围，不补造缺失语义。",
+    "card_rule": "工作沟通按真实沟通事件验收；其他内容只记录覆盖、归属或低价值排除期望。"
+  },
+  "work_communications": [
+    {
+      "event_id": "work-highlight-window-and-xiaohongshu-sdk-call",
+      "communication_kind": "phone_or_online_call",
+      "cross_file": false,
+      "confidence": "high",
+      "ranges": [
+        {
+          "file_name": "07月31日 11-11 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_0_579",
+          "end_segment_id": "seg_0_623"
+        }
+      ],
+      "must_include_topics": [
+        "回看用户实际 mark 场景后再确定向前保留 3 秒、5 秒或更长窗口",
+        "女儿进球例子说明瞬间标记可能需要保留前置过程",
+        "小红书 SDK 到位后的编辑、截取和分享链路",
+        "SDK 未就绪前避免重复建设的工作量权衡"
+      ]
+    },
+    {
+      "event_id": "work-mobile-reporting-switch-coordination",
+      "communication_kind": "brief_phone_coordination",
+      "cross_file": false,
+      "confidence": "medium",
+      "ranges": [
+        {
+          "file_name": "07月31日 11-35 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_1_4",
+          "end_segment_id": "seg_1_9"
+        }
+      ],
+      "must_include_topics": [
+        "手机上报和下发检测开关状态",
+        "当天下午拉会处理",
+        "与天宇对接"
+      ]
+    },
+    {
+      "event_id": "work-vehicle-program-schedule-call",
+      "communication_kind": "phone_or_online_call",
+      "cross_file": false,
+      "confidence": "medium",
+      "ranges": [
+        {
+          "file_name": "07月31日 11-35 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_1_1271",
+          "end_segment_id": "seg_1_1298"
+        }
+      ],
+      "must_include_topics": [
+        "W02D、W10、W05 等车型任务和参与边界",
+        "紧张时间节点与体验排期",
+        "争取合并两款车体验以减少重复工作"
+      ]
+    },
+    {
+      "event_id": "work-vehicle-test-slot-followup-call",
+      "communication_kind": "phone_or_online_call",
+      "cross_file": false,
+      "confidence": "medium",
+      "ranges": [
+        {
+          "file_name": "07月31日 11-35 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_1_1299",
+          "end_segment_id": "seg_1_1315"
+        }
+      ],
+      "must_include_topics": [
+        "8 月上旬测试日期和周末/闭馆约束",
+        "语音控制相关测试需要额外安排时间",
+        "未决事项留到下一次拉会共同确认"
+      ]
+    },
+    {
+      "event_id": "work-glasses-okr-and-always-on-product-workshop",
+      "communication_kind": "team_weekly_meeting_and_product_workshop",
+      "cross_file": true,
+      "confidence": "high",
+      "ranges": [
+        {
+          "file_name": "07月31日 11-35 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_1_1338",
+          "end_segment_id": "seg_1_1626"
+        },
+        {
+          "file_name": "07月31日 18-56 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_2_0",
+          "end_segment_id": "seg_2_2258"
+        }
+      ],
+      "must_include_topics": [
+        "眼镜 OKR：二代架构和重量节点、一代 OTA、模型切换与成本目标",
+        "采购、人因验证、芯片/供应商评估和定点决策准备",
+        "Always On 音频作为眼镜能力的目标用户、工作/亲子/知识/健康场景和现有方案缺口",
+        "用真实录音回顾验证报告、搜索、待办和关系修复价值",
+        "音源覆盖、说话人归属、功耗续航、传输时效、隐私和原始录音可见性的关键假设",
+        "眼镜平台与垂类切入、健康顾问和人生教练两条产品线",
+        "硬件能力、模型与个人数据、团队经验、融资叙事和壁垒的取舍"
+      ]
+    }
+  ],
+  "must_cover_media_units": [
+    {
+      "unit_id": "media-august-horoscope-playback",
+      "media_kind": "autoplay_video_or_audio",
+      "speaker_owner": "media_speaker",
+      "user_reaction_present": false,
+      "ranges": [
+        {
+          "file_name": "07月31日 11-11 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_0_1",
+          "end_segment_id": "seg_0_58"
+        }
+      ],
+      "must_preserve": ["媒体播放身份", "无用户认同证据", "索引覆盖但不自动归为用户观点"]
+    },
+    {
+      "unit_id": "podcast-smart-swimming-goggles-founder-interview",
+      "media_kind": "podcast",
+      "speaker_owner": "podcast_host_and_guests",
+      "user_reaction_present": false,
+      "ranges": [
+        {
+          "file_name": "07月31日 11-11 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_0_59",
+          "end_segment_id": "seg_0_349"
+        }
+      ],
+      "must_preserve": [
+        "智能泳镜把技术指标转成消费者可感知价值",
+        "VOC 与专业业余运动人群洞察",
+        "实时数据、改善型需求、女性用户、外观重量与佩戴体验"
+      ]
+    },
+    {
+      "unit_id": "podcast-new-labs-and-ai-for-ai",
+      "media_kind": "podcast",
+      "speaker_owner": "podcast_host_and_liu_ziming",
+      "user_reaction_present": false,
+      "ranges": [
+        {
+          "file_name": "07月31日 11-11 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_0_350",
+          "end_segment_id": "seg_0_575"
+        },
+        {
+          "file_name": "07月31日 18-56 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_2_2264",
+          "end_segment_id": "seg_2_2273"
+        }
+      ],
+      "must_preserve": [
+        "New Labs 融资现象",
+        "AI for Science、Science of AI 与 AI for AI 的区分",
+        "模型架构设计、神经与符号方法的研究主线",
+        "跨文件续播属于同一媒体内容，不归为用户本人研究经历"
+      ]
+    },
+    {
+      "unit_id": "media-infinite-fiction-author-interview",
+      "media_kind": "autoplay_interview",
+      "speaker_owner": "media_speakers",
+      "user_reaction_present": false,
+      "ranges": [
+        {
+          "file_name": "07月31日 18-56 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_2_2285",
+          "end_segment_id": "seg_2_2296"
+        }
+      ],
+      "must_preserve": ["无限流小说与作者访谈片段", "媒体身份", "无用户明确评价"]
+    },
+    {
+      "unit_id": "media-human-versus-go-ai-commentary",
+      "media_kind": "autoplay_video",
+      "speaker_owner": "media_commentator",
+      "user_reaction_present": false,
+      "ranges": [
+        {
+          "file_name": "07月31日 21-25 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_3_385",
+          "end_segment_id": "seg_3_523"
+        }
+      ],
+      "must_preserve": ["人类棋手与围棋 AI 对局解说", "媒体身份", "无用户明确评价"]
+    }
+  ],
+  "third_party_cases": [
+    {
+      "case_id": "third-party-chen-zhen-departure-and-work-state",
+      "subject": "陈震",
+      "expression_use": "工作会议中演示 Always On 报告可能提供的心理健康增量信息",
+      "expected_attribution": "third_party_case_inside_work_communication",
+      "forbidden_attribution": "user_personal_state",
+      "ranges": [
+        {
+          "file_name": "07月31日 18-56 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_2_454",
+          "end_segment_id": "seg_2_466"
+        }
+      ],
+      "must_preserve": [
+        "离职和吐槽的主体是陈震",
+        "目标不清、资源不足、组织调整、犬儒或心理疏离等描述不能写成用户状态",
+        "该案例在当前逐字稿中的用途是产品方案论据"
+      ]
+    }
+  ],
+  "low_value_exclusions": [
+    {
+      "exclusion_id": "simple-weekday-and-birthday-calculation",
+      "reason": "只需确认 2026 年 9 月 7 日是星期几以及是否提前过生日，没有独立分析或决策帮助价值。",
+      "expected_handling": "index_as_substantive_family_unit_but_do_not_create_standalone_card",
+      "ranges": [
+        {
+          "file_name": "07月31日 21-25 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_3_308",
+          "end_segment_id": "seg_3_323"
+        }
+      ]
+    },
+    {
+      "exclusion_id": "unreflected-game-system-announcements",
+      "reason": "连续游戏系统播报没有用户的实质评价、决定、风险或待办。",
+      "expected_handling": "index_or_exclude_with_media_noise_reason_but_do_not_create_card",
+      "ranges": [
+        {
+          "file_name": "07月31日 21-25 Pokee SE-audio.mp3",
+          "start_segment_id": "seg_3_826",
+          "end_segment_id": "seg_3_875"
+        }
+      ]
+    }
+  ],
+  "human_blind_review": {
+    "labels": ["candidate_a", "candidate_b"],
+    "scale": {"minimum": 1, "maximum": 5},
+    "dimensions": [
+      "完整覆盖与防漏",
+      "工作沟通边界正确",
+      "主体与表达用途正确",
+      "非工作内容价值准入",
+      "单卡信息密度与核心判断",
+      "结构和内容类型匹配",
+      "建议的可直接使用性",
+      "直接表达且无第三方报告腔",
+      "Markdown 主标题与编号正确",
+      "引用正文与来源一一对应",
+      "本次运行计量完整"
+    ],
+    "hard_blockers": [
+      "主体错误",
+      "工作沟通拆分或误合并",
+      "未解决事实错误",
+      "搜索来源错配",
+      "未完成修订要求"
+    ],
+    "review_fields": ["reviewer", "label", "dimension", "score", "evidence", "notes"]
+  }
+}

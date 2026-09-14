@@ -60,6 +60,7 @@ class VolcanoAsrCoordinator:
         job_id: str,
         analysis_request: object,
         analysis_submitter: AnalysisSubmitter,
+        reconcile_unknown_submissions: bool = False,
     ) -> str:
         job, files = await self._job_and_files(job_id)
         if job.stage in {"analyzing", "ready_to_commit", "completed"}:
@@ -87,26 +88,52 @@ class VolcanoAsrCoordinator:
 
         async def complete(task_id: str) -> None:
             async with semaphore:
-                await self._complete_with_retry(task_id)
+                await self._complete_with_retry(
+                    task_id,
+                    reconcile_unknown_submission=reconcile_unknown_submissions,
+                )
 
         try:
             await asyncio.gather(*(complete(task.id) for task in tasks))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_code = (
+                "cloud_asr_submission_unknown"
+                if isinstance(exc, AsrProviderError)
+                and exc.code == "submission_unknown"
+                else "cloud_asr_failed"
+            )
+            await self._mark_job_failed(job_id, error_code)
+            raise
+        try:
             if self.transcript_finalizer is not None:
                 await self.transcript_finalizer.apply(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._mark_job_failed(job_id, "transcript_finalize_failed")
+            raise
+        try:
             await analysis_submitter.submit_new_upload(analysis_request)
         except asyncio.CancelledError:
             raise
         except Exception:
-            await self._mark_job_failed(job_id)
+            await self._mark_job_failed(job_id, "model_analysis_failed")
             raise
         await self._mark_job_analyzing(job_id)
         return "analyzing"
 
-    async def _complete_with_retry(self, task_id: str) -> None:
+    async def _complete_with_retry(
+        self, task_id: str, *, reconcile_unknown_submission: bool = False
+    ) -> None:
         failures = 0
         while True:
             try:
-                status = await self.advance_task(task_id)
+                status = await self.advance_task(
+                    task_id,
+                    reconcile_unknown_submission=reconcile_unknown_submission,
+                )
             except (AsrProviderError, StorageAuthorizationError) as exc:
                 if not exc.retriable or failures + 1 >= self.max_attempts:
                     raise
@@ -121,10 +148,14 @@ class VolcanoAsrCoordinator:
                 raise AsrProviderError("submission_unknown", retriable=False)
             await asyncio.sleep(self.poll_interval_seconds)
 
-    async def advance_task(self, task_id: str) -> str:
+    async def advance_task(
+        self, task_id: str, *, reconcile_unknown_submission: bool = False
+    ) -> str:
         task = await self.repository.get(task_id)
         if task.status == "submission_unknown":
-            return "submission_unknown"
+            if not reconcile_unknown_submission:
+                return "submission_unknown"
+            return await self._reconcile_unknown_submission(task)
         file = await self._job_file(task.job_file_id)
 
         if task.status == "completed":
@@ -183,6 +214,44 @@ class VolcanoAsrCoordinator:
         await self._materialize_and_cleanup(task, file)
         return "completed"
 
+    async def _reconcile_unknown_submission(self, task) -> str:
+        file = await self._job_file(task.job_file_id)
+        api_key = self._api_key()
+        try:
+            result = await self.volcano.poll(
+                api_key=api_key,
+                task_id=task.request_id,
+            )
+        except AsrProviderError as exc:
+            if exc.code != "invalid_audio":
+                raise
+            if task.storage_object_id is None:
+                raise RuntimeError("unknown ASR submission has no storage object")
+            read_ticket = await self.storage.create_read_url(task.storage_object_id)
+            remote_task_id = await self.volcano.submit(
+                api_key=api_key,
+                request=VolcanoSubmission(
+                    request_id=task.request_id,
+                    signed_url=read_ticket.url,
+                    audio_format=file.extension.removeprefix("."),
+                ),
+            )
+            await self.repository.mark_submitted(task.id, remote_task_id)
+            return "polling"
+
+        await self.repository.mark_submitted(task.id, task.request_id)
+        if not result.completed:
+            return "polling"
+        if result.payload is None:
+            raise RuntimeError("completed ASR task has no result")
+        result_json = json.dumps(
+            result.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        await self.repository.mark_completed(task.id, result_json)
+        refreshed = await self.repository.get(task.id)
+        await self._materialize_and_cleanup(refreshed, file)
+        return "completed"
+
     async def _materialize_and_cleanup(self, task, file: JobFile) -> None:
         if task.materialized_at is None:
             if task.result_json is None or file.duration_ms is None:
@@ -233,12 +302,12 @@ class VolcanoAsrCoordinator:
                 job.error_code = None
                 await session.commit()
 
-    async def _mark_job_failed(self, job_id: str) -> None:
+    async def _mark_job_failed(self, job_id: str, error_code: str) -> None:
         async with self.database.session() as session:
             job = await session.get(AnalysisJob, job_id)
             if job is not None and job.stage == "transcribing":
                 job.stage = "failed"
-                job.error_code = "cloud_asr_failed"
+                job.error_code = error_code
                 await session.commit()
 
     @staticmethod

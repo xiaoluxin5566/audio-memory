@@ -1,0 +1,14 @@
+Approved pre-Task8 runner packet adoption projection.
+Durable excerpt recovered from beta8-task-8-fix-round-1-review-package.diff;
+Task 7 report line 136 records that Task 7 did not modify search behavior.
+
+packet_by_id = {packet.search_task_id: packet for packet in packets}
+
+search_packets=[
+    packet_by_id[key].model_dump(mode="json")
+    for key in task.search_task_keys if key in packet_by_id
+    and packet_by_id[key].status != "failed"
+]
+
+This binds packet delivery solely to each approved revision task's ordered
+search_task_keys, excluding absent and failed packets.

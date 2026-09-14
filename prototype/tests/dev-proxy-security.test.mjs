@@ -80,6 +80,7 @@ test('loopback Vite proxy preserves the backend same-origin mutation boundary', 
       cwd: backendRoot,
       env: {
         ...process.env,
+        PYTHONPATH: join(backendRoot, 'src'),
         AUDIO_MEMORY_TEST_SECURITY_DB: join(testRoot, 'security.sqlite3'),
         AUDIO_MEMORY_TEST_BACKEND_PORT: String(backendPort),
         AUDIO_MEMORY_TEST_BACKEND_PROFILE: 'development',
@@ -194,6 +195,7 @@ test('development client establishes its health and session boundary before a mu
       cwd: backendRoot,
       env: {
         ...process.env,
+        PYTHONPATH: join(backendRoot, 'src'),
         AUDIO_MEMORY_TEST_SECURITY_DB: join(testRoot, 'security.sqlite3'),
         AUDIO_MEMORY_TEST_BACKEND_PORT: String(backendPort),
         AUDIO_MEMORY_TEST_BACKEND_PROFILE: 'development',
@@ -246,6 +248,7 @@ test('development client rechecks health after a backend is replaced before reus
     '--host', '127.0.0.1', '--port', String(backendPort), '--log-level', 'error',
   ], { cwd: backendRoot, env: {
     ...process.env,
+    PYTHONPATH: join(backendRoot, 'src'),
     AUDIO_MEMORY_TEST_SECURITY_DB: join(testRoot, 'security.sqlite3'),
     AUDIO_MEMORY_TEST_BACKEND_PORT: String(backendPort),
     AUDIO_MEMORY_TEST_BACKEND_PROFILE: 'development',
@@ -301,6 +304,7 @@ test('development UI blocks a production backend before it creates a session or 
       cwd: backendRoot,
       env: {
         ...process.env,
+        PYTHONPATH: join(backendRoot, 'src'),
         AUDIO_MEMORY_TEST_SECURITY_DB: join(testRoot, 'security.sqlite3'),
         AUDIO_MEMORY_TEST_BACKEND_PORT: String(backendPort),
         AUDIO_MEMORY_TEST_BACKEND_PROFILE: 'production',

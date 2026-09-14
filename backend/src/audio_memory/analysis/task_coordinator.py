@@ -4,12 +4,11 @@ import asyncio
 import json
 import logging
 import time
-from hashlib import sha256
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from sqlalchemy import and_, delete, or_, select, text, update
@@ -24,10 +23,18 @@ from audio_memory.models import (
     ReanalysisItem,
 )
 from audio_memory.observability import analysis_log_context, emit_analysis_event
-from audio_memory.prompts.composer import PromptComposer
 from audio_memory.analysis.pipeline_state import PipelineMetrics
+from audio_memory.analysis.pipeline_identity import (
+    BETA8_P1_P5_PIPELINE_KIND,
+    PipelineIdentity,
+    build_pipeline_parameters,
+    is_current_pipeline_compatible,
+    prompt_binding,
+    validate_version_pipeline_identity,
+    verified_pipeline_identity_hash,
+)
 from audio_memory.reanalysis.preview import (
-    current_fixed_rule_hashes,
+    fixed_rule_hashes_for_pipeline,
     transcript_fingerprint_from_session,
 )
 
@@ -58,6 +65,13 @@ class ReanalysisSnapshotChangedError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RetryAnalysisResult:
+    status: Literal["resumed", "no_prior", "fresh_required"]
+    version_id: str | None = None
+    identity: PipelineIdentity | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisRequest:
     source_job_id: str
     source_batch_id: str | None
@@ -69,6 +83,9 @@ class AnalysisRequest:
     priority: int
     event_map_json: str | None = None
     event_map_hash: str | None = None
+    pipeline_kind: str = "single_report_v1"
+    search_provider_id: str | None = None
+    search_model_id: str | None = None
 
 
 class VersionRunner(Protocol):
@@ -202,7 +219,7 @@ class AnalysisTaskCoordinator:
         provider_id: str,
         model_id: str,
         credential_generation: int,
-    ) -> str | None:
+    ) -> RetryAnalysisResult:
         """Requeue compatible failed or legacy unaudited work in place."""
         await self.initialize()
         async with self._condition:
@@ -221,7 +238,7 @@ class AnalysisTaskCoordinator:
                     )
                     if version is None:
                         await session.rollback()
-                        return None
+                        return RetryAnalysisResult(status="no_prior")
                     if version.status == "completed":
                         try:
                             staged = json.loads(version.staged_results_json or "{}")
@@ -237,16 +254,33 @@ class AnalysisTaskCoordinator:
                             )
                         ):
                             await session.rollback()
-                            return None
+                            return RetryAnalysisResult(status="no_prior")
+                    identity = validate_version_pipeline_identity(version)
                     if (
                         version.provider_id != provider_id
                         or version.model_id != model_id
                         or version.credential_generation != credential_generation
-                        or version.fixed_rules_hash != PromptComposer.fixed_rules_hash()
+                        or not is_current_pipeline_compatible(identity)
                     ):
                         await session.rollback()
-                        return None
+                        return RetryAnalysisResult(
+                            status="fresh_required", identity=identity
+                        )
                     version.status = "pending"
+                    if identity.pipeline_kind == BETA8_P1_P5_PIPELINE_KIND:
+                        try:
+                            checkpoints = json.loads(
+                                version.pipeline_checkpoints_json or "{}"
+                            )
+                        except (TypeError, json.JSONDecodeError):
+                            checkpoints = {}
+                        if not isinstance(checkpoints, dict):
+                            checkpoints = {}
+                        generation = checkpoints.get("explicit_retry_generation", 0)
+                        if isinstance(generation, bool) or not isinstance(generation, int):
+                            generation = 0
+                        checkpoints["explicit_retry_generation"] = generation + 1
+                        version.pipeline_checkpoints_json = json.dumps(checkpoints)
                     version.error_code = None
                     version.worker_owner_id = None
                     version.lease_expires_at = None
@@ -254,12 +288,14 @@ class AnalysisTaskCoordinator:
                     job = await session.get(AnalysisJob, source_job_id)
                     if job is None:
                         await session.rollback()
-                        return None
+                        return RetryAnalysisResult(status="no_prior")
                     job.stage = "analyzing"
                     job.error_code = None
                     await session.commit()
             self._condition.notify_all()
-        return version.id
+        return RetryAnalysisResult(
+            status="resumed", version_id=version.id, identity=identity
+        )
 
     @asynccontextmanager
     async def maintenance_guard(self):
@@ -335,31 +371,17 @@ class AnalysisTaskCoordinator:
         profile_json = json.dumps(
             request.profile_snapshot, ensure_ascii=False, sort_keys=True
         )
-        fixed_rules_hash = PromptComposer.fixed_rules_hash()
-        prompt_manifest = [
-            {
-                "role": item["role"],
-                "files": item["files"],
-                "sha256": item["sha256"],
-            }
-            for item in PromptComposer.final_report_prompt_manifest()
-        ]
-        pipeline_parameters = {
-            "provider_id": request.provider_id,
-            "model_id": request.model_id,
-            "credential_generation": request.credential_generation,
-            "fixed_rules_hash": fixed_rules_hash,
-            "prompt_manifest": prompt_manifest,
-        }
-        pipeline_parameters_json = json.dumps(
-            pipeline_parameters,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        pipeline_parameters, pipeline_parameters_json, pipeline_parameters_fingerprint = (
+            build_pipeline_parameters(
+                pipeline_kind=request.pipeline_kind,
+                provider_id=request.provider_id,
+                model_id=request.model_id,
+                credential_generation=request.credential_generation,
+                search_provider_id=request.search_provider_id,
+                search_model_id=request.search_model_id,
+            )
         )
-        pipeline_parameters_fingerprint = sha256(
-            pipeline_parameters_json.encode("utf-8")
-        ).hexdigest()
+        fixed_rules_hash = str(pipeline_parameters["fixed_rules_hash"])
         version_id = str(uuid4())
         async with self._condition, self._notify_waiters_on_exit(
             job_id=request.source_job_id,
@@ -468,11 +490,66 @@ class AnalysisTaskCoordinator:
                                     )
                                 )
                                 compatibility_error = None
-                                if metadata.get(
-                                    "fixed_rule_hashes"
-                                ) != current_fixed_rule_hashes():
+                                source_identity_bindings = metadata.get(
+                                    "source_identity_bindings"
+                                )
+                                if source_identity_bindings is not None:
+                                    expected_source_binding = (
+                                        source_identity_bindings.get(source_batch.id)
+                                        if isinstance(
+                                            source_identity_bindings, dict
+                                        )
+                                        else None
+                                    )
+                                    current_source_version = (
+                                        await session.get(
+                                            AnalysisVersion,
+                                            source_batch.current_analysis_version_id,
+                                        )
+                                        if source_batch.current_analysis_version_id
+                                        is not None
+                                        else None
+                                    )
+                                    try:
+                                        current_identity_hash = (
+                                            verified_pipeline_identity_hash(
+                                                current_source_version
+                                            )
+                                        )
+                                    except (AttributeError, ValueError):
+                                        current_identity_hash = None
+                                    if (
+                                        not isinstance(
+                                            expected_source_binding, dict
+                                        )
+                                        or current_source_version is None
+                                        or expected_source_binding.get(
+                                            "current_analysis_version_id"
+                                        )
+                                        != current_source_version.id
+                                        or expected_source_binding.get(
+                                            "pipeline_identity_hash"
+                                        )
+                                        != current_identity_hash
+                                    ):
+                                        compatibility_error = (
+                                            "analysis_schema_changed"
+                                        )
+                                if compatibility_error is None and (
+                                    metadata.get("pipeline_kind")
+                                    != request.pipeline_kind
+                                    or metadata.get("prompt_manifest")
+                                    != prompt_binding(request.pipeline_kind)[1]
+                                    or metadata.get("fixed_rule_hashes")
+                                    != fixed_rule_hashes_for_pipeline(
+                                        request.pipeline_kind
+                                    )
+                                ):
                                     compatibility_error = "analysis_schema_changed"
-                                elif expected_transcript != current_transcript:
+                                elif (
+                                    compatibility_error is None
+                                    and expected_transcript != current_transcript
+                                ):
                                     compatibility_error = "transcript_changed"
                                 if compatibility_error is not None:
                                     owning_run.status = "paused"
@@ -830,6 +907,7 @@ class AnalysisTaskCoordinator:
 
     @staticmethod
     def _request_from_version(version: AnalysisVersion) -> AnalysisRequest:
+        identity = validate_version_pipeline_identity(version)
         return AnalysisRequest(
             source_job_id=version.source_job_id,
             source_batch_id=version.batch_id,
@@ -841,4 +919,7 @@ class AnalysisTaskCoordinator:
             priority=version.priority,
             event_map_json=version.event_map_json,
             event_map_hash=version.event_map_hash,
+            pipeline_kind=identity.pipeline_kind,
+            search_provider_id=identity.search_provider_id,
+            search_model_id=identity.search_model_id,
         )

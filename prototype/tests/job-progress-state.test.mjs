@@ -53,7 +53,7 @@ test('missing durable queue is presented as retryable instead of running', () =>
     model_id: 'deepseek-v4-pro',
   }), {
     title: '分析未开始，可重试',
-    detail: '完整转写已保留，重试不会再次执行 Whisper。',
+    detail: '完整转写已保留，重试只会继续报告生成，不会再次转写音频。',
     failed: true,
   })
 })

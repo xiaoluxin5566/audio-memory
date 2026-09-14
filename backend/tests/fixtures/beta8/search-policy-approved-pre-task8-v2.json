@@ -1,0 +1,56 @@
+{
+  "provenance": {
+    "approved_boundary": "Only canonical URL, stable source_id, and strict closure may differ after Task 8",
+    "captured_at": "2026-09-04T10:47:35+08:00",
+    "durable_sources": {
+      "search_executor": {"path": "search-policy-pre-task8/beta8-search-policy-source.txt", "sha256": "949d7322785b3131c17e029d32b83b3e3c88b2f95f6d59e0f5a2d193db0926f8"},
+      "runner_adoption": {"path": "search-policy-pre-task8/runner-adoption-source.txt", "sha256": "436ddc0a8ebad36ad110a4def3c4d5065671750ad77a6db6381b8137eeeb415a"}
+    },
+    "kimi_source_sha256": "81914d354738d504946dd87af402edd805c7c46bca155c31a4b13284f2b828f7",
+    "search_orchestration_section_sha256": "8e5b3c30997a6ec06ca7310fd9e1d94817b8ac9cb65590b3efb2982a7303dca9"
+  },
+  "cases": [
+    {
+      "name": "zero_tasks",
+      "search_candidates": [],
+      "orchestration": {"input_complete": true, "input_error": null, "audit_issue_decisions": [], "card_decisions": [], "revision_tasks": [], "search_tasks": [], "dropped_search_candidates": [], "todo_candidates": [], "dropped_todo_candidates": [], "unresolved_conflicts": []},
+      "expected": {"candidate_input_order": [], "task_count": 0, "task_order": [], "tasks": [], "dropped_candidate_ids": [], "adoption": []}
+    },
+    {
+      "name": "multi_tasks",
+      "search_candidates": [{"search_candidate_id": "candidate-1"}, {"search_candidate_id": "candidate-2"}, {"search_candidate_id": "candidate-3"}],
+      "orchestration": {
+        "input_complete": true, "input_error": null, "audit_issue_decisions": [],
+        "card_decisions": [
+          {"decision_key": "decision-1", "operation": "revise", "source_card_ids": ["card-1"], "target_scene_id": "work_communication", "reason": "revise", "revision_task_key": "revision-1"},
+          {"decision_key": "decision-2", "operation": "revise", "source_card_ids": ["card-2"], "target_scene_id": "health_state", "reason": "revise", "revision_task_key": "revision-2"},
+          {"decision_key": "decision-3", "operation": "revise", "source_card_ids": ["card-3"], "target_scene_id": "life_decisions", "reason": "revise", "revision_task_key": "revision-3"}
+        ],
+        "revision_tasks": [
+          {"revision_task_key": "revision-1", "decision_key": "decision-1", "operation": "revise", "target_scene_id": "work_communication", "source_card_ids": ["card-1"], "audit_issue_ids": [], "requirements": [{"requirement_id": "req-1", "instruction": "A", "evidence_segment_ids": ["seg-1"]}], "preserve_points": [], "remove_or_avoid": [], "completion_criteria": ["A"], "search_task_keys": ["search-1"]},
+          {"revision_task_key": "revision-2", "decision_key": "decision-2", "operation": "revise", "target_scene_id": "health_state", "source_card_ids": ["card-2"], "audit_issue_ids": [], "requirements": [{"requirement_id": "req-2", "instruction": "B", "evidence_segment_ids": ["seg-2"]}], "preserve_points": [], "remove_or_avoid": [], "completion_criteria": ["B"], "search_task_keys": ["search-2"]},
+          {"revision_task_key": "revision-3", "decision_key": "decision-3", "operation": "revise", "target_scene_id": "life_decisions", "source_card_ids": ["card-3"], "audit_issue_ids": [], "requirements": [{"requirement_id": "req-3", "instruction": "C", "evidence_segment_ids": ["seg-3"]}], "preserve_points": [], "remove_or_avoid": [], "completion_criteria": ["C"], "search_task_keys": ["search-2"]}
+        ],
+        "search_tasks": [
+          {"search_task_key": "search-1", "source_candidate_ids": ["candidate-1", "candidate-2"], "question": "问题 A", "purpose": "核验 A", "target_decision_keys": ["decision-1"], "related_segment_ids": ["seg-1"], "source_requirements": ["官方文档"], "jurisdiction": null, "freshness_requirement": null},
+          {"search_task_key": "search-2", "source_candidate_ids": ["candidate-3"], "question": "问题 B", "purpose": "核验 B", "target_decision_keys": ["decision-2", "decision-3"], "related_segment_ids": ["seg-2", "seg-3"], "source_requirements": ["一手资料"], "jurisdiction": "CN", "freshness_requirement": "2026-09"}
+        ],
+        "dropped_search_candidates": [], "todo_candidates": [], "dropped_todo_candidates": [], "unresolved_conflicts": []
+      },
+      "expected": {
+        "candidate_input_order": ["candidate-1", "candidate-2", "candidate-3"], "task_count": 2, "task_order": ["search-1", "search-2"],
+        "tasks": [
+          {"search_task_key": "search-1", "source_candidate_ids": ["candidate-1", "candidate-2"], "question": "问题 A", "target_decision_keys": ["decision-1"]},
+          {"search_task_key": "search-2", "source_candidate_ids": ["candidate-3"], "question": "问题 B", "target_decision_keys": ["decision-2", "decision-3"]}
+        ],
+        "dropped_candidate_ids": [],
+        "adoption": [
+          {"decision_key": "decision-1", "revision_task_key": "revision-1", "search_task_keys": ["search-1"]},
+          {"decision_key": "decision-2", "revision_task_key": "revision-2", "search_task_keys": ["search-2"]},
+          {"decision_key": "decision-3", "revision_task_key": "revision-3", "search_task_keys": ["search-2"]}
+        ]
+      }
+    }
+  ],
+  "kimi_k2_6_request_shape": {"model": "kimi-k2.6", "messages": [{"role": "system", "content": "Use the built-in $web_search tool to find primary sources for the requested queries. Return every source as an exact four-line block using these labels: **ID**, **标题**, **URL**, **说明**. Do not omit the original search ID or result number."}, {"role": "user", "content": "- 问题 A\n- 问题 B"}], "stream": false, "tools": [{"type": "builtin_function", "function": {"name": "$web_search"}}], "thinking": {"type": "disabled"}}
+}

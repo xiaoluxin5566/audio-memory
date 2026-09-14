@@ -6,8 +6,15 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
+from audio_memory.analysis.pipeline_identity import (
+    BETA8_INDEXED_PIPELINE_KIND,
+    BETA8_LEGACY_PIPELINE_KIND,
+    SINGLE_REPORT_PIPELINE_KIND,
+    build_pipeline_parameters,
+    prompt_binding,
+)
 from audio_memory.analysis.task_coordinator import AnalysisTaskCoordinator
 from audio_memory.content.clear import HistoryBusyError, HistoryCleaner
 from audio_memory.db import Database
@@ -21,6 +28,7 @@ from audio_memory.models import (
     Transcript,
 )
 from audio_memory.prompts.composer import PromptComposer
+from audio_memory.prompts.beta8_composer import Beta8PromptComposer
 from audio_memory.providers.types import ProviderState, ProviderStateName
 
 
@@ -127,8 +135,11 @@ async def seed_history_run(
     batch_status: str = "running",
     item_statuses: tuple[str, ...] = ("pending", "pending"),
     fixed_rules_hash: str | None = None,
+    pipeline_kind: str = SINGLE_REPORT_PIPELINE_KIND,
+    search_provider_id: str | None = None,
+    search_model_id: str | None = None,
 ) -> None:
-    fixed_hash = fixed_rules_hash or PromptComposer.fixed_rules_hash()
+    fixed_hash = fixed_rules_hash or prompt_binding(pipeline_kind)[0]
     async with database.session() as session:
         for position in range(len(item_statuses)):
             job_id = f"job-{position}"
@@ -171,6 +182,20 @@ async def seed_history_run(
         await session.flush()
         for position in range(len(item_statuses)):
             event_json = valid_event_map("seg_0_0")
+            if pipeline_kind == SINGLE_REPORT_PIPELINE_KIND:
+                parameters_json = "{}"
+                parameters_fingerprint = None
+            else:
+                _, parameters_json, parameters_fingerprint = (
+                    build_pipeline_parameters(
+                        pipeline_kind=pipeline_kind,
+                        provider_id="kimi",
+                        model_id="old-model",
+                        credential_generation=1,
+                        search_provider_id=search_provider_id,
+                        search_model_id=search_model_id,
+                    )
+                )
             session.add(
                 AnalysisVersion(
                     id=f"old-version-{position}",
@@ -185,6 +210,8 @@ async def seed_history_run(
                     event_map_json=event_json,
                     event_map_hash=sha256(event_json.encode()).hexdigest(),
                     staged_results_json="{}",
+                    pipeline_parameters_json=parameters_json,
+                    pipeline_parameters_fingerprint=parameters_fingerprint,
                     priority=0,
                     status="completed",
                 )
@@ -223,9 +250,10 @@ async def seed_history_run(
         await session.commit()
     from audio_memory.reanalysis.preview import (
         canonical_hash,
-        current_fixed_rule_hashes,
+        fixed_rule_hashes_for_pipeline,
         transcript_fingerprint,
     )
+    from audio_memory.analysis.pipeline_identity import verified_pipeline_identity_hash
 
     fingerprints = {
         f"source-{position}": await transcript_fingerprint(
@@ -233,9 +261,21 @@ async def seed_history_run(
         )
         for position in range(len(item_statuses))
     }
+    async with database.session() as session:
+        source_identity_bindings = {}
+        for position in range(len(item_statuses)):
+            version = await session.get(AnalysisVersion, f"old-version-{position}")
+            assert version is not None
+            source_identity_bindings[f"source-{position}"] = {
+                "current_analysis_version_id": version.id,
+                "pipeline_identity_hash": verified_pipeline_identity_hash(version),
+            }
     metadata = {
-        "fixed_rule_hashes": current_fixed_rule_hashes(),
+        "fixed_rule_hashes": fixed_rule_hashes_for_pipeline(pipeline_kind),
+        "pipeline_kind": pipeline_kind,
+        "prompt_manifest": prompt_binding(pipeline_kind)[1],
         "transcript_fingerprints": fingerprints,
+        "source_identity_bindings": source_identity_bindings,
         "profile_hash": canonical_hash(
             [{"subject_id": "user", "dimension": "role"}]
         ),
@@ -307,6 +347,509 @@ async def test_worker_enqueues_one_newest_item_reuses_valid_event_map_and_never_
     assert items[0].analysis_version_id == versions[0].id
     assert items[1].analysis_version_id is None
     assert (after_files, after_transcripts) == (before_files, before_transcripts)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_beta8_pipeline_and_search_identity(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "beta8-identity.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_LEGACY_PIPELINE_KIND,
+        search_provider_id="search-provider",
+        search_model_id="search-model",
+    )
+
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=ProfilePublisher(database),
+    )
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == "history-1"
+            )
+        )
+    assert generated is not None
+    parameters = json.loads(generated.pipeline_parameters_json)
+    assert parameters["pipeline_kind"] == "beta8_multi_scene_v1"
+    assert parameters["search_provider_id"] == "search-provider"
+    assert parameters["search_model_id"] == "search-model"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_indexed_beta8_pipeline_identity(tmp_path: Path) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "indexed-beta8-identity.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+    )
+
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=ProfilePublisher(database),
+    )
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == "history-1"
+            )
+        )
+    assert generated is not None
+    assert (
+        json.loads(generated.pipeline_parameters_json)["pipeline_kind"]
+        == "beta8_indexed_scene_v2"
+    )
+    await database.dispose()
+
+
+async def build_indexed_reanalysis_service(tmp_path: Path, database_name: str):
+    from audio_memory.prompts.store import PromptStore
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+    from audio_memory.reanalysis.service import ReanalysisService
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / database_name)
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+        search_provider_id="frozen-search-provider",
+        search_model_id="frozen-search-model",
+    )
+    async with database.session() as session:
+        await session.execute(delete(ReanalysisItem))
+        await session.execute(delete(ReanalysisBatch))
+        await session.commit()
+    provider = Provider()
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=ProfilePublisher(database),
+    )
+    prompts = PromptStore(tmp_path / f"{database_name}-prompts")
+    prompts.initialize()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"v" * 32),
+        ),
+        provider_coordinator=provider,
+        task_coordinator=coordinator,
+        worker=worker,
+    )
+    return database, service, worker
+
+
+async def replace_indexed_source_version(
+    database: Database,
+    *,
+    version_id: str,
+    search_provider_id: str,
+    search_model_id: str,
+) -> None:
+    parameters, parameters_json, fingerprint = build_pipeline_parameters(
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+        provider_id="kimi",
+        model_id="replacement-model",
+        credential_generation=9,
+        search_provider_id=search_provider_id,
+        search_model_id=search_model_id,
+    )
+    async with database.session() as session:
+        session.add(AnalysisVersion(
+            id=version_id,
+            source_job_id="job-0",
+            batch_id="source-0",
+            provider_id="kimi",
+            model_id="replacement-model",
+            credential_generation=9,
+            prompt_snapshot_json="{}",
+            profile_snapshot_json="[]",
+            fixed_rules_hash=parameters["fixed_rules_hash"],
+            staged_results_json="{}",
+            pipeline_parameters_json=parameters_json,
+            pipeline_parameters_fingerprint=fingerprint,
+            priority=0,
+            status="completed",
+        ))
+        source = await session.get(Batch, "source-0")
+        assert source is not None
+        source.current_analysis_version_id = version_id
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_same_pipeline_source_version_replacement(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.reanalysis.service import SnapshotChangedError
+
+    database, service, _worker = await build_indexed_reanalysis_service(
+        tmp_path, "create-source-version-drift.sqlite3"
+    )
+    preview = await service.preview(("source-0",))
+    await replace_indexed_source_version(
+        database,
+        version_id="replacement-before-create",
+        search_provider_id="replacement-search",
+        search_model_id="replacement-search-model",
+    )
+
+    with pytest.raises(SnapshotChangedError, match="History or analysis configuration"):
+        await service.create_batch(preview.preview_token, ("source-0",))
+
+    async with database.session() as session:
+        batches = list(await session.scalars(select(ReanalysisBatch)))
+    assert batches == []
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_pauses_when_source_version_changes_after_batch_creation(
+    tmp_path: Path,
+) -> None:
+    database, service, worker = await build_indexed_reanalysis_service(
+        tmp_path, "worker-source-version-drift.sqlite3"
+    )
+    preview = await service.preview(("source-0",))
+    created = await service.create_batch(preview.preview_token, ("source-0",))
+    await replace_indexed_source_version(
+        database,
+        version_id="replacement-before-worker",
+        search_provider_id="replacement-search",
+        search_model_id="replacement-search-model",
+    )
+
+    await worker.tick()
+
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, created.id)
+        item = await session.scalar(select(ReanalysisItem))
+        generated = list(await session.scalars(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == created.id
+            )
+        ))
+    assert batch is not None and batch.status == "paused"
+    assert item is not None and item.error_code == "analysis_schema_changed"
+    assert generated == []
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_service_preview_create_worker_preserves_indexed_pipeline_snapshot(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.prompts.store import PromptStore
+    from audio_memory.reanalysis.preview import (
+        PreviewSigner,
+        ReanalysisPreviewBuilder,
+        fixed_rule_hashes_for_pipeline,
+    )
+    from audio_memory.reanalysis.service import ReanalysisService
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "indexed-service-flow.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+        search_provider_id="frozen-search-provider",
+        search_model_id="frozen-search-model",
+    )
+    async with database.session() as session:
+        await session.execute(delete(ReanalysisItem))
+        await session.execute(delete(ReanalysisBatch))
+        await session.commit()
+
+    provider = Provider()
+    coordinator = AnalysisTaskCoordinator(database)
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=coordinator,
+        publisher=ProfilePublisher(database),
+    )
+    prompts = PromptStore(tmp_path / "indexed-service-prompts")
+    prompts.initialize()
+    service = ReanalysisService(
+        database=database,
+        preview_builder=ReanalysisPreviewBuilder(
+            database=database,
+            prompt_store=prompts,
+            provider_coordinator=provider,
+            signer=PreviewSigner(secret=b"i" * 32),
+        ),
+        provider_coordinator=provider,
+        task_coordinator=coordinator,
+        worker=worker,
+    )
+
+    preview = await service.preview(("source-0",))
+    assert preview.snapshot.pipeline_kind == BETA8_INDEXED_PIPELINE_KIND
+    assert preview.snapshot.fixed_rules_hash == Beta8PromptComposer.fixed_rules_hash()
+    assert preview.snapshot.prompt_manifest == tuple(
+        prompt_binding(BETA8_INDEXED_PIPELINE_KIND)[1]
+    )
+    created = await service.create_batch(
+        preview.preview_token,
+        ("source-0",),
+    )
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, created.id)
+        assert batch is not None
+        batch.status = "paused"
+        await session.commit()
+    resumed = await service.resume(created.id)
+    assert resumed.status == "running"
+    await worker.tick()
+
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, created.id)
+        generated = await session.scalar(
+            select(AnalysisVersion).where(
+                AnalysisVersion.reanalysis_batch_id == created.id
+            )
+        )
+    assert batch is not None
+    metadata = json.loads(batch.prompt_snapshot_json)["_reanalysis"]
+    assert metadata["pipeline_kind"] == BETA8_INDEXED_PIPELINE_KIND
+    assert metadata["prompt_manifest"] == prompt_binding(
+        BETA8_INDEXED_PIPELINE_KIND
+    )[1]
+    assert metadata["fixed_rule_hashes"] == fixed_rule_hashes_for_pipeline(
+        BETA8_INDEXED_PIPELINE_KIND
+    )
+    assert metadata["source_identity_bindings"]["source-0"][
+        "current_analysis_version_id"
+    ] == "old-version-0"
+    assert len(
+        metadata["source_identity_bindings"]["source-0"][
+            "pipeline_identity_hash"
+        ]
+    ) == 64
+    assert generated is not None
+    parameters = json.loads(generated.pipeline_parameters_json)
+    assert parameters["pipeline_kind"] == BETA8_INDEXED_PIPELINE_KIND
+    assert parameters["search_provider_id"] == "frozen-search-provider"
+    assert parameters["search_model_id"] == "frozen-search-model"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_preview_rejects_mixed_source_pipeline_kinds(tmp_path: Path) -> None:
+    from audio_memory.prompts.store import PromptStore
+    from audio_memory.reanalysis.preview import (
+        PreviewSigner,
+        ReanalysisPreviewBuilder,
+        ReanalysisSourceSelectionError,
+    )
+
+    database = Database(tmp_path / "mixed-pipeline-preview.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending", "pending"),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+    )
+    legacy_parameters, legacy_json, legacy_fingerprint = build_pipeline_parameters(
+        pipeline_kind=BETA8_LEGACY_PIPELINE_KIND,
+        provider_id="kimi",
+        model_id="old-model",
+        credential_generation=1,
+        search_provider_id=None,
+        search_model_id=None,
+    )
+    async with database.session() as session:
+        await session.execute(delete(ReanalysisItem))
+        await session.execute(delete(ReanalysisBatch))
+        legacy = await session.get(AnalysisVersion, "old-version-1")
+        assert legacy is not None
+        legacy.fixed_rules_hash = str(legacy_parameters["fixed_rules_hash"])
+        legacy.pipeline_parameters_json = legacy_json
+        legacy.pipeline_parameters_fingerprint = legacy_fingerprint
+        await session.commit()
+    prompts = PromptStore(tmp_path / "mixed-pipeline-prompts")
+    prompts.initialize()
+    builder = ReanalysisPreviewBuilder(
+        database=database,
+        prompt_store=prompts,
+        provider_coordinator=Provider(),
+        signer=PreviewSigner(secret=b"m" * 32),
+    )
+
+    with pytest.raises(ReanalysisSourceSelectionError) as error:
+        await builder.build(source_batch_ids=("source-0", "source-1"))
+
+    assert error.value.code == "mixed_pipeline_kinds"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_selected_indexed_preview_ignores_unrelated_invalid_history(
+    tmp_path: Path,
+) -> None:
+    from audio_memory.prompts.store import PromptStore
+    from audio_memory.reanalysis.preview import PreviewSigner, ReanalysisPreviewBuilder
+
+    database = Database(tmp_path / "selected-with-unrelated-invalid.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending", "pending"),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+    )
+    async with database.session() as session:
+        await session.execute(delete(ReanalysisItem))
+        await session.execute(delete(ReanalysisBatch))
+        unrelated = await session.get(AnalysisVersion, "old-version-1")
+        assert unrelated is not None
+        unrelated.pipeline_parameters_json = "[]"
+        await session.commit()
+    prompts = PromptStore(tmp_path / "selected-invalid-prompts")
+    prompts.initialize()
+    builder = ReanalysisPreviewBuilder(
+        database=database,
+        prompt_store=prompts,
+        provider_coordinator=Provider(),
+        signer=PreviewSigner(secret=b"s" * 32),
+    )
+
+    preview = await builder.build(source_batch_ids=("source-0",))
+
+    assert preview.source_batch_ids == ("source-0",)
+    assert preview.snapshot.pipeline_kind == BETA8_INDEXED_PIPELINE_KIND
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("search_provider_id", "search_model_id"),
+    [("half-search", None), (None, "half-search-model")],
+)
+async def test_selected_preview_rejects_half_stored_search_binding(
+    tmp_path: Path,
+    search_provider_id: str | None,
+    search_model_id: str | None,
+) -> None:
+    from audio_memory.prompts.store import PromptStore
+    from audio_memory.reanalysis.preview import (
+        PreviewSigner,
+        ReanalysisPreviewBuilder,
+        ReanalysisSourceSelectionError,
+    )
+
+    database = Database(tmp_path / "selected-half-search.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+        search_provider_id="original-search",
+        search_model_id="original-search-model",
+    )
+    async with database.session() as session:
+        version = await session.get(AnalysisVersion, "old-version-0")
+        assert version is not None
+        parameters = json.loads(version.pipeline_parameters_json)
+        parameters["search_provider_id"] = search_provider_id
+        parameters["search_model_id"] = search_model_id
+        parameters_json = json.dumps(
+            parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        version.pipeline_parameters_json = parameters_json
+        version.pipeline_parameters_fingerprint = sha256(
+            parameters_json.encode()
+        ).hexdigest()
+        await session.commit()
+    prompts = PromptStore(tmp_path / "selected-half-search-prompts")
+    prompts.initialize()
+    builder = ReanalysisPreviewBuilder(
+        database=database,
+        prompt_store=prompts,
+        provider_coordinator=Provider(),
+        signer=PreviewSigner(secret=b"h" * 32),
+    )
+
+    with pytest.raises(ReanalysisSourceSelectionError) as error:
+        await builder.build(source_batch_ids=("source-0",))
+
+    assert error.value.code == "invalid_pipeline_identity"
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pipeline_parameters_json",
+    [
+        "{not-json",
+        json.dumps({"pipeline_kind": "future"}),
+        json.dumps({"pipeline_kind": []}),
+        json.dumps({"pipeline_kind": {}}),
+    ],
+)
+async def test_worker_does_not_downgrade_corrupt_pipeline_identity_to_legacy_default(
+    tmp_path: Path,
+    pipeline_parameters_json: str,
+) -> None:
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "corrupt-pipeline-identity.sqlite3")
+    await database.create_schema()
+    await seed_history_run(database, item_statuses=("pending",))
+    async with database.session() as session:
+        source_version = await session.get(AnalysisVersion, "old-version-0")
+        assert source_version is not None
+        source_version.pipeline_parameters_json = pipeline_parameters_json
+        await session.commit()
+
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=ProfilePublisher(database),
+    )
+
+    await worker.tick()
+    await worker.tick()
+
+    async with database.session() as session:
+        generated = list(
+            await session.scalars(
+                select(AnalysisVersion).where(
+                    AnalysisVersion.reanalysis_batch_id == "history-1"
+                )
+            )
+        )
+        batch = await session.get(ReanalysisBatch, "history-1")
+        item = await session.get(ReanalysisItem, "item-0")
+    assert generated == []
+    assert batch is not None and batch.status == "paused"
+    assert item is not None and item.error_code == "analysis_schema_changed"
     await database.dispose()
 
 
@@ -1108,8 +1651,8 @@ async def test_schema_change_between_worker_check_and_queue_insert_pauses_durabl
     changed_hashes["report_schemas"] = "9" * 64
     monkeypatch.setattr(
         coordinator_module,
-        "current_fixed_rule_hashes",
-        lambda: changed_hashes,
+        "fixed_rule_hashes_for_pipeline",
+        lambda _pipeline_kind: changed_hashes,
         raising=False,
     )
     worker = ReanalysisWorker(
@@ -1134,5 +1677,51 @@ async def test_schema_change_between_worker_check_and_queue_insert_pauses_durabl
     assert batch is not None and batch.status == "paused"
     assert item is not None and item.status == "pending"
     assert item.error_code == "analysis_schema_changed"
+    assert generated == 0
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_source_identity_change_at_queue_insert_pauses_durably(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import audio_memory.analysis.task_coordinator as coordinator_module
+    from audio_memory.reanalysis.worker import ReanalysisWorker
+
+    database = Database(tmp_path / "source-identity-between-submit.sqlite3")
+    await database.create_schema()
+    await seed_history_run(
+        database,
+        item_statuses=("pending",),
+        pipeline_kind=BETA8_INDEXED_PIPELINE_KIND,
+        search_provider_id="frozen-search",
+        search_model_id="frozen-search-model",
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "verified_pipeline_identity_hash",
+        lambda _version: "0" * 64,
+    )
+    worker = ReanalysisWorker(
+        database=database,
+        task_coordinator=AnalysisTaskCoordinator(database),
+        publisher=ProfilePublisher(database),
+    )
+
+    await worker.tick()
+
+    async with database.session() as session:
+        batch = await session.get(ReanalysisBatch, "history-1")
+        item = await session.get(ReanalysisItem, "item-0")
+        generated = int(
+            await session.scalar(
+                select(func.count(AnalysisVersion.id)).where(
+                    AnalysisVersion.reanalysis_batch_id == "history-1"
+                )
+            )
+            or 0
+        )
+    assert batch is not None and batch.status == "paused"
+    assert item is not None and item.error_code == "analysis_schema_changed"
     assert generated == 0
     await database.dispose()

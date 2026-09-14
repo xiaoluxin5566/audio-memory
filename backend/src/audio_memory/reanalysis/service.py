@@ -15,7 +15,10 @@ from audio_memory.reanalysis.preview import (
     PreviewTokenInvalidError,
     ReanalysisPreviewBuilder,
     ReanalysisSourceSelectionError,
+    canonical_json,
+    fixed_rule_hashes_for_pipeline,
 )
+from audio_memory.analysis.pipeline_identity import prompt_binding
 from audio_memory.reanalysis.types import ReanalysisBatchView, ReanalysisItemView
 
 
@@ -72,6 +75,15 @@ class ReanalysisService:
 
     async def preview(self, source_batch_ids: tuple[str, ...] | None = None):
         return await self.preview_builder.build(source_batch_ids=source_batch_ids)
+
+    async def preview_options(self):
+        groups = await self.preview_builder.completed_source_groups()
+        previews = []
+        for _pipeline_kind, source_batch_ids in groups:
+            previews.append(
+                await self.preview_builder.build(source_batch_ids=source_batch_ids)
+            )
+        return tuple(previews)
 
     async def create_batch(
         self,
@@ -138,9 +150,22 @@ class ReanalysisService:
                             persisted_prompts = dict(snapshot.prompt_snapshot)
                             persisted_prompts["_reanalysis"] = {
                                 "fixed_rule_hashes": snapshot.fixed_rule_hashes,
+                                "pipeline_kind": snapshot.pipeline_kind,
+                                "prompt_manifest": list(snapshot.prompt_manifest),
                                 "profile_hash": snapshot.profile_hash,
                                 "transcript_fingerprints": {
                                     source.batch_id: source.transcript_sha256
+                                    for source in snapshot.sources
+                                },
+                                "source_identity_bindings": {
+                                    source.batch_id: {
+                                        "current_analysis_version_id": (
+                                            source.current_analysis_version_id
+                                        ),
+                                        "pipeline_identity_hash": (
+                                            source.pipeline_identity_hash
+                                        ),
+                                    }
                                     for source in snapshot.sources
                                 },
                             }
@@ -247,6 +272,10 @@ class ReanalysisService:
             "prompt_bindings": current_payload["prompt_bindings"],
             "fixed_rule_hashes": current.snapshot.fixed_rule_hashes,
             "fixed_rules_hash": current.snapshot.fixed_rules_hash,
+            "pipeline_kind": current.snapshot.pipeline_kind,
+            "prompt_manifest": json.loads(
+                canonical_json(list(current.snapshot.prompt_manifest))
+            ),
             "profile_hash": current.snapshot.profile_hash,
             "counts": current_payload["counts"],
             "snapshot_hash": current.snapshot_hash,
@@ -336,6 +365,15 @@ class ReanalysisService:
                 provider_id = batch.provider_id
                 expected_model = batch.model_id
                 expected_fixed = batch.fixed_rules_hash
+                try:
+                    prompt_snapshot = json.loads(batch.prompt_snapshot_json)
+                    metadata = prompt_snapshot["_reanalysis"]
+                    pipeline_kind = metadata["pipeline_kind"]
+                    expected_manifest = metadata["prompt_manifest"]
+                except (TypeError, KeyError, json.JSONDecodeError) as exc:
+                    raise ReanalysisStateError(
+                        "Reanalysis pipeline binding is invalid"
+                    ) from exc
 
             validation = await self.provider_coordinator.validate_saved(provider_id)
             if not bool(getattr(validation, "ok", False)):
@@ -347,9 +385,19 @@ class ReanalysisService:
                 raise ReanalysisStateError(
                     "Provider or model changed; stop and obtain a fresh preview"
                 )
-            from audio_memory.prompts.composer import PromptComposer
-
-            if PromptComposer.fixed_rules_hash() != expected_fixed:
+            try:
+                current_fixed, current_manifest = prompt_binding(pipeline_kind)
+                normalized_manifest = json.loads(canonical_json(current_manifest))
+                current_rule_hashes = fixed_rule_hashes_for_pipeline(pipeline_kind)
+            except (TypeError, ValueError) as exc:
+                raise ReanalysisStateError(
+                    "Reanalysis pipeline binding is invalid"
+                ) from exc
+            if (
+                current_fixed != expected_fixed
+                or normalized_manifest != expected_manifest
+                or current_rule_hashes != metadata.get("fixed_rule_hashes")
+            ):
                 raise ReanalysisStateError(
                     "Fixed analysis rules changed; stop and obtain a fresh preview"
                 )

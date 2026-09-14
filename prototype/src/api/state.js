@@ -1,4 +1,5 @@
 import { normalizeReportDocument } from '../reportDocument.js'
+import { normalizeCardAssessment } from '../cardAssessment.js'
 
 const REPORT_ANNOTATION_TYPES = new Set([
   'page_title', 'overview', 'section_heading', 'subheading', 'paragraph',
@@ -19,7 +20,7 @@ function normalizeReportAnnotations(value) {
 }
 
 const PROVIDER_NAMES = { kimi: 'Kimi', deepseek: 'DeepSeek', openai: 'OpenAI', glm: 'GLM' }
-const HIDDEN_CONFIGURATION_PROVIDERS = new Set(['kimi', 'openai', 'glm'])
+const HIDDEN_CONFIGURATION_PROVIDERS = new Set(['openai', 'glm'])
 const REPORT_METRICS_MARKER = '<!-- audio-memory-report-metrics -->'
 
 export function extractReportMetrics(markdown = '') {
@@ -42,6 +43,97 @@ export function extractReportMetrics(markdown = '') {
   return { markdown: body, metrics }
 }
 
+const MANUAL_SECTION_ORDINAL = /^(?:[一二三四五六七八九十]+、|\d+\.\s+|\d+、\s*|[（(][一二三四五六七八九十]+[）)]\s*|[（(]\d+[）)]\s*)/
+
+export function normalizeSectionTitle(title = '') {
+  return String(title).replace(MANUAL_SECTION_ORDINAL, '').trim()
+}
+
+export function markdownPresentation(markdown = '') {
+  const report = extractReportMetrics(markdown)
+  const displayMarkdown = report.markdown
+  const match = /^#(?!#)\s+(.+?)(?:\r?\n|$)/m.exec(displayMarkdown)
+  return {
+    title: match?.[1].trim() ?? '',
+    body: match ? displayMarkdown.replace(match[0], '').replace(/^\r?\n/, '') : displayMarkdown,
+    metrics: report.metrics,
+  }
+}
+
+export function tokenUsagePresentation(inputTokens, outputTokens, unavailableReason) {
+  if (inputTokens == null || outputTokens == null) {
+    return `不可得（${unavailableReason || '提供商未返回'}）`
+  }
+  return `${inputTokens} 输入 · ${outputTokens} 输出`
+}
+
+export function runtimeMetricsPresentation(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null
+  const runId = typeof metrics.run_id === 'string' ? metrics.run_id : null
+  const hasRun = Boolean(runId)
+  const calls = Array.isArray(metrics.model_calls) ? metrics.model_calls : []
+  const currentCalls = hasRun ? calls.filter((item) => item?.run_id === runId) : calls
+  const normalCalls = currentCalls.filter((item) => !item?.attempt_kind || item.attempt_kind === 'normal')
+  const recoveryCalls = currentCalls.filter((item) => item?.attempt_kind && item.attempt_kind !== 'normal')
+  const totalCallCount = Number.isInteger(metrics.model_call_count) ? metrics.model_call_count : calls.length
+  const reportedNewCount = Number.isInteger(metrics.new_model_call_count) ? metrics.new_model_call_count : 0
+  const hasDetailedCalls = currentCalls.length > 0
+  const inferredRecoveryCount = !hasDetailedCalls && reportedNewCount > 0 && totalCallCount > reportedNewCount
+    ? reportedNewCount : recoveryCalls.length
+  const inferredNormalCount = hasDetailedCalls
+    ? normalCalls.length
+    : Math.max(0, totalCallCount - inferredRecoveryCount)
+  const stages = metrics.stage_durations_ms && typeof metrics.stage_durations_ms === 'object'
+    ? metrics.stage_durations_ms : {}
+  const metricValue = (runKey, aggregateKey) => {
+    const key = hasRun ? runKey : aggregateKey
+    return Object.prototype.hasOwnProperty.call(metrics, key) ? metrics[key] : 0
+  }
+  const aggregateInput = Object.prototype.hasOwnProperty.call(metrics, 'input_tokens')
+    ? metrics.input_tokens : 0
+  const aggregateOutput = Object.prototype.hasOwnProperty.call(metrics, 'output_tokens')
+    ? metrics.output_tokens : 0
+  const runInput = Object.prototype.hasOwnProperty.call(metrics, 'run_input_tokens')
+    ? metrics.run_input_tokens : 0
+  const runOutput = Object.prototype.hasOwnProperty.call(metrics, 'run_output_tokens')
+    ? metrics.run_output_tokens : 0
+  return {
+    summary: {
+      durationMs: metrics.run_duration_ms ?? metrics.total_duration_ms ?? 0,
+      inputTokens: metricValue('run_input_tokens', 'input_tokens'),
+      outputTokens: metricValue('run_output_tokens', 'output_tokens'),
+      tokenUsageUnavailableReason: metrics.token_usage_unavailable_reason ?? null,
+      cost: metrics.cost ?? null,
+      costUnavailableReason: metrics.cost_unavailable_reason ?? null,
+      finalAuditScore: metrics.final_audit_score ?? null,
+      stageDurationsMs: stages,
+    },
+    normal: { calls: normalCalls, count: inferredNormalCount },
+    recovery: {
+      calls: recoveryCalls,
+      count: inferredRecoveryCount,
+      checkpointReusedStages: Array.isArray(metrics.checkpoint_reused_stages)
+        ? metrics.checkpoint_reused_stages : [],
+    },
+    search: {
+      durationMs: stages.search ?? 0,
+      inputTokens: metricValue('run_search_input_tokens', 'search_input_tokens'),
+      outputTokens: metricValue('run_search_output_tokens', 'search_output_tokens'),
+      tokenUsageUnavailableReason: metrics.search_token_usage_unavailable_reason ?? null,
+      modelResponses: hasRun ? (metrics.run_search_model_response_count ?? 0) : (metrics.search_model_response_count ?? 0),
+      toolCalls: hasRun ? (metrics.run_web_search_tool_call_count ?? 0) : (metrics.web_search_tool_call_count ?? 0),
+    },
+    history: {
+      modelCalls: hasRun ? (metrics.historical_model_call_count
+        ?? Math.max(0, (metrics.model_call_count ?? 0) - currentCalls.length)) : 0,
+      inputTokens: hasRun && aggregateInput != null && runInput != null
+        ? Math.max(0, aggregateInput - runInput) : (hasRun ? null : 0),
+      outputTokens: hasRun && aggregateOutput != null && runOutput != null
+        ? Math.max(0, aggregateOutput - runOutput) : (hasRun ? null : 0),
+    },
+  }
+}
+
 const SCENE_LABELS = {
   analysis: 'AI 深度分析',
   meeting: '会议纪要',
@@ -49,6 +141,13 @@ const SCENE_LABELS = {
   content: '内容推荐',
   growth: '成长建议',
   inspiration: '闲聊灵感',
+  work_communication: '工作与沟通',
+  parenting_family: '亲子与家庭',
+  health_state: '健康状态',
+  content_consumption: '内容消费',
+  inspiration_insight: '灵感与洞察',
+  self_growth: '自我成长',
+  life_decisions: '生活决策',
 }
 
 
@@ -305,7 +404,7 @@ export function analysisBlocks(body = '', sectionType = '', title = '') {
 
     if (/^\*\*[^*]+\*\*$/.test(line) || /^#{2,4}\s+/.test(line)) {
       const markdownHeading = /^(#{2,4})\s+/.exec(line)
-      currentHeading = line.replace(/^#{2,4}\s+/, '').replace(/^\*\*|\*\*$/g, '')
+      currentHeading = normalizeSectionTitle(line.replace(/^#{2,4}\s+/, '').replace(/^\*\*|\*\*$/g, ''))
       blocks.push({ kind: 'heading', ...(markdownHeading ? { level: markdownHeading[1].length } : {}), text: currentHeading })
       index += 1
       continue
@@ -318,7 +417,7 @@ export function analysisBlocks(body = '', sectionType = '', title = '') {
         rows.push(tableCells(lines[index]))
         index += 1
       }
-      blocks.push({ kind: 'matrix', rows })
+      blocks.push({ kind: 'matrix', wrapperClass: 'markdown-table-scroll', rows })
       continue
     }
 
@@ -401,10 +500,12 @@ function normalizeStrictCards(item, batch) {
   const payload = item.payload
   if (!payload?.scene_id || !Array.isArray(payload.cards)) return null
   return payload.cards.map((source, index) => {
-    const shell = source.card ?? {}
+    const shell = source.card ?? source
     const detail = source.detail ?? {}
     const [autonomousMeta, autonomousSections] = item.scene_id === 'analysis' ? autonomousPresentation(source) : [{}, []]
     const report = extractReportMetrics(payload.reportMarkdown)
+    const cardAssessment = normalizeCardAssessment(source.cardAssessment ?? (payload.cards.length === 1 ? payload.cardAssessment : null))
+    const writingV1 = source.writingV1 === true || payload.writingV1 === true || cardAssessment !== null
     return {
       id: `${item.id}:${index}`,
       apiId: item.id,
@@ -418,7 +519,9 @@ function normalizeStrictCards(item, batch) {
       timeLabel: timeLabel(item.uploaded_at),
       meta: '查看 AI 分析详情',
       detailSections: payload.reportMarkdown ? [] : (item.scene_id === 'analysis' ? autonomousSections : strictBlocks(item.scene_id, detail)),
-      reportMarkdown: report.markdown,
+      reportMarkdown: payload.reportMarkdown,
+      writingV1,
+      cardAssessment,
       reportMetrics: report.metrics,
       reportDocument: normalizeReportDocument(payload.reportDocument),
       reportAnnotations: normalizeReportAnnotations(payload.reportAnnotations),
@@ -596,6 +699,16 @@ export function normalizeReanalysisPreview(payload = {}) {
     label: `${SCENE_LABELS[sceneId] ?? (sceneId === 'todo' ? '待办事项' : sceneId)} v${summary.version}`,
   }))
   return {
+    pipelineKind: payload.pipeline_kind ?? 'single_report_v1',
+    pipelineLabel: ({
+      single_report_v1: '经典单报告',
+      beta8_p1_p5_v1: 'Beta 8 P1–P5',
+      beta8_multi_scene_v1: 'Beta 8 七场景',
+      beta8_indexed_scene_v2: 'Beta 8 索引场景',
+    })[payload.pipeline_kind ?? 'single_report_v1'] ?? payload.pipeline_kind,
+    sourceBatchIds: Array.isArray(payload.source_batch_ids)
+      ? [...payload.source_batch_ids]
+      : null,
     batchCount: payload.source_batch_count ?? 0,
     fileCount: payload.audio_file_count ?? 0,
     characterCount: payload.transcript_character_count ?? 0,
@@ -606,6 +719,10 @@ export function normalizeReanalysisPreview(payload = {}) {
     previewToken: payload.preview_token ?? '',
     costNotice: '本次会调用当前模型并产生 API 费用；确认后不会重新转写音频。',
   }
+}
+
+export function normalizeReanalysisPreviewOptions(payload = {}) {
+  return (payload.groups ?? []).map(normalizeReanalysisPreview)
 }
 
 const ACTIVE_REANALYSIS_STATES = new Set(['pending', 'running', 'paused', 'stopping'])

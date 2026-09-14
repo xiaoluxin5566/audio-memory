@@ -58,23 +58,28 @@ def model_app() -> FastAPI:
 
 
 @pytest.mark.asyncio
-async def test_provider_catalog_only_exposes_deepseek_v4_pro(model_app: FastAPI) -> None:
+async def test_provider_catalog_exposes_deepseek_report_and_kimi_search(model_app: FastAPI) -> None:
     transport = httpx.ASGITransport(app=model_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/providers")
 
     assert response.status_code == 200
     providers = response.json()["providers"]
-    assert len(providers) == 1
+    assert len(providers) == 2
     assert providers[0]["provider_id"] == "deepseek"
     assert providers[0]["model_id"] == "deepseek-v4-pro"
     assert providers[0]["model_options"] == [
         {"model_id": "deepseek-v4-pro", "label": "最高质量"},
     ]
+    assert providers[1]["provider_id"] == "kimi"
+    assert providers[1]["model_id"] == "kimi-k2.6"
+    assert [item["model_id"] for item in providers[1]["model_options"]] == [
+        "kimi-k2.6", "kimi-k3",
+    ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider_id", ["kimi", "openai", "glm"])
+@pytest.mark.parametrize("provider_id", ["openai", "glm"])
 async def test_retired_provider_configuration_endpoints_are_rejected_before_validation(
     model_app: FastAPI, provider_id: str
 ) -> None:
@@ -110,10 +115,7 @@ async def test_selecting_model_validates_and_updates_provider_snapshot(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider_id", "removed_model_id"),
-    [
-        ("deepseek", "deepseek-v4-flash"),
-        ("kimi", "kimi-k2.6"),
-    ],
+    [("deepseek", "deepseek-v4-flash")],
 )
 async def test_removed_models_cannot_be_selected_for_new_work(
     model_app: FastAPI,
@@ -127,17 +129,14 @@ async def test_removed_models_cannot_be_selected_for_new_work(
             json={"model_id": removed_model_id},
         )
 
-    assert response.status_code == (422 if provider_id == "deepseek" else 404)
+    assert response.status_code == 422
     assert model_app.state.validators[provider_id].models == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider_id", "removed_model_id"),
-    [
-        ("deepseek", "deepseek-v4-flash"),
-        ("kimi", "kimi-k2.6"),
-    ],
+    [("deepseek", "deepseek-v4-flash")],
 )
 async def test_removed_models_cannot_be_submitted_while_saving_a_key(
     model_app: FastAPI,
@@ -152,9 +151,28 @@ async def test_removed_models_cannot_be_submitted_while_saving_a_key(
             json={"api_key": "new-key", "model_id": removed_model_id},
         )
 
-    assert response.status_code == (422 if provider_id == "deepseek" else 404)
+    assert response.status_code == 422
     assert response.json()["detail"] in {"Unsupported model", "Unsupported provider"}
     assert model_app.state.validators[provider_id].models == []
+
+
+@pytest.mark.asyncio
+async def test_kimi_key_can_be_saved_for_search_but_not_activated_as_report_provider(
+    model_app: FastAPI,
+) -> None:
+    transport = httpx.ASGITransport(app=model_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        saved = await client.put(
+            "/api/providers/kimi/key",
+            headers={"X-Configuration-Session": "search-settings"},
+            json={"api_key": "new-key", "model_id": "kimi-k2.6"},
+        )
+        activated = await client.post("/api/providers/kimi/activate")
+
+    assert saved.status_code == 200
+    assert saved.json()["model_id"] == "kimi-k2.6"
+    assert activated.status_code == 404
+    assert model_app.state.validators["kimi"].models == ["kimi-k2.6"]
 
 
 @pytest.mark.asyncio

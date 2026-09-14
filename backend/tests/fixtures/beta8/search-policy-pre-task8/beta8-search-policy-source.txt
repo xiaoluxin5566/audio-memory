@@ -1,0 +1,26 @@
+Approved pre-Task8 deterministic search executor projection.
+Captured from /private/tmp/beta8-task-8-before/backend/src/audio_memory/analysis/beta8_search.py
+Original full-file SHA-256: b8f8fe2c624492a37386bdda63caac595881544d8d47edca817781bc9a9432dc
+
+The policy-bearing source behavior was:
+
+for task in tasks:
+    existing = completed.get(task.search_task_key)
+    if existing is not None:
+        packets.append(existing)
+        continue
+    packet = await self._execute_one(task)
+    await persist(packet)
+    packets.append(packet)
+
+outcome = await self.provider.native_search(
+    self.provider_id,
+    queries=[task.question],
+    round_number=1,
+    model_id=self.model_id,
+)
+
+This binds input task order, exactly one round-1 provider request per unfinished
+task, and zero provider requests for an empty task list. Task 8's permitted URL
+canonicalization/source-ID/strict-closure changes are intentionally outside this
+policy projection.

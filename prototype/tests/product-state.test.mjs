@@ -99,6 +99,24 @@ test('cloud ASR failure never claims transcription completed', () => {
   assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'cloud_asr_failed' }), 'resume-cloud-asr')
 })
 
+test('transcript finalization failure resumes from the saved cloud result', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'transcript_finalize_failed' }), {
+    title: '转写整理未完成',
+    body: '云端转写结果已保存；重试只会继续整理完整逐字稿并生成报告，不会重新上传或转写音频。',
+    action: '继续整理逐字稿',
+  })
+  assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'transcript_finalize_failed' }), 'resume-cloud-asr')
+})
+
+test('unknown cloud submission is reconciled before any same-id resubmission', () => {
+  assert.deepEqual(jobFailureCopy({ error_code: 'cloud_asr_submission_unknown' }), {
+    title: '正在确认云端转写任务',
+    body: '提交时连接中断，任务可能已被火山接收。继续后会先查询原任务；只有确认任务不存在时，才使用同一个任务编号再次提交。',
+    action: '确认并继续',
+  })
+  assert.equal(jobRecoveryAction({ stage: 'failed', error_code: 'cloud_asr_submission_unknown' }), 'resume-cloud-asr')
+})
+
 test('managed storage preparation failure is routed back to cloud transcription', () => {
   assert.deepEqual(jobFailureCopy({ error_code: 'managed_storage_unavailable' }), {
     title: '云端转写准备失败',

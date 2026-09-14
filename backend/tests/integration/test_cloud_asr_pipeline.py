@@ -110,6 +110,26 @@ class VolcanoPollsUntilCancelled(Volcano):
         await asyncio.Future()
 
 
+class VolcanoSubmissionOutcomeUnknown(Volcano):
+    def __init__(self, *, accepted: bool) -> None:
+        super().__init__()
+        self.accepted = accepted
+        self.submitted_request_ids: list[str] = []
+
+    async def submit(self, *, api_key: bytes, request) -> str:
+        self.submits += 1
+        self.submitted_request_ids.append(request.request_id)
+        if self.submits == 1:
+            raise AsrProviderError("timeout", retriable=True)
+        return request.request_id
+
+    async def poll(self, *, api_key: bytes, task_id: str) -> VolcanoPollResult:
+        self.polls += 1
+        if not self.accepted and self.polls == 1:
+            raise AsrProviderError("invalid_audio", retriable=False)
+        return await super().poll(api_key=api_key, task_id=task_id)
+
+
 class AnalysisSubmitter:
     def __init__(self) -> None:
         self.requests: list[object] = []
@@ -117,6 +137,11 @@ class AnalysisSubmitter:
     async def submit_new_upload(self, request: object) -> str:
         self.requests.append(request)
         return "analysis-version"
+
+
+class FailingAnalysisSubmitter:
+    async def submit_new_upload(self, _request: object) -> str:
+        raise RuntimeError("analysis queue unavailable")
 
 
 class UploadService:
@@ -229,6 +254,52 @@ async def test_existing_remote_task_is_polled_without_upload_or_resubmit(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_explicit_resume_reconciles_unknown_submission_with_same_request_id(
+    tmp_path, accepted
+) -> None:
+    database, runtime_root, repository, task = await seeded(tmp_path)
+    storage = Storage()
+    volcano = VolcanoSubmissionOutcomeUnknown(accepted=accepted)
+    coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=storage,
+        volcano=volcano,
+        keychain=Keychain(),
+        retry_base_seconds=0,
+    )
+
+    with pytest.raises(AsrProviderError, match="submission_unknown"):
+        await coordinator.run_job(
+            job_id=(await repository.get(task.id)).job_id,
+            analysis_request=object(),
+            analysis_submitter=AnalysisSubmitter(),
+        )
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, (await repository.get(task.id)).job_id)
+        assert job is not None
+        assert job.error_code == "cloud_asr_submission_unknown"
+        job.stage = "transcribing"
+        job.error_code = None
+        await session.commit()
+
+    assert await coordinator.run_job(
+        job_id=(await repository.get(task.id)).job_id,
+        analysis_request=object(),
+        analysis_submitter=AnalysisSubmitter(),
+        reconcile_unknown_submissions=True,
+    ) == "analyzing"
+
+    expected_submits = 1 if accepted else 2
+    assert volcano.submits == expected_submits
+    assert set(volcano.submitted_request_ids) == {task.request_id}
+    assert (storage.created, storage.uploaded) == (1, 1)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_job_pipeline_materializes_all_files_before_submitting_analysis_once(
     tmp_path,
 ) -> None:
@@ -270,6 +341,40 @@ async def test_job_pipeline_materializes_all_files_before_submitting_analysis_on
         transcript = await session.scalar(select(Transcript))
     assert transcript is not None
     assert transcript.risk_classified is True
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completed_transcription_reports_analysis_submission_failure_without_retranscribing(
+    tmp_path,
+) -> None:
+    database, runtime_root, repository, task = await seeded(tmp_path)
+    storage, volcano = Storage(), Volcano()
+    coordinator = VolcanoAsrCoordinator(
+        database=database,
+        runtime_root=runtime_root,
+        repository=repository,
+        storage=storage,
+        volcano=volcano,
+        keychain=Keychain(),
+        transcript_finalizer=TranscriptionRiskGateService(database),
+    )
+
+    with pytest.raises(RuntimeError, match="analysis queue unavailable"):
+        await coordinator.run_job(
+            job_id=(await repository.get(task.id)).job_id,
+            analysis_request=object(),
+            analysis_submitter=FailingAnalysisSubmitter(),
+        )
+
+    async with database.session() as session:
+        job = await session.get(AnalysisJob, (await repository.get(task.id)).job_id)
+        transcripts = list(await session.scalars(select(Transcript)))
+    assert job is not None
+    assert (job.stage, job.error_code) == ("failed", "model_analysis_failed")
+    assert [item.text for item in transcripts] == ["测试完成。"]
+    assert (storage.created, storage.uploaded, storage.deleted) == (1, 1, 1)
+    assert (volcano.submits, volcano.polls) == (1, 1)
     await database.dispose()
 
 

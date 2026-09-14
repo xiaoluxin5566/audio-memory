@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from audio_memory.providers.coordinator import ProviderStateCoordinator
 from audio_memory.providers.types import (
+    AUXILIARY_PROVIDER_IDS,
     CONFIGURABLE_PROVIDER_IDS,
     PROVIDER_CONFIGS,
     ProviderState,
@@ -66,13 +67,19 @@ def coordinator_from(request: Request) -> ProviderStateCoordinator:
     return request.app.state.provider_coordinator
 
 
-def ensure_provider(provider_id: str) -> None:
-    if provider_id not in CONFIGURABLE_PROVIDER_IDS:
+def ensure_provider(provider_id: str, *, activation: bool = False) -> None:
+    allowed = CONFIGURABLE_PROVIDER_IDS if activation else (
+        CONFIGURABLE_PROVIDER_IDS + AUXILIARY_PROVIDER_IDS
+    )
+    if provider_id not in allowed:
         raise HTTPException(status_code=404, detail="Unsupported provider")
 
 
 def configurable_states(coordinator: ProviderStateCoordinator) -> list[ProviderState]:
-    return [coordinator.state(provider_id) for provider_id in CONFIGURABLE_PROVIDER_IDS]
+    return [
+        coordinator.state(provider_id)
+        for provider_id in CONFIGURABLE_PROVIDER_IDS + AUXILIARY_PROVIDER_IDS
+    ]
 
 
 @router.get("")
@@ -89,7 +96,7 @@ async def validate_configured(request: Request) -> ProviderList:
     await asyncio.gather(
         *(
             asyncio.wait_for(coordinator.validate_saved(provider_id), timeout=20)
-            for provider_id in CONFIGURABLE_PROVIDER_IDS
+            for provider_id in CONFIGURABLE_PROVIDER_IDS + AUXILIARY_PROVIDER_IDS
         )
     )
     return ProviderList(
@@ -144,7 +151,7 @@ async def cancel_candidate(
 
 @router.post("/{provider_id}/activate")
 async def activate_provider(provider_id: str, request: Request) -> ProviderView:
-    ensure_provider(provider_id)
+    ensure_provider(provider_id, activation=True)
     coordinator = coordinator_from(request)
     try:
         state = await coordinator.activate(provider_id)

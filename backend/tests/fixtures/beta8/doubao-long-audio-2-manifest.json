@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "provider": "豆包",
+  "model": "录音文件识别 2.0",
+  "resource_id": "volc.seedasr.auc",
+  "transcript_path": "/Users/liujinxin/Documents/音频Always on Demo/outputs/cloud-asr-july31/volcano/正式报告链路输入逐字稿.md",
+  "provenance_path": "/Users/liujinxin/Documents/音频Always on Demo/outputs/cloud-asr-july31/volcano/README.txt",
+  "file_count": 4,
+  "segment_count": 6373,
+  "sha256": "6cb6881073d769f91639eb478d5c8dadf96be0431016885ddddd7e8f16cb20b8",
+  "ground_truth_sha256": "c232c736e42c0676d8c77d3250030ba025542ec73f79d78e0d9b75210fba8cb0",
+  "files": [
+    {
+      "file_name": "07月31日 11-11 Pokee SE-audio.mp3",
+      "segment_count": 624
+    },
+    {
+      "file_name": "07月31日 11-35 Pokee SE-audio.mp3",
+      "segment_count": 1627
+    },
+    {
+      "file_name": "07月31日 18-56 Pokee SE-audio.mp3",
+      "segment_count": 3246
+    },
+    {
+      "file_name": "07月31日 21-25 Pokee SE-audio.mp3",
+      "segment_count": 876
+    }
+  ],
+  "fixed_rules_hash": "05b5f940959c3209f035a204fa2443c5e55586113794e69f16390520e814b24e",
+  "prompt_hashes": [
+    {
+      "prompt_id": "event_index",
+      "sha256": "7740094ab6617ea9ad80d72e6d6688880623eec60409300de13989a67c1de4b8"
+    },
+    {
+      "prompt_id": "all_scenes_v1",
+      "sha256": "62237f1604d9685b47a4706116b8403f4dc7651b0f53bc2dc95366374af2bfae"
+    },
+    {
+      "prompt_id": "work_communication",
+      "sha256": "2ea50099300860d2d694d1d0e12a5685dcf8aeaa0b652cc6303038eac8301a9c"
+    },
+    {
+      "prompt_id": "parenting_family",
+      "sha256": "16f36581598feb1f234306b7021ae270cc6820430f7fb8784d5f072b87db6b97"
+    },
+    {
+      "prompt_id": "health_state",
+      "sha256": "9fd4fcd896f10badbaa1a7bcc14c80b1647a8e4258684ee1257fb61d74f5741f"
+    },
+    {
+      "prompt_id": "content_consumption",
+      "sha256": "eb099ee9d19fe284746606f580943a314f36c642c2d69f06be1c61319187384a"
+    },
+    {
+      "prompt_id": "inspiration_insight",
+      "sha256": "9f128914b65702bb1ce8baaa2a4cb6824fc3c85f07ac50860fe0e2bbf5ef7b62"
+    },
+    {
+      "prompt_id": "self_growth",
+      "sha256": "944db4949ea6dec1d49640cefd326fbe521c9516c19dc52527a8e3711d4a10db"
+    },
+    {
+      "prompt_id": "life_decisions",
+      "sha256": "c26098cffca4029367ce6573885e26dcf5fa7f0ff308d60052edd14ef08ef694"
+    },
+    {
+      "prompt_id": "shared_report_quality",
+      "sha256": "97c0fc57f807959303eed60e1da4ffdb4ca1718fa3048891f479736f9de07cce"
+    },
+    {
+      "prompt_id": "unified_audit",
+      "sha256": "24e3e1e6438178d4a402db3a08e2b565ec2af95d4ba27b3b1b703e1ea0d2a2bd"
+    },
+    {
+      "prompt_id": "cross_card_orchestration",
+      "sha256": "a06285a67a03c35cd03592be41d3959913bb3f2333aae04da77a4c5137dc4b5b"
+    },
+    {
+      "prompt_id": "search_execution",
+      "sha256": "3ad6e279a04c7fe1d6fb394f2ca624440ca6576299af87844dbfd1193c57a158"
+    },
+    {
+      "prompt_id": "targeted_revision",
+      "sha256": "e9a589e49d7fb65dc62e95eac654ad50997d0055ee457aca2d28bf2ad59796f3"
+    }
+  ]
+}

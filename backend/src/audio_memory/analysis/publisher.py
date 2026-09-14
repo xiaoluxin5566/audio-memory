@@ -34,6 +34,7 @@ from audio_memory.models import (
     ReanalysisBatch,
     ReanalysisItem,
     TempFileManifest,
+    Transcript,
     Todo,
     TodoCandidate,
     TodoTombstone,
@@ -50,6 +51,21 @@ from audio_memory.prompts.report_schema import SingleReportDraft
 from audio_memory.analysis.markdown_report import MarkdownReportResult
 from audio_memory.analysis.direct_report_document import StructuredReportResult
 from audio_memory.analysis.pipeline_state import PipelineMetrics
+from audio_memory.analysis.beta8_writing_scoring import validate_score
+from audio_memory.analysis.beta8_state import (
+    Beta8StageRecord,
+    canonical_hash,
+    validate_stage_record,
+)
+from audio_memory.analysis.pipeline_identity import (
+    BETA8_INDEXED_PIPELINE_KIND,
+    validate_stored_pipeline_identity,
+)
+from audio_memory.prompts.beta8_event_index_schema import Beta8NormalizedEventIndex
+from audio_memory.prompts.beta8_pipeline_schema import (
+    Beta8PublicationBundle,
+    validate_publication_bundle,
+)
 from audio_memory.prompts.store import PROMPT_SCENES
 
 
@@ -284,6 +300,278 @@ class VersionPublisher:
                 if version.reanalysis_batch_id is not None:
                     await self._complete_history_item(session, version, now)
         return AnalysisOutcome(batch_id, published_card_count, todo_count)
+
+    async def publish_beta8(
+        self,
+        version_id: str,
+        bundle: Beta8PublicationBundle,
+        *,
+        worker_owner_id: str | None = None,
+        card_assessments: dict[str, dict] | None = None,
+    ) -> AnalysisOutcome:
+        validate_publication_bundle(bundle)
+        assessments = card_assessments or {}
+        unknown_assessments = sorted(set(assessments) - {card.card_id for card in bundle.cards})
+        if unknown_assessments:
+            raise ValueError(
+                "Beta 8 assessments reference unknown cards: "
+                + ", ".join(unknown_assessments)
+            )
+        for card in bundle.cards:
+            assessment = assessments.get(card.card_id)
+            if assessment is not None:
+                validate_score(
+                    assessment,
+                    {
+                        "card_id": card.card_id,
+                        "title": card.title,
+                        "markdown": card.markdown,
+                    },
+                )
+        now = datetime.now(UTC)
+        async with self.database.session() as session:
+            version = await session.get(AnalysisVersion, version_id)
+            if version is None:
+                raise LookupError(f"Unknown analysis version: {version_id}")
+            batch_id = version.batch_id or str(
+                uuid5(NAMESPACE_URL, f"audio-memory-batch:{version.source_job_id}")
+            )
+            if version.status == "completed":
+                return await self._completed_outcome(session, version, batch_id)
+            if (
+                version.status != "running"
+                or worker_owner_id is not None
+                and version.worker_owner_id != worker_owner_id
+            ):
+                raise RuntimeError("Analysis worker lease was lost before publication")
+            identity = validate_stored_pipeline_identity(version)
+            if identity.pipeline_kind == BETA8_INDEXED_PIPELINE_KIND:
+                transcript_rows = list((await session.execute(
+                    select(Transcript, JobFile)
+                    .join(JobFile, JobFile.id == Transcript.job_file_id)
+                    .where(
+                        JobFile.job_id == version.source_job_id,
+                        Transcript.risk_classified.is_(True),
+                        Transcript.is_reliable.is_(True),
+                    )
+                    .order_by(JobFile.position, Transcript.segment_index)
+                )).all())
+                transcript = [{
+                    "segment_id": f"seg_{file.position}_{row.segment_index}",
+                    "file_id": file.id,
+                    "file_name": file.original_name,
+                    "recording_started_at": file.recording_started_at,
+                    "timezone": file.timezone,
+                    "start_ms": row.start_ms,
+                    "end_ms": row.end_ms,
+                    "speaker_id": row.speaker_id or "unknown",
+                    "text": row.text,
+                } for row, file in transcript_rows]
+                try:
+                    staged = json.loads(version.staged_results_json or "{}")
+                    record = Beta8StageRecord.model_validate(
+                        staged["beta8_event_index"]
+                    )
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "indexed publication requires a valid event-index checkpoint"
+                    ) from exc
+                validate_stage_record(
+                    record,
+                    prompt_hash=identity.fixed_rules_hash,
+                    transcript_fingerprint=canonical_hash(transcript),
+                    provider_generation=version.credential_generation,
+                    upstream_artifact_hash=sha256(b"").hexdigest(),
+                )
+                event_index = Beta8NormalizedEventIndex.model_validate(record.payload)
+                checkpoint_work_ids = sorted(
+                    event_index.work_communication_session_ids
+                )
+                if checkpoint_work_ids != sorted(
+                    bundle.expected_work_communication_unit_ids
+                ):
+                    raise ValueError(
+                        "publication bundle does not match event-index work communication units"
+                    )
+            files = list(await session.scalars(
+                select(JobFile)
+                .where(JobFile.job_id == version.source_job_id)
+                .order_by(JobFile.position)
+            ))
+            known_segment_ids = {
+                f"seg_{position}_{segment_index}"
+                for position, segment_index in (
+                    await session.execute(
+                        select(JobFile.position, Transcript.segment_index)
+                        .join(Transcript, Transcript.job_file_id == JobFile.id)
+                        .where(
+                            JobFile.job_id == version.source_job_id,
+                            Transcript.risk_classified.is_(True),
+                            Transcript.is_reliable.is_(True),
+                        )
+                    )
+                ).all()
+            }
+            referenced_segment_ids = {
+                segment_id
+                for card in bundle.cards
+                for segment_id in card.source_segment_ids
+            } | {
+                segment_id
+                for todo in bundle.todo_candidates
+                for segment_id in todo.evidence_segment_ids
+            }
+            unknown_segments = sorted(referenced_segment_ids - known_segment_ids)
+            if unknown_segments:
+                raise ValueError(
+                    "Beta 8 publication references unknown segment IDs: "
+                    + ", ".join(unknown_segments)
+                )
+
+        destinations = self._move_first_publication_audio(version, batch_id, files)
+        todo_count = 0
+        async with self.database.session() as session:
+            async with session.begin():
+                await self._fence_worker(session, version_id, worker_owner_id)
+                version = await session.get(AnalysisVersion, version_id)
+                if version is None:
+                    raise LookupError(f"Unknown analysis version: {version_id}")
+                if version.status == "completed":
+                    return await self._completed_outcome(session, version, batch_id)
+                job = await session.get(AnalysisJob, version.source_job_id)
+                if job is None:
+                    raise LookupError(f"Unknown analysis job: {version.source_job_id}")
+                batch = await session.get(Batch, batch_id)
+                if batch is None:
+                    batch = Batch(
+                        id=batch_id, job_id=job.id, provider_id=version.provider_id,
+                        model_id=version.model_id, uploaded_at=now.isoformat(),
+                        natural_date=now.date().isoformat(),
+                    )
+                    session.add(batch)
+                    await session.flush()
+                version.batch_id = batch.id
+                await session.flush()
+                await require_card_version(
+                    session, version_id=version.id, expected_batch_id=batch.id
+                )
+                await self._finalize_audio_rows(session, job.id, files, destinations)
+                await self._insert_beta8_cards(
+                    session, version, batch, bundle, assessments
+                )
+                candidates = await self._insert_beta8_todo_candidates(
+                    session, version, bundle
+                )
+                todo_count = await self._reconcile_todos(session, batch, candidates)
+                version.search_rounds_json = self._beta8_search_rounds_json(version)
+                version.external_sources_json = json.dumps(
+                    [item.model_dump(mode="json") for item in bundle.external_sources],
+                    ensure_ascii=False,
+                )
+                version.status = "completed"
+                version.error_code = None
+                version.completed_at = now.isoformat()
+                version.published_card_count = len(bundle.cards)
+                version.published_todo_count = todo_count
+                version.worker_owner_id = None
+                version.lease_expires_at = None
+                batch.current_analysis_version_id = version.id
+                batch.provider_id = version.provider_id
+                batch.model_id = version.model_id
+                job.provider_id = version.provider_id
+                job.model_id = version.model_id
+                job.stage = JobStage.COMPLETED.value
+                job.error_code = None
+                if version.reanalysis_batch_id is not None:
+                    await self._complete_history_item(session, version, now)
+        return AnalysisOutcome(batch_id, len(bundle.cards), todo_count)
+
+    @staticmethod
+    async def _insert_beta8_cards(
+        session, version, batch, bundle, card_assessments=None
+    ) -> None:
+        metrics = PipelineMetrics.model_validate_json(
+            version.pipeline_metrics_json or "{}"
+        )
+        for card in bundle.cards:
+            row_id = str(uuid5(
+                NAMESPACE_URL,
+                f"audio-memory-card:{version.id}:beta8:{card.position}",
+            ))
+            if await session.get(Card, row_id) is not None:
+                continue
+            payload = {
+                "scene_id": card.scene_id,
+                "cards": [{
+                    "title": card.title,
+                    "summary": card.summary,
+                    "evidence_segment_ids": card.source_segment_ids,
+                    "external_source_ids": card.used_source_ids,
+                }],
+                "reportMarkdown": card.markdown,
+                "runtimeMetrics": metrics.model_dump(mode="json"),
+            }
+            assessment = (card_assessments or {}).get(card.card_id)
+            if assessment is not None:
+                payload["writingV1"] = True
+                payload["cardAssessment"] = assessment
+            session.add(Card(
+                id=row_id, batch_id=batch.id, analysis_version_id=version.id,
+                scene_id=card.scene_id, position=card.position,
+                payload_json=json.dumps(payload, ensure_ascii=False),
+            ))
+        await session.flush()
+
+    async def _insert_beta8_todo_candidates(
+        self, session, version, bundle
+    ) -> list[TodoCandidate]:
+        candidates: list[TodoCandidate] = []
+        for index, todo in enumerate(bundle.todo_candidates):
+            identity = {
+                "source_job_id": version.source_job_id,
+                "source_todo_candidate_ids": sorted(todo.source_todo_candidate_ids),
+                "text": self._normalize(todo.text),
+                "assignee": self._normalize(todo.assignee_text),
+            }
+            fingerprint = sha256(json.dumps(
+                identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            candidate_id = str(uuid5(
+                NAMESPACE_URL,
+                f"audio-memory-todo-candidate:{version.id}:{fingerprint}",
+            ))
+            candidate = await session.get(TodoCandidate, candidate_id)
+            if candidate is None:
+                candidate = TodoCandidate(
+                    id=candidate_id,
+                    analysis_version_id=version.id,
+                    source_job_id=version.source_job_id,
+                    source_event_id=f"event_beta8_{index + 1:04d}",
+                    evidence_segment_ids_json=json.dumps(
+                        todo.evidence_segment_ids, ensure_ascii=False
+                    ),
+                    normalized_action=self._normalize(todo.text) or todo.text,
+                    normalized_object=None,
+                    normalized_assignee=self._normalize(todo.assignee_text),
+                    text=todo.text,
+                    due_at=todo.due_at,
+                    source_fingerprint=fingerprint,
+                )
+                session.add(candidate)
+            candidates.append(candidate)
+        await session.flush()
+        return candidates
+
+    @staticmethod
+    def _beta8_search_rounds_json(version: AnalysisVersion) -> str:
+        try:
+            staged = json.loads(version.staged_results_json or "{}")
+            record = staged.get("beta8_search_packets", {})
+            payload = record.get("payload", {}) if isinstance(record, dict) else {}
+            values = list(payload.values()) if isinstance(payload, dict) else []
+        except (TypeError, json.JSONDecodeError):
+            values = []
+        return json.dumps(values, ensure_ascii=False)
 
     @staticmethod
     def _validated_scenes(

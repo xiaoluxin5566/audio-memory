@@ -4,7 +4,7 @@ import test from 'node:test'
 import { configurableProviderEntries, normalizeProviders } from '../src/api/state.js'
 
 
-test('configuration UI exposes only DeepSeek V4 Pro', () => {
+test('configuration UI exposes DeepSeek report analysis and Kimi search', () => {
   const normalized = normalizeProviders({ providers: [{
     provider_id: 'deepseek',
     display_name: 'DeepSeek',
@@ -14,6 +14,10 @@ test('configuration UI exposes only DeepSeek V4 Pro', () => {
     ],
     state: 'unconfigured',
     active: false,
+  }, {
+    provider_id: 'kimi', display_name: 'Kimi', model_id: 'kimi-k2.6',
+    model_options: [{ model_id: 'kimi-k2.6', label: 'K2.6' }],
+    state: 'unconfigured', active: false,
   }] })
 
   assert.deepEqual(normalized.providers.deepseek.models, [
@@ -23,6 +27,6 @@ test('configuration UI exposes only DeepSeek V4 Pro', () => {
   assert.deepEqual(Object.keys(normalized.providers), ['kimi', 'deepseek', 'openai', 'glm'])
   assert.deepEqual(
     configurableProviderEntries(normalized.providers).map(([id]) => id),
-    ['deepseek'],
+    ['deepseek', 'kimi'],
   )
 })

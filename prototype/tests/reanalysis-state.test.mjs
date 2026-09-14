@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { getReanalysisView, normalizeReanalysisPreview } from '../src/api/state.js'
+import {
+  getReanalysisView,
+  normalizeReanalysisPreview,
+  normalizeReanalysisPreviewOptions,
+} from '../src/api/state.js'
 
 test('no history disables reanalysis entry', () => {
   const view = getReanalysisView(null, { source_batch_count: 0, blockers: ['没有可重新分析的历史'] })
@@ -26,6 +30,28 @@ test('preview presents cost and frozen current model details', () => {
   assert.equal(preview.promptVersions.length, 6)
   assert.equal(preview.callRange, '18–24 次')
   assert.match(preview.costNotice, /会调用当前模型并产生 API 费用/)
+})
+
+test('mixed pipeline preview options stay distinct and retain exact source IDs', () => {
+  const options = normalizeReanalysisPreviewOptions({ groups: [
+    {
+      pipeline_kind: 'beta8_indexed_scene_v2', source_batch_ids: ['batch-2'],
+      source_batch_count: 1, preview_token: 'indexed-token', blockers: [],
+    },
+    {
+      pipeline_kind: 'single_report_v1', source_batch_ids: ['batch-1', 'batch-0'],
+      source_batch_count: 2, preview_token: 'single-token', blockers: [],
+    },
+  ] })
+
+  assert.equal(options.length, 2)
+  assert.deepEqual(options.map((option) => option.pipelineKind), [
+    'beta8_indexed_scene_v2',
+    'single_report_v1',
+  ])
+  assert.deepEqual(options[0].sourceBatchIds, ['batch-2'])
+  assert.equal(options[0].pipelineLabel, 'Beta 8 索引场景')
+  assert.equal(options[1].pipelineLabel, '经典单报告')
 })
 
 test('active, paused, stopped and partial batches have actionable display state', () => {

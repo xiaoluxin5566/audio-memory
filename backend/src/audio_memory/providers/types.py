@@ -83,9 +83,10 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         ProviderId.KIMI,
         "Kimi",
         "https://api.moonshot.cn/v1/chat/completions",
-        "kimi-k3",
+        "kimi-k2.6",
         models=(
-            ProviderModel("kimi-k3", "最高质量"),
+            ProviderModel("kimi-k2.6", "Beta 8 默认搜索"),
+            ProviderModel("kimi-k3", "K3"),
         ),
     ),
     "deepseek": ProviderConfig(
@@ -125,3 +126,4 @@ PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
 # release-safe catalog. The wider registry remains for frozen legacy work and
 # historical provenance only.
 CONFIGURABLE_PROVIDER_IDS: tuple[str, ...] = ("deepseek",)
+AUXILIARY_PROVIDER_IDS: tuple[str, ...] = ("kimi",)

@@ -16,6 +16,14 @@ from audio_memory.analysis.task_coordinator import (
     HISTORY_REANALYSIS_PRIORITY,
     ReanalysisSnapshotChangedError,
 )
+from audio_memory.analysis.version_runner_router import (
+    SINGLE_REPORT_PIPELINE_KIND,
+)
+from audio_memory.analysis.pipeline_identity import (
+    InvalidPipelineIdentityError,
+    validate_version_pipeline_identity,
+    verified_pipeline_identity_hash,
+)
 from audio_memory.db import Database
 from audio_memory.models import (
     AnalysisVersion,
@@ -28,7 +36,7 @@ from audio_memory.models import (
 from audio_memory.prompts.event_schema import EventMap
 from audio_memory.reanalysis.preview import (
     canonical_hash,
-    current_fixed_rule_hashes,
+    fixed_rule_hashes_for_pipeline,
     transcript_fingerprint,
 )
 
@@ -142,6 +150,7 @@ class ReanalysisWorker:
 
     async def tick(self) -> None:
         async with self._tick_lock:
+            request: AnalysisRequest | None = None
             async with self.database.session() as session:
                 batch = await session.scalar(
                     select(ReanalysisBatch)
@@ -193,7 +202,16 @@ class ReanalysisWorker:
             prompt_snapshot = json.loads(batch.prompt_snapshot_json)
             metadata = prompt_snapshot.get("_reanalysis", {})
             fixed_rule_hashes = metadata.get("fixed_rule_hashes")
-            if fixed_rule_hashes != current_fixed_rule_hashes():
+            pipeline_kind = metadata.get(
+                "pipeline_kind", SINGLE_REPORT_PIPELINE_KIND
+            )
+            try:
+                expected_fixed_rule_hashes = fixed_rule_hashes_for_pipeline(
+                    pipeline_kind
+                )
+            except (TypeError, ValueError):
+                expected_fixed_rule_hashes = None
+            if fixed_rule_hashes != expected_fixed_rule_hashes:
                 await self._pause_snapshot_changed(
                     batch_id, item.id, "analysis_schema_changed"
                 )
@@ -209,6 +227,43 @@ class ReanalysisWorker:
                     batch_id, item.id, "transcript_changed"
                 )
                 return
+            source_identity_bindings = metadata.get("source_identity_bindings")
+            expected_source_binding = (
+                source_identity_bindings.get(item.source_batch_id)
+                if isinstance(source_identity_bindings, dict)
+                else None
+            )
+            if source_identity_bindings is not None:
+                async with self.database.session() as session:
+                    current_source = await session.get(Batch, item.source_batch_id)
+                    current_version = (
+                        await session.get(
+                            AnalysisVersion,
+                            current_source.current_analysis_version_id,
+                        )
+                        if current_source is not None
+                        and current_source.current_analysis_version_id is not None
+                        else None
+                    )
+                try:
+                    current_identity_hash = verified_pipeline_identity_hash(
+                        current_version
+                    )
+                except (AttributeError, InvalidPipelineIdentityError):
+                    current_identity_hash = None
+                if (
+                    not isinstance(expected_source_binding, dict)
+                    or current_source is None
+                    or current_version is None
+                    or expected_source_binding.get("current_analysis_version_id")
+                    != current_version.id
+                    or expected_source_binding.get("pipeline_identity_hash")
+                    != current_identity_hash
+                ):
+                    await self._pause_snapshot_changed(
+                        batch_id, item.id, "analysis_schema_changed"
+                    )
+                    return
             current_transcript_hash = await transcript_fingerprint(
                 self.database, fingerprint_source.job_id
             )
@@ -232,18 +287,41 @@ class ReanalysisWorker:
                     "running",
                 }:
                     return
-                request = AnalysisRequest(
-                    source_job_id=source.job_id,
-                    source_batch_id=source.id,
-                    provider_id=owner.provider_id,
-                    model_id=owner.model_id,
-                    credential_generation=owner.credential_generation,
-                    prompt_snapshot=json.loads(owner.prompt_snapshot_json),
-                    profile_snapshot=json.loads(owner.profile_snapshot_json),
-                    priority=HISTORY_REANALYSIS_PRIORITY,
-                    event_map_json=event_json,
-                    event_map_hash=event_hash,
+                source_version = (
+                    await session.get(
+                        AnalysisVersion, source.current_analysis_version_id
+                    )
+                    if source.current_analysis_version_id is not None
+                    else None
                 )
+                try:
+                    identity = validate_version_pipeline_identity(source_version)
+                except (AttributeError, InvalidPipelineIdentityError):
+                    pass
+                else:
+                    if identity.pipeline_kind != pipeline_kind:
+                        identity = None
+                    if identity is not None:
+                        request = AnalysisRequest(
+                            source_job_id=source.job_id,
+                            source_batch_id=source.id,
+                            provider_id=owner.provider_id,
+                            model_id=owner.model_id,
+                            credential_generation=owner.credential_generation,
+                            prompt_snapshot=json.loads(owner.prompt_snapshot_json),
+                            profile_snapshot=json.loads(owner.profile_snapshot_json),
+                            priority=HISTORY_REANALYSIS_PRIORITY,
+                            event_map_json=event_json,
+                            event_map_hash=event_hash,
+                            pipeline_kind=identity.pipeline_kind,
+                            search_provider_id=identity.search_provider_id,
+                            search_model_id=identity.search_model_id,
+                        )
+            if request is None:
+                await self._pause_snapshot_changed(
+                    batch_id, item.id, "analysis_schema_changed"
+                )
+                return
             try:
                 await self.task_coordinator.submit_reanalysis(request)
             except AlreadyRunningError:

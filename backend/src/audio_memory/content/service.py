@@ -224,7 +224,17 @@ class ContentService:
             if row is None:
                 raise LookupError("Unknown card evidence")
             card, _, version = row
-            if segment_id not in self._scene_evidence_ids(version, card.scene_id):
+            try:
+                card_payload = json.loads(card.payload_json)
+            except (TypeError, json.JSONDecodeError):
+                card_payload = {}
+            allowed_evidence = (
+                self._collect_evidence_ids(card_payload)
+                if isinstance(card_payload, dict)
+                and card_payload.get("writingV1") is True
+                else self._scene_evidence_ids(version, card.scene_id)
+            )
+            if segment_id not in allowed_evidence:
                 raise LookupError("Unknown card evidence")
             audio_row = (
                 await session.execute(
@@ -279,8 +289,13 @@ class ContentService:
         card: Card,
         version: AnalysisVersion,
     ) -> list[dict[str, object]]:
-        if card.scene_id == "analysis":
+        try:
             payload = json.loads(card.payload_json)
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("writingV1") is True:
+            source_cards = payload.get("cards", [])
+        elif card.scene_id == "analysis":
             source_cards = payload.get("cards", []) if isinstance(payload, dict) else []
         else:
             staged = self._staged_scene(version, card.scene_id)

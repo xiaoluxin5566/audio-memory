@@ -96,7 +96,7 @@ export function analysisProgressCopy(job) {
   }
   return {
     title: '分析未开始，可重试',
-    detail: '完整转写已保留，重试不会再次执行 Whisper。',
+    detail: '完整转写已保留，重试只会继续报告生成，不会再次转写音频。',
     failed: true,
   };
 }
@@ -137,6 +137,20 @@ export function jobFailureCopy(job) {
       action: '继续云端转写',
     };
   }
+  if (job.error_code === 'cloud_asr_submission_unknown') {
+    return {
+      title: '正在确认云端转写任务',
+      body: '提交时连接中断，任务可能已被火山接收。继续后会先查询原任务；只有确认任务不存在时，才使用同一个任务编号再次提交。',
+      action: '确认并继续',
+    };
+  }
+  if (job.error_code === 'transcript_finalize_failed') {
+    return {
+      title: '转写整理未完成',
+      body: '云端转写结果已保存；重试只会继续整理完整逐字稿并生成报告，不会重新上传或转写音频。',
+      action: '继续整理逐字稿',
+    };
+  }
   if (job.error_code === 'report_audit_pending') {
     return {
       title: '报告已生成，审计待重试',
@@ -153,7 +167,7 @@ export function jobFailureCopy(job) {
 
 
 export function jobRecoveryAction(job) {
-  if (job?.stage === 'failed' && ['cloud_asr_failed', 'managed_storage_unavailable'].includes(job?.error_code)) {
+  if (job?.stage === 'failed' && ['cloud_asr_failed', 'cloud_asr_submission_unknown', 'managed_storage_unavailable', 'transcript_finalize_failed'].includes(job?.error_code)) {
     return 'resume-cloud-asr';
   }
   if (job?.stage === 'failed' || job?.analysis_phase === 'failed') {

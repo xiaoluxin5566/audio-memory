@@ -208,7 +208,7 @@ def test_deepseek_validation_disables_thinking_for_short_protocol_response() -> 
 
 def test_kimi_k3_payloads_use_k3_reasoning_and_completion_contract() -> None:
     adapter = KimiAdapter(PROVIDER_CONFIGS["kimi"])
-    payload = adapter.validation_payload()
+    payload = adapter.validation_payload(model_id="kimi-k3")
 
     assert payload["model"] == "kimi-k3"
     assert "temperature" not in payload
@@ -233,3 +233,31 @@ def test_kimi_k3_payloads_use_k3_reasoning_and_completion_contract() -> None:
     assert search_payload["reasoning_effort"] == "low"
     assert "thinking" not in search_payload
     assert "temperature" not in search_payload
+
+
+def test_kimi_k2_6_native_search_explicitly_disables_thinking() -> None:
+    adapter = KimiAdapter(PROVIDER_CONFIGS["kimi"])
+
+    payload = adapter.native_search_payload(
+        model_id="kimi-k2.6",
+        messages=[],
+        queries=["查找官方资料"],
+    )
+
+    assert payload["model"] == "kimi-k2.6"
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+
+
+def test_kimi_catalog_uses_the_beta8_search_model_as_default() -> None:
+    config = PROVIDER_CONFIGS["kimi"]
+
+    assert config.model_id == "kimi-k2.6"
+    assert config.supports_model("kimi-k2.6") is True
+
+
+def test_deepseek_catalog_allows_v4_flash_without_changing_the_default_model() -> None:
+    config = PROVIDER_CONFIGS["deepseek"]
+
+    assert config.model_id == "deepseek-v4-pro"
+    assert config.supports_model("deepseek-v4-flash") is False

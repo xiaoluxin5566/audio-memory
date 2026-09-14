@@ -4,7 +4,7 @@ const emptyProviders = () => ({
   providers: ['kimi', 'deepseek', 'openai'].map((provider_id) => ({
     provider_id,
     display_name: provider_id === 'kimi' ? 'Kimi' : provider_id === 'deepseek' ? 'DeepSeek' : 'OpenAI',
-    model_id: provider_id === 'kimi' ? 'kimi-k3' : provider_id === 'deepseek' ? 'deepseek-v4-pro' : 'gpt-5-mini',
+    model_id: provider_id === 'kimi' ? 'kimi-k2.6' : provider_id === 'deepseek' ? 'deepseek-v4-pro' : 'gpt-5-mini',
     state: 'unconfigured',
     active: false,
     last_validated_at: null,
@@ -42,6 +42,14 @@ async function installApi(page, { rejectDeepSeek = false } = {}) {
       providers = configuredDeepSeek()
       return route.fulfill({ json: { provider_id: 'deepseek', state: 'available' } })
     }
+    if (url.pathname === '/api/providers/kimi/key' && request.method() === 'PUT') {
+      providers = {
+        providers: providers.providers.map((provider) => provider.provider_id === 'kimi'
+          ? { ...provider, state: 'available', active: false, last_validated_at: '2026-09-10T10:00:00Z' }
+          : provider),
+      }
+      return route.fulfill({ json: { provider_id: 'kimi', state: 'available', model_id: 'kimi-k2.6' } })
+    }
     if (url.pathname === '/api/providers/deepseek/activate' && request.method() === 'POST') {
       return route.fulfill({ json: { provider_id: 'deepseek', active: true } })
     }
@@ -65,7 +73,7 @@ test('successful first configuration becomes current and closes the modal', asyn
   await expect(reportApiCard.getByText('模型与 API Key')).toBeHidden()
   await reportApiCard.getByRole('button', { name: '去配置' }).click()
   await expect(page.getByRole('button', { name: 'DeepSeek' })).toHaveClass(/active/)
-  await expect(page.getByRole('button', { name: 'Kimi' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Kimi 联网搜索' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'OpenAI' })).toHaveCount(0)
   await page.getByLabel('API Key').fill('visible-test-key')
   await page.getByRole('button', { name: '保存并校验' }).click()
@@ -76,6 +84,21 @@ test('successful first configuration becomes current and closes the modal', asyn
   expect(calls).toContain('PUT /api/providers/deepseek/key')
   expect(calls).toContain('POST /api/providers/deepseek/activate')
   expect(calls.indexOf('PUT /api/providers/deepseek/key')).toBeLessThan(calls.indexOf('POST /api/providers/deepseek/activate'))
+})
+
+test('Kimi can be configured for search without becoming the report provider', async ({ page }) => {
+  const calls = await installApi(page)
+  await page.goto('/')
+
+  await page.locator('section').filter({ hasText: '报告生成 API' }).getByRole('button', { name: '去配置' }).click()
+  await page.getByRole('button', { name: 'Kimi 联网搜索' }).click()
+  await page.getByLabel('API Key').fill('kimi-search-key')
+  await page.getByRole('button', { name: '保存并校验' }).click()
+
+  await expect(page.getByText('Kimi 已配置为 Beta 8 联网搜索服务')).toBeVisible()
+  expect(calls).toContain('PUT /api/providers/kimi/key')
+  expect(calls).not.toContain('POST /api/providers/kimi/activate')
+  await expect(page.locator('input[type=file]')).toBeDisabled()
 })
 
 test('volcano ASR setup links directly to the official API key page', async ({ page }) => {

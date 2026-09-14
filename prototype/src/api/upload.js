@@ -9,6 +9,11 @@ export async function uploadFile(
   let localHeaders = await getLocalSessionHeaders(idempotencyKey)
   const body = new FormData()
   body.append('file', file, file.name)
+  if (Number.isFinite(file.lastModified) && file.lastModified > 0) {
+    body.append('file_modified', String(Math.trunc(file.lastModified)))
+  }
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  if (typeof timezone === 'string' && timezone) body.append('timezone', timezone)
   return new Promise((resolve, reject) => {
     let refreshed = false
     let transportRetries = 0

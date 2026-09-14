@@ -1,10 +1,23 @@
-export function ReanalysisModal({ preview, loading, error, current, view, onClose, onConfirm, onAction }) {
+export function ReanalysisModal({ preview, previewOptions = [], loading, error, current, view, onClose, onConfirm, onAction, onSelectPreview }) {
   const counts = view?.counts
   return <div className="modal-backdrop"><section className="modal reanalysis-modal" role="dialog" aria-modal="true" aria-labelledby="reanalysis-modal-title">
     <button className="modal-close" onClick={onClose} aria-label="关闭重新分析">×</button>
     <h1 id="reanalysis-modal-title">重新分析历史</h1>
     {loading && <p>正在读取本次重新分析范围…</p>}
     {error && <div className="inline-error"><b>{error}</b></div>}
+    {previewOptions.length > 1 && !loading && !error && <fieldset className="reanalysis-pipeline-options">
+      <legend>选择要重新分析的报告类型</legend>
+      {previewOptions.map((option) => <label key={option.pipelineKind}>
+        <input
+          type="radio"
+          name="reanalysis-pipeline"
+          checked={preview?.pipelineKind === option.pipelineKind}
+          onChange={() => onSelectPreview(option.pipelineKind)}
+        />
+        <span><b>{option.pipelineLabel}</b><small>{option.batchCount} 个上传批次</small></span>
+      </label>)}
+    </fieldset>}
+    {previewOptions.length > 1 && !preview && !loading && !error && <p>不同报告类型不会混合重新分析，请先选择一组。</p>}
     {preview && !loading && !error && <>
       <p>将使用当前模型和最新 Prompt 重新生成历史结果；原始音频与转写不会变化。</p>
       <div className="reanalysis-facts"><b>{preview.batchCount} 个上传批次 · {preview.fileCount} 个音频文件</b><span>{preview.characterCount.toLocaleString('zh-CN')} 个字符</span><span>{preview.modelLabel}</span><span>预计 {preview.callRange}</span></div>

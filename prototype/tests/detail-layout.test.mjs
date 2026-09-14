@@ -197,6 +197,20 @@ test('single report keeps only basic document typography and tables', () => {
   assert.doesNotMatch(styles, /\.report-event-map-intro>span/);
 });
 
+test('runtime metrics shows current generation, recovery, search, and history groups', () => {
+  const metrics = appSource.slice(
+    appSource.indexOf('function RuntimeMetrics'),
+    appSource.indexOf('function ExternalSources'),
+  );
+
+  assert.match(metrics, /runtimeMetricsPresentation\(metrics\)/);
+  assert.match(metrics, /本次正常报告生成/);
+  assert.match(metrics, /本次修复与恢复/);
+  assert.match(metrics, /本次搜索/);
+  assert.match(metrics, /历史累计/);
+  assert.match(metrics, /<details/);
+});
+
 test('single report renders source quotes with Chinese quotation marks', () => {
   const renderer = appSource.slice(
     appSource.indexOf('function AnalysisBlocks'),
@@ -208,11 +222,11 @@ test('single report renders source quotes with Chinese quotation marks', () => {
   assert.match(renderer, /“\{block\.text\}”/);
 });
 
-test('single report uses one restrained typography scale', () => {
-  assert.match(styles, /\.markdown-report\{[^}]*--report-body-size:15px/);
-  assert.match(styles, /--report-body-leading:1\.85/);
-  assert.match(styles, /\.markdown-report \.analysis-section-heading\{[^}]*font-size:24px/);
-  assert.match(styles, /\.markdown-report \.analysis-subheading\{[^}]*font-size:18px/);
+test('single report uses a Feishu-like document typography scale', () => {
+  assert.match(styles, /\.markdown-report\{[^}]*--report-body-size:16px/);
+  assert.match(styles, /--report-body-leading:1\.78/);
+  assert.match(styles, /\.markdown-report \.analysis-section-heading\{[^}]*font-size:22px/);
+  assert.match(styles, /\.markdown-report \.analysis-subheading\{[^}]*font-size:17px/);
   assert.match(styles, /\.markdown-report \.analysis-paragraph[^}]*font-size:var\(--report-body-size\)/);
 });
 
@@ -221,27 +235,37 @@ test('single report summary and detail share one width without repeated core con
     appSource.indexOf('function CardDetail'),
     appSource.indexOf('function RuntimeMetrics'),
   );
+  const matrixRenderer = appSource.slice(
+    appSource.indexOf('function AnalysisBlocks'),
+    appSource.indexOf('function EvidencePlayback'),
+  );
 
   assert.match(detail, /<MarkdownReport markdown=\{card\.reportMarkdown\} annotations=\{card\.reportAnnotations\} omitCoreConclusion=\{Boolean\(presentation\)\}/);
   assert.match(detail, /function omitMarkdownSection/);
-  assert.match(detail, /omitCoreConclusion \? omitMarkdownSection\(body, '核心结论'\) : body/);
+  assert.match(detail, /const presentation = markdownPresentation\(markdown\)/);
+  assert.match(detail, /omitCoreConclusion \? omitMarkdownSection\(presentation\.body, '核心结论'\) : presentation\.body/);
+  assert.match(detail, /<AnalysisBlocks blocks=\{analysisBlocks\(reportBody, 'full-report', title\)\}/);
+  assert.match(matrixRenderer, /block\.wrapperClass \|\| 'markdown-table-scroll'/);
+  assert.match(styles, /\.markdown-table-scroll \{ overflow-x: auto; \}/);
   assert.doesNotMatch(detail, />完整报告</);
-  assert.match(styles, /\.report-event-map,.markdown-report,.runtime-metrics\{max-width:960px;margin-inline:auto\}/);
+  assert.match(styles, /\.report-event-map,.markdown-report,.runtime-metrics\{max-width:800px;margin-inline:auto\}/);
   assert.doesNotMatch(styles, /\.markdown-report\{[^}]*max-width:860px/);
   assert.match(styles, /\.markdown-report \.analysis-blocks>\.analysis-section-heading:first-child\{[^}]*margin-top:24px/);
 });
 
-test('major report sections use restrained dividers without card decoration', () => {
-  assert.match(styles, /\.markdown-report \.analysis-section-heading\{[^}]*border-top:1px solid #dfe4ea/);
-  assert.match(styles, /\.markdown-report \.analysis-blocks>\.analysis-section-heading:first-child\{[^}]*border-top:0/);
+test('major report sections use whitespace, no dividers, and restrained automatic numbering', () => {
+  assert.match(styles, /\.markdown-report \.analysis-section-heading\{[^}]*border:0/);
+  assert.match(styles, /\.markdown-report \.analysis-section-heading>span\{[^}]*font-size:inherit[^}]*font-weight:inherit/);
+  assert.match(styles, /\.markdown-report \.analysis-subheading>span\{[^}]*font-size:inherit[^}]*font-weight:inherit/);
+  assert.doesNotMatch(styles, /\.markdown-report \.analysis-section-heading\{[^}]*border-top:1px/);
   assert.doesNotMatch(styles, /\.markdown-report \.analysis-section-heading\{[^}]*(?:background|border-radius|box-shadow):/);
 });
 
 test('content inside each major section uses a compact vertical rhythm', () => {
-  assert.match(styles, /\.markdown-report \.analysis-blocks\{gap:8px\}/);
-  assert.match(styles, /\.markdown-report \.analysis-subheading\{[^}]*margin:18px 0 6px/);
-  assert.match(styles, /\.markdown-report \.analysis-key-points,.markdown-report \.analysis-insight-grid,.markdown-report \.analysis-timeline\{[^}]*margin:0 0 4px/);
-  assert.match(styles, /\.markdown-report \.analysis-quote\{margin:2px 0 6px/);
+  assert.match(styles, /\.markdown-report \.analysis-blocks\{gap:10px\}/);
+  assert.match(styles, /\.markdown-report \.analysis-subheading\{[^}]*margin:24px 0 8px/);
+  assert.match(styles, /\.markdown-report \.analysis-key-points,.markdown-report \.analysis-insight-grid,.markdown-report \.analysis-timeline\{[^}]*margin:2px 0 10px/);
+  assert.match(styles, /\.markdown-report \.analysis-quote\{margin:8px 0 12px/);
 });
 
 test('global toast messages are centered where users can see them', () => {

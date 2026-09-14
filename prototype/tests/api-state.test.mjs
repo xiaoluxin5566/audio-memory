@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   analysisBlocks,
   extractReportMetrics,
+  markdownPresentation,
   normalizeFeed,
   normalizeHistory,
   normalizePrompts,
@@ -150,21 +151,30 @@ test('historic feed cards without overview or sources keep rendering data', () =
 })
 
 test('single markdown report stays one card with runtime metrics', () => {
+  const reportMarkdown = '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。\n\n---\n\n<!-- audio-memory-report-metrics -->\n> 本次报告：4449 字｜定向修改增益：63 → 100（+37）；'
   const normalized = normalizeFeed({ days: [{ date: '2026-08-13', cards: [{
     id: 'report-1', batch_id: 'batch-report', scene_id: 'analysis', uploaded_at: '2026-08-13T10:00:00Z',
     payload: {
       scene_id: 'analysis',
       cards: [{ title: '你今天的综合报告', summary: '工作与家庭是主线。', evidence_segment_ids: ['s1'], external_source_ids: [] }],
-      reportMarkdown: '# 你今天的综合报告\n\n## 核心结论\n\n工作有明确进展。\n\n---\n\n<!-- audio-memory-report-metrics -->\n> 本次报告：4449 字｜定向修改增益：63 → 100（+37）；',
+      reportMarkdown,
       reportQuality: { report_version: 'v2', audit_status: 'completed', quality_score: 88 },
       runtimeMetrics: { model_call_count: 8, input_tokens: 1000, output_tokens: 500, web_search_performed: false },
     }, qa: [],
   }] }] })
 
   const [card] = normalized.feed[0].cards
+  const presentation = markdownPresentation(card.reportMarkdown)
   assert.equal(normalized.feed[0].cards.length, 1)
-  assert.match(card.reportMarkdown, /^# 你今天的综合报告/)
-  assert.doesNotMatch(card.reportMarkdown, /audio-memory-report-metrics|本次报告/)
+  assert.equal(card.reportMarkdown, reportMarkdown)
+  assert.equal(presentation.body, '## 核心结论\n\n工作有明确进展。')
+  assert.deepEqual(presentation.metrics, {
+    characterCount: 4449,
+    initialScore: 63,
+    finalScore: 100,
+    gain: 37,
+    revised: true,
+  })
   assert.deepEqual(card.reportMetrics, {
     characterCount: 4449,
     initialScore: 63,

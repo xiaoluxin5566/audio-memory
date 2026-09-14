@@ -1,5 +1,42 @@
 import { expect, test } from '@playwright/test'
 
+test('mixed report pipelines require an explicit homogeneous selection', async ({ page }) => {
+  let createdWith = null
+  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    const request = route.request()
+    const { pathname } = new URL(request.url())
+    if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
+    if (pathname === '/api/providers') return route.fulfill({ json: { providers: [] } })
+    if (pathname === '/api/feed') return route.fulfill({ json: { todos: [], days: [] } })
+    if (pathname === '/api/history') return route.fulfill({ json: { days: [{ date: '2026年8月6日', audio: [{ id: 'f1', original_name: '会议.mp3', duration_ms: 1000, uploaded_at: '2026-08-06T10:00:00Z' }] }] } })
+    if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204 })
+    if (pathname === '/api/history/reanalysis-batches/preview-options') return route.fulfill({ json: { groups: [
+      { pipeline_kind: 'beta8_indexed_scene_v2', source_batch_ids: ['indexed-2'], source_batch_count: 1, audio_file_count: 1, transcript_character_count: 20, provider_display_name: 'Kimi', model_id: 'kimi-k2.5', prompt_summary: {}, estimated_calls_min: 2, estimated_calls_max: 2, blockers: [], preview_token: 'indexed-token' },
+      { pipeline_kind: 'single_report_v1', source_batch_ids: ['single-1'], source_batch_count: 1, audio_file_count: 1, transcript_character_count: 10, provider_display_name: 'Kimi', model_id: 'kimi-k2.5', prompt_summary: {}, estimated_calls_min: 1, estimated_calls_max: 1, blockers: [], preview_token: 'single-token' },
+    ] } })
+    if (pathname === '/api/history/reanalysis-batches' && request.method() === 'POST') {
+      createdWith = request.postDataJSON()
+      return route.fulfill({ status: 201, json: { id: 'selected', status: 'running', total: 1, pending: 0, running: 1, succeeded: 0, failed: 0, stopped: 0 } })
+    }
+    return route.fulfill({ status: 404, json: { detail: 'not found' } })
+  })
+
+  await page.goto('/history')
+  await page.getByRole('button', { name: '重新分析历史' }).click()
+  await expect(page.getByText('不同报告类型不会混合重新分析')).toBeVisible()
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeDisabled()
+  await page.getByRole('radio', { name: /Beta 8 索引场景/ }).check()
+  await expect(page.getByRole('button', { name: '确认重新分析' })).toBeEnabled()
+  await page.getByRole('button', { name: '确认重新分析' }).click()
+
+  expect(createdWith).toEqual({
+    preview_token: 'indexed-token',
+    source_batch_ids: ['indexed-2'],
+  })
+})
+
 test('history reanalysis previews, starts, shows progress and protects clearing', async ({ page }) => {
   let current = null
   let createdWith = null

@@ -115,6 +115,25 @@ async def test_health_exposes_development_profile_without_runtime_details(
 
 
 @pytest.mark.asyncio
+async def test_application_wires_indexed_beta8_runner_route(tmp_path: Path) -> None:
+    runtime_config = RuntimeConfig.from_environment(
+        home=tmp_path / "home",
+        project_root=tmp_path / "project",
+        environ={
+            "AUDIO_MEMORY_PROFILE": "development",
+            "AUDIO_MEMORY_REPORT_PIPELINE": "beta8_indexed_scene_v2",
+        },
+    )
+    app = create_app(runtime_config=runtime_config)
+
+    async with app.router.lifespan_context(app):
+        assert (
+            app.state.analysis_runner.runners["beta8_indexed_scene_v2"]
+            is app.state.beta8_report_runner
+        )
+
+
+@pytest.mark.asyncio
 async def test_health_exposes_controlled_integration_acceptance_label(
     tmp_path: Path, fake_mac_security_client: list[FakeSecurityClient]
 ) -> None:
@@ -434,6 +453,12 @@ async def test_development_database_rechecks_reused_connection_before_sql(
     protected_database = tmp_path / "production-audio-memory.sqlite3"
 
     async with app.router.lifespan_context(app):
+        # This case isolates one already checked-out connection. Background
+        # workers can legitimately checkpoint WAL pages after the hardlink is
+        # created, which changes file bytes without executing the prohibited
+        # statement and makes the assertion race-dependent.
+        await app.state.reanalysis_worker.close()
+        await app.state.analysis_task_coordinator.close()
         async with app.state.database.session() as session:
             await session.execute(text("SELECT 1"))
             os.link(database_path, protected_database)

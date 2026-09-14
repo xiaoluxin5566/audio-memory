@@ -1,0 +1,480 @@
+{
+  "cases": [
+    {
+      "case_id": "game_with_overlapping_embedded_media",
+      "transcript": [
+        {
+          "segment_id": "g0",
+          "file_name": "game.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "g1",
+          "file_name": "game.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "g2",
+          "file_name": "game.mp3",
+          "is_reliable": true
+        }
+      ],
+      "draft": {
+        "input_complete": true,
+        "input_error": null,
+        "primary_sessions": [
+          {
+            "session_id": "game-session",
+            "activity_kind": "solo_speech_or_activity",
+            "communication_purpose": "not_applicable",
+            "participation_mode": "solo_user_activity",
+            "start_boundary": "activity_started",
+            "start_boundary_evidence_segment_ids": [
+              "g0"
+            ],
+            "end_boundary": "activity_ended",
+            "end_boundary_evidence_segment_ids": [
+              "g2"
+            ],
+            "subject": "游戏过程",
+            "description": "用户进行一段连续游戏活动。"
+          }
+        ],
+        "embedded_events": [
+          {
+            "event_id": "game-broadcast",
+            "parent_session_id": "game-session",
+            "event_kind": "content_playback",
+            "expression_mode": "media_playback",
+            "subject": "游戏播报",
+            "description": "游戏过程中同时出现播报内容。",
+            "evidence_ranges": [
+              {
+                "source_file": "game.mp3",
+                "start_segment_id": "g0",
+                "end_segment_id": "g2"
+              }
+            ]
+          },
+          {
+            "event_id": "user-game-commentary",
+            "parent_session_id": "game-session",
+            "event_kind": "user_commentary",
+            "expression_mode": "user_experience",
+            "subject": "用户评论",
+            "description": "用户对游戏过程作出评论。",
+            "evidence_ranges": [
+              {
+                "source_file": "game.mp3",
+                "start_segment_id": "g1",
+                "end_segment_id": "g2"
+              }
+            ]
+          }
+        ],
+        "file_timelines": [
+          {
+            "source_file": "game.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "g0",
+                "disposition": "session",
+                "session_id": "game-session",
+                "end_segment_id": "g2"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_coverage_ranges": [
+        {
+          "source_file": "game.mp3",
+          "start_segment_id": "g0",
+          "end_segment_id": "g2",
+          "disposition": "session",
+          "session_id": "game-session"
+        }
+      ],
+      "expected_work_session_ids": []
+    },
+    {
+      "case_id": "adjacent_vehicle_calls",
+      "transcript": [
+        {
+          "segment_id": "v0",
+          "file_name": "vehicle.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "v1",
+          "file_name": "vehicle.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "v2",
+          "file_name": "vehicle.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "v3",
+          "file_name": "vehicle.mp3",
+          "is_reliable": true
+        }
+      ],
+      "draft": {
+        "input_complete": true,
+        "input_error": null,
+        "primary_sessions": [
+          {
+            "session_id": "vehicle-call-a",
+            "activity_kind": "conversation",
+            "communication_purpose": "work",
+            "participation_mode": "user_present_live_interaction",
+            "start_boundary": "contact_started",
+            "start_boundary_evidence_segment_ids": [
+              "v0"
+            ],
+            "end_boundary": "contact_ended",
+            "end_boundary_evidence_segment_ids": [
+              "v1"
+            ],
+            "subject": "第一次车辆电话",
+            "description": "第一次独立电话。"
+          },
+          {
+            "session_id": "vehicle-call-b",
+            "activity_kind": "conversation",
+            "communication_purpose": "work",
+            "participation_mode": "user_present_live_interaction",
+            "start_boundary": "contact_started",
+            "start_boundary_evidence_segment_ids": [
+              "v2"
+            ],
+            "end_boundary": "contact_ended",
+            "end_boundary_evidence_segment_ids": [
+              "v3"
+            ],
+            "subject": "第二次车辆电话",
+            "description": "重新发起的第二次独立电话。"
+          }
+        ],
+        "embedded_events": [],
+        "file_timelines": [
+          {
+            "source_file": "vehicle.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "v0",
+                "disposition": "session",
+                "session_id": "vehicle-call-a",
+                "end_segment_id": "v1"
+              },
+              {
+                "start_segment_id": "v2",
+                "disposition": "session",
+                "session_id": "vehicle-call-b",
+                "end_segment_id": "v3"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_coverage_ranges": [
+        {
+          "source_file": "vehicle.mp3",
+          "start_segment_id": "v0",
+          "end_segment_id": "v1",
+          "disposition": "session",
+          "session_id": "vehicle-call-a"
+        },
+        {
+          "source_file": "vehicle.mp3",
+          "start_segment_id": "v2",
+          "end_segment_id": "v3",
+          "disposition": "session",
+          "session_id": "vehicle-call-b"
+        }
+      ],
+      "expected_work_session_ids": [
+        "vehicle-call-a",
+        "vehicle-call-b"
+      ]
+    },
+    {
+      "case_id": "workshop_across_files_and_phases",
+      "transcript": [
+        {
+          "segment_id": "w0",
+          "file_name": "workshop-a.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "w1",
+          "file_name": "workshop-a.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "w2",
+          "file_name": "workshop-b.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "w3",
+          "file_name": "workshop-b.mp3",
+          "is_reliable": true
+        }
+      ],
+      "draft": {
+        "input_complete": true,
+        "input_error": null,
+        "primary_sessions": [
+          {
+            "session_id": "one-workshop",
+            "activity_kind": "conversation",
+            "communication_purpose": "work",
+            "participation_mode": "user_present_live_interaction",
+            "start_boundary": "contact_started",
+            "start_boundary_evidence_segment_ids": [
+              "w0"
+            ],
+            "end_boundary": "contact_ended",
+            "end_boundary_evidence_segment_ids": [
+              "w3"
+            ],
+            "subject": "跨文件工作坊",
+            "description": "同一工作坊跨文件延续。"
+          }
+        ],
+        "embedded_events": [
+          {
+            "event_id": "workshop-demo-phase",
+            "parent_session_id": "one-workshop",
+            "event_kind": "third_party_case",
+            "expression_mode": "third_party_case",
+            "subject": "演示阶段",
+            "description": "工作坊内的演示阶段。",
+            "evidence_ranges": [
+              {
+                "source_file": "workshop-b.mp3",
+                "start_segment_id": "w2",
+                "end_segment_id": "w2"
+              }
+            ]
+          }
+        ],
+        "file_timelines": [
+          {
+            "source_file": "workshop-a.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "w0",
+                "disposition": "session",
+                "session_id": "one-workshop",
+                "end_segment_id": "w1"
+              }
+            ]
+          },
+          {
+            "source_file": "workshop-b.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "w2",
+                "disposition": "session",
+                "session_id": "one-workshop",
+                "end_segment_id": "w3"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_coverage_ranges": [
+        {
+          "source_file": "workshop-a.mp3",
+          "start_segment_id": "w0",
+          "end_segment_id": "w1",
+          "disposition": "session",
+          "session_id": "one-workshop"
+        },
+        {
+          "source_file": "workshop-b.mp3",
+          "start_segment_id": "w2",
+          "end_segment_id": "w3",
+          "disposition": "session",
+          "session_id": "one-workshop"
+        }
+      ],
+      "expected_work_session_ids": [
+        "one-workshop"
+      ]
+    },
+    {
+      "case_id": "lunch_career_salary_non_work",
+      "transcript": [
+        {
+          "segment_id": "l0",
+          "file_name": "lunch.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "l1",
+          "file_name": "lunch.mp3",
+          "is_reliable": true
+        }
+      ],
+      "draft": {
+        "input_complete": true,
+        "input_error": null,
+        "primary_sessions": [
+          {
+            "session_id": "lunch-chat",
+            "activity_kind": "conversation",
+            "communication_purpose": "non_work",
+            "participation_mode": "user_present_live_interaction",
+            "start_boundary": "contact_started",
+            "start_boundary_evidence_segment_ids": [
+              "l0"
+            ],
+            "end_boundary": "contact_ended",
+            "end_boundary_evidence_segment_ids": [
+              "l1"
+            ],
+            "subject": "午餐闲聊",
+            "description": "午餐期间谈到薪资与职业选择但未推进工作。"
+          }
+        ],
+        "embedded_events": [],
+        "file_timelines": [
+          {
+            "source_file": "lunch.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "l0",
+                "disposition": "session",
+                "session_id": "lunch-chat",
+                "end_segment_id": "l1"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_coverage_ranges": [
+        {
+          "source_file": "lunch.mp3",
+          "start_segment_id": "l0",
+          "end_segment_id": "l1",
+          "disposition": "session",
+          "session_id": "lunch-chat"
+        }
+      ],
+      "expected_work_session_ids": []
+    },
+    {
+      "case_id": "model_excluded_noise_between_sessions",
+      "transcript": [
+        {
+          "segment_id": "n0",
+          "file_name": "mixed.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "n1",
+          "file_name": "mixed.mp3",
+          "is_reliable": true
+        },
+        {
+          "segment_id": "n2",
+          "file_name": "mixed.mp3",
+          "is_reliable": true
+        }
+      ],
+      "draft": {
+        "input_complete": true,
+        "input_error": null,
+        "primary_sessions": [
+          {
+            "session_id": "activity-a",
+            "activity_kind": "ambient_activity",
+            "communication_purpose": "not_applicable",
+            "participation_mode": "ambient_or_third_party",
+            "start_boundary": "activity_started",
+            "start_boundary_evidence_segment_ids": [
+              "n0"
+            ],
+            "end_boundary": "activity_ended",
+            "end_boundary_evidence_segment_ids": [
+              "n0"
+            ],
+            "subject": "活动 A",
+            "description": "噪声前的有效活动。"
+          },
+          {
+            "session_id": "activity-b",
+            "activity_kind": "solo_speech_or_activity",
+            "communication_purpose": "not_applicable",
+            "participation_mode": "solo_user_activity",
+            "start_boundary": "activity_started",
+            "start_boundary_evidence_segment_ids": [
+              "n2"
+            ],
+            "end_boundary": "activity_ended",
+            "end_boundary_evidence_segment_ids": [
+              "n2"
+            ],
+            "subject": "活动 B",
+            "description": "噪声后的另一有效活动。"
+          }
+        ],
+        "embedded_events": [],
+        "file_timelines": [
+          {
+            "source_file": "mixed.mp3",
+            "blocks": [
+              {
+                "start_segment_id": "n0",
+                "disposition": "session",
+                "session_id": "activity-a",
+                "end_segment_id": "n0"
+              },
+              {
+                "start_segment_id": "n1",
+                "disposition": "excluded",
+                "excluded_reason": "noise",
+                "end_segment_id": "n1"
+              },
+              {
+                "start_segment_id": "n2",
+                "disposition": "session",
+                "session_id": "activity-b",
+                "end_segment_id": "n2"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_coverage_ranges": [
+        {
+          "source_file": "mixed.mp3",
+          "start_segment_id": "n0",
+          "end_segment_id": "n0",
+          "disposition": "session",
+          "session_id": "activity-a"
+        },
+        {
+          "source_file": "mixed.mp3",
+          "start_segment_id": "n1",
+          "end_segment_id": "n1",
+          "disposition": "excluded",
+          "excluded_reason": "noise"
+        },
+        {
+          "source_file": "mixed.mp3",
+          "start_segment_id": "n2",
+          "end_segment_id": "n2",
+          "disposition": "session",
+          "session_id": "activity-b"
+        }
+      ],
+      "expected_work_session_ids": []
+    }
+  ]
+}
