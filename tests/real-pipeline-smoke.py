@@ -71,6 +71,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_published_cards(
+    cards: list[dict[str, object]], published_card_count: int | None
+) -> None:
+    """Validate the variable-size Beta 8 publication returned by the feed."""
+    assert cards, cards
+    assert published_card_count == len(cards), {
+        "feed_card_count": len(cards),
+        "published_card_count": published_card_count,
+    }
+    card_ids = [card.get("id") for card in cards]
+    assert all(isinstance(card_id, str) and card_id for card_id in card_ids), cards
+    assert len(set(card_ids)) == len(card_ids), card_ids
+    assert all(
+        isinstance(card.get("scene_id"), str) and card["scene_id"]
+        for card in cards
+    ), cards
+
+
 def isolated_paths(home: Path) -> AppPaths:
     paths = AppPaths.from_home(home)
     installed_models = AppPaths.from_home(Path.home()).models
@@ -176,8 +194,6 @@ def main() -> None:
             history = client.get("/api/history").json()
             assert feed["days"] or feed["todos"], feed
             cards = [card for day in feed["days"] for card in day["cards"]]
-            assert len(cards) == 1, cards
-            assert cards[0]["scene_id"] == "analysis", cards[0]
             assert history["days"], history
             elapsed = time.monotonic() - pipeline_started
 
@@ -226,7 +242,7 @@ def main() -> None:
             assert stored_names == sorted(uploaded_names), stored_names
             assert transcript_count > 0, transcript_count
             assert version_status == "completed", version_status
-            assert published_card_count == 1, published_card_count
+            validate_published_cards(cards, published_card_count)
             searched = bool(sources)
             attempted = bool(rounds)
             errors = [
