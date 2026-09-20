@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test('batch overview is a distinct entry point and card sources stay separate from recording evidence', async ({ page }) => {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const { pathname } = new URL(route.request().url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
     if (pathname === '/api/providers') return route.fulfill({ json: { providers: [{ provider_id: 'deepseek', display_name: 'DeepSeek', state: 'available', active: true }] } })

@@ -25,7 +25,7 @@ test('todo, card detail and clear-history actions remain connected while feedbac
   let todoText = '整理会议结论'
   let completed = false
   let cleared = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })

@@ -23,7 +23,7 @@ const availableButInactiveProviders = {
 
 async function installUploadPrerequisites(page, providers, createJobResponse) {
   let createJobCalls = 0
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -125,7 +125,7 @@ const completedHistory = {
 async function installJobApi(page) {
   let completed = false
   let completedFeedReads = 0
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -192,7 +192,7 @@ test('completed batch retries a transient feed refresh before clearing the job',
 
 test('unsupported file pauses later uploads and removing it resumes the queue', async ({ page }) => {
   let uploadCalls = 0
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -236,7 +236,7 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
 })
 
 test('active transcription disables adding audio until its report is published', async ({ page }) => {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const { pathname } = new URL(route.request().url())
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
@@ -269,7 +269,7 @@ test('active transcription disables adding audio until its report is published',
 })
 
 test('refresh during report publication stays locked and shows publishing progress', async ({ page }) => {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const { pathname } = new URL(route.request().url())
     if (pathname === '/api/providers') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
@@ -302,7 +302,7 @@ test('refresh during report publication stays locked and shows publishing progre
 
 test('clearing history also clears a terminal current task and unlocks uploads', async ({ page }) => {
   let cleared = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })

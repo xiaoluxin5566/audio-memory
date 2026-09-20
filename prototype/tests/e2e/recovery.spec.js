@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test('opening the page restores an interrupted analysis and can resume it', async ({ page }) => {
   let resumed = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -50,7 +50,7 @@ test('opening the page restores an interrupted analysis and can resume it', asyn
 })
 
 test('cloud transcription uses cloud copy and durable progress', async ({ page }) => {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -85,7 +85,7 @@ test('a stale analyzing failure retries once instead of calling transcription re
   let resumeRequests = 0
   let releaseRetry
   const retryReleased = new Promise((resolve) => { releaseRetry = resolve })
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -126,7 +126,7 @@ test('a stale analyzing failure retries once instead of calling transcription re
 
 test('cancelling an interrupted task clears only the current upload state', async ({ page }) => {
   let cancelled = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -157,7 +157,7 @@ test('cancelling an interrupted task clears only the current upload state', asyn
 
 test('cancelling an active analysis requires explicit confirmation', async ({ page }) => {
   let cancelled = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -199,7 +199,7 @@ test('cancelling an active analysis requires explicit confirmation', async ({ pa
 })
 
 test('the cancel analysis action remains available during report generation', async ({ page }) => {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -228,7 +228,7 @@ test('the cancel analysis action remains available during report generation', as
 for (const errorCode of ['credential_changed', 'fixed_rules_changed', 'event_map_unknown_segment', 'analysis_quality_insufficient']) {
   test(`a failed ${errorCode} analysis retries without returning to Whisper`, async ({ page }) => {
     let retried = false
-    await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+    await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
       const request = route.request()
       const { pathname } = new URL(request.url())
       if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })

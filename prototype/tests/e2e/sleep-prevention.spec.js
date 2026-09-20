@@ -20,7 +20,7 @@ async function installApi(page, { initiallyEnabled = false, initialStatus = 'ina
   let appVersion = '0.1.0-beta.6'
   let startCalls = 0
   let updateCalls = 0
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/health') return route.fulfill({ json: { status: 'ok', profile: 'development', version: appVersion } })

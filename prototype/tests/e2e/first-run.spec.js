@@ -23,7 +23,7 @@ const configuredDeepSeek = () => ({
 async function installApi(page, { rejectDeepSeek = false } = {}) {
   let providers = emptyProviders()
   const calls = []
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     calls.push(`${request.method()} ${url.pathname}`)
@@ -146,7 +146,7 @@ test('failed configuration keeps the visible key until the modal is closed', asy
 
 test('startup validation refreshes automatically without manual revalidation', async ({ page }) => {
   let providerReads = 0
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -185,7 +185,7 @@ test('initial page load validates configured providers once across route changes
     state: 'validating', last_validated_at: null,
   }] }
   const calls = []
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -219,7 +219,7 @@ test('overdue todo remains unchecked and saves a local deadline as ISO', async (
     id: 'todo-1', text: '整理会议结论', due_at: '2026-08-04T08:00:00+00:00', completed: false, overdue: true,
   }
   const updates = []
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })

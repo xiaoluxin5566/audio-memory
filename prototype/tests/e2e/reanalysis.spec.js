@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test('mixed report pipelines require an explicit homogeneous selection', async ({ page }) => {
   let createdWith = null
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -40,7 +40,7 @@ test('mixed report pipelines require an explicit homogeneous selection', async (
 test('history reanalysis previews, starts, shows progress and protects clearing', async ({ page }) => {
   let current = null
   let createdWith = null
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -78,7 +78,7 @@ test('a terminal batch exposes a fresh run and stopped work can continue', async
   let resumed = false
   let created = false
   const stopped = { id: 'stopped-1', status: 'stopped', total: 3, pending: 0, running: 0, succeeded: 1, failed: 0, stopped: 2 }
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -114,7 +114,7 @@ test('a terminal batch exposes a fresh run and stopped work can continue', async
 
 test('clearing terminal history immediately disables the reanalysis entry', async ({ page }) => {
   let cleared = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -139,7 +139,7 @@ test('terminal preview hides stale costs and disables confirmation until a fresh
   let previewReads = 0
   let releaseFreshPreview
   const freshPreview = new Promise((resolve) => { releaseFreshPreview = resolve })
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -183,7 +183,7 @@ test('a late first preview cannot replace the fresh preview after close and reop
   let releaseOldPreview
   const oldPreview = new Promise((resolve) => { releaseOldPreview = resolve })
   let createdBody = null
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -219,7 +219,7 @@ test('a late first preview cannot replace the fresh preview after close and reop
 test('closing the modal preserves a slow initial running status response', async ({ page }) => {
   let releaseCurrent
   const slowCurrent = new Promise((resolve) => { releaseCurrent = resolve })
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
@@ -252,7 +252,7 @@ test('clearing after closing a slow request ignores late preview and current res
   const slowCurrent = new Promise((resolve) => { releaseCurrent = resolve })
   const slowPreview = new Promise((resolve) => { releasePreview = resolve })
   let cleared = false
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\//, async (route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request()
     const { pathname } = new URL(request.url())
     if (pathname === '/api/session') return route.fulfill({ json: { token: 'test-session' } })
