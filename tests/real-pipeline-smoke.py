@@ -89,6 +89,25 @@ def validate_published_cards(
     ), cards
 
 
+def prepare_runtime_providers(client, post) -> None:
+    """Validate the saved report and cloud-ASR credentials used by the smoke."""
+    deadline = time.monotonic() + 30
+    deepseek = None
+    while time.monotonic() < deadline:
+        providers = client.get("/api/providers").json()["providers"]
+        deepseek = next(
+            item for item in providers if item["provider_id"] == "deepseek"
+        )
+        if deepseek["state"] not in {"initializing", "validating"}:
+            break
+        time.sleep(0.25)
+    assert deepseek and deepseek["state"] == "available", deepseek
+    activated = post("/api/providers/deepseek/activate")
+    assert activated.status_code == 200, activated.text
+    asr = post("/api/asr/validate")
+    assert asr.status_code == 200, asr.text
+
+
 def isolated_paths(home: Path) -> AppPaths:
     paths = AppPaths.from_home(home)
     installed_models = AppPaths.from_home(Path.home()).models
@@ -140,21 +159,11 @@ def main() -> None:
                 )
                 return client.post(path, headers=headers, **kwargs)
 
-            deadline = time.monotonic() + 30
-            deepseek = None
-            while time.monotonic() < deadline:
-                providers = client.get("/api/providers").json()["providers"]
-                deepseek = next(
-                    item for item in providers if item["provider_id"] == "deepseek"
-                )
-                if deepseek["state"] not in {"initializing", "validating"}:
-                    break
-                time.sleep(0.25)
-            assert deepseek and deepseek["state"] == "available", deepseek
-            activated = post("/api/providers/deepseek/activate")
-            assert activated.status_code == 200, activated.text
+            prepare_runtime_providers(client, post)
 
-            job_id = post("/api/jobs").json()["id"]
+            created = post("/api/jobs")
+            assert created.status_code == 201, created.text
+            job_id = created.json()["id"]
             uploaded_names: list[str] = []
             for audio in audio_files:
                 mime_type = (
