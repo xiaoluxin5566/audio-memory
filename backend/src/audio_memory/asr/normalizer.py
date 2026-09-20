@@ -57,6 +57,10 @@ def normalize_volcano_result(
         previous_start = start_ms
         words = _words(value.get("words", []), start_ms=start_ms, end_ms=end_ms)
         speaker = value.get("speaker_id")
+        if speaker is None:
+            additions = value.get("additions")
+            if isinstance(additions, dict):
+                speaker = additions.get("speaker")
         speaker_id = None if speaker is None else f"speaker-{speaker}"
         normalized.append(
             CloudTranscriptSegment(

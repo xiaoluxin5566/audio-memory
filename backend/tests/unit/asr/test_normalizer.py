@@ -40,6 +40,33 @@ def test_normalizes_utterances_with_stable_indexes_and_speakers() -> None:
     ]
 
 
+def test_normalizes_current_volcano_speaker_from_additions() -> None:
+    segments = normalize_volcano_result(
+        file_id="file-1",
+        duration_ms=3000,
+        payload={
+            "result": {
+                "utterances": [
+                    {
+                        "start_time": 0,
+                        "end_time": 1200,
+                        "text": "你好。",
+                        "additions": {"speaker": "1"},
+                    },
+                    {
+                        "start_time": 1200,
+                        "end_time": 2600,
+                        "text": "今天开会。",
+                        "additions": {"speaker": "2"},
+                    },
+                ]
+            }
+        },
+    )
+
+    assert [item.speaker_id for item in segments] == ["speaker-1", "speaker-2"]
+
+
 def test_ignores_provider_tokens_without_timestamps() -> None:
     segments = normalize_volcano_result(
         file_id="file-1",
