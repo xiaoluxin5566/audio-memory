@@ -1,5 +1,5 @@
 {
-  "version": "beta8-p1-p5-v1-2026-09-20-kimi-search-pro",
+  "version": "beta8-p1-p5-v1-2026-09-20-speaker-identity-guard",
   "prompts": [
     {
       "prompt_id": "P1",
@@ -7,7 +7,7 @@
     },
     {
       "prompt_id": "P2",
-      "sha256": "0633039ee51ae2a8c25d75b265848e809e84f716b4773776a549d4fb65bde73b"
+      "sha256": "958b48bf54f47d494cc68f1e2b8001d128b321e71a20337e7c9544ec1dcaacdc"
     },
     {
       "prompt_id": "P3",
@@ -15,11 +15,11 @@
     },
     {
       "prompt_id": "P4",
-      "sha256": "facec50aa56813a15d793fde2e2aada40ad9d1c40e412ae15c041e5287246764"
+      "sha256": "c8e5b705c837315121f33d723537cf0fb3e1e3511a3cdb1d09847e8603774ee9"
     },
     {
       "prompt_id": "P5",
-      "sha256": "bb9653b58ba453ab67d88a111e86f96046e5a7c1427a1bebcf38590906cff477"
+      "sha256": "f16f7d8c5620ad5005dbef6215c3e78495e9fa2cd3e5d5a9eb929c8a2ef1fe75"
     }
   ],
   "p4_scene_prompts": [
@@ -53,5 +53,5 @@
     }
   ],
   "input_template_sha256": "d3e20ee1311e7fb9ad351db3c02c394d66fe208f9ee866a58007cd14bc20af03",
-  "rubric_sha256": "f6f7073ed9b371f8daa487bea46cbb8ce0106b85212a8df7eb1ded5048bc8b93"
+  "rubric_sha256": "9e04cae9bc0fa1577832548c15caedbd82ea42e790d7214fc4e55123bdbea8cd"
 }

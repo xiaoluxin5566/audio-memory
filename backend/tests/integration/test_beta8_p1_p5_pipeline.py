@@ -137,6 +137,8 @@ def test_prompt_manifest_includes_exactly_p1_through_p5():
     assert "反向漏失检查" in P1P5Prompts.system("P2")
     assert "P1 未登记" in P1P5Prompts.system("P2")
     assert "topic_assignments 可以为空" in P1P5Prompts.system("P2")
+    assert "说话人簇只是语音分组参考" in P1P5Prompts.system("P2")
+    assert "不得把 `speaker-N` 直接解释为用户" in P1P5Prompts.system("P2")
     assert "每个任务只调用一次 Kimi Search Pro" in P1P5Prompts.system("P3")
     assert "不再调用模型做二次规划或判断" in P1P5Prompts.system("P3")
     assert "任何空结果都不得伪造来源" in P1P5Prompts.system("P3")
@@ -145,6 +147,9 @@ def test_prompt_manifest_includes_exactly_p1_through_p5():
     assert "missing_content" in P1P5Prompts.system("P5")
     assert "实体、时间和数字核对表" in P1P5Prompts.system("P5")
     assert "人物名称不一致" in P1P5Prompts.system("P4", "work_communication")
+    assert "说话人簇只是语音分组参考" in P1P5Prompts.system("P4", "work_communication")
+    assert "不得将其改写为‘你’" in P1P5Prompts.system("P4", "work_communication")
+    assert "未经确认的说话人簇改写成‘你’" in P1P5Prompts.system("P5")
 
 
 def test_p4_combines_shared_contract_with_exact_scene_prompt():
