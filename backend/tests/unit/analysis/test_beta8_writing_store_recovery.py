@@ -42,6 +42,31 @@ def test_metrics_preserve_counts_for_malformed_parsed_envelopes(tmp_path: Path) 
     assert metrics["output_tokens"] is None
 
 
+def test_metrics_count_search_pro_without_erasing_report_token_totals(tmp_path: Path) -> None:
+    store = WritingStore(tmp_path, {"run": "search-pro"})
+    limits = WritingLimits(allow_paid=True, max_requests=2)
+    report = store.before_request("P1", {"messages": []}, limits)
+    store.after_response(report, {
+        "usage": {"prompt_tokens": 120, "completion_tokens": 30},
+        "choices": [],
+    })
+    search = store.before_request(
+        "P3", {"text_query": "official guide", "limit": 5}, limits
+    )
+    store.after_response(search, {"search_results": [{"url": "https://example.com"}]})
+
+    metrics = store.metrics()
+
+    assert metrics["model_request_count"] == 2
+    assert metrics["report_request_count"] == 1
+    assert metrics["search_model_request_count"] == 1
+    assert metrics["search_tool_call_count"] == 1
+    assert metrics["input_tokens"] == 120
+    assert metrics["output_tokens"] == 30
+    assert metrics["search_input_tokens"] is None
+    assert metrics["search_output_tokens"] is None
+
+
 def test_atomic_write_fsyncs_file_and_parent_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

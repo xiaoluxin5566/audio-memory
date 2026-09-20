@@ -1,5 +1,5 @@
 {
-  "version": "beta8-p1-p5-v1-2026-09-10-anchor-derived-activities",
+  "version": "beta8-p1-p5-v1-2026-09-20-kimi-search-pro",
   "prompts": [
     {
       "prompt_id": "P1",
@@ -11,7 +11,7 @@
     },
     {
       "prompt_id": "P3",
-      "sha256": "494a2e6389c7daaaf905d81777bb456aae1affc31d47da451a723634dc191071"
+      "sha256": "e8ec620aa3cceab0989a40b4e34ca5b87cf3a93b3d1e61ed27f03c5abdede963"
     },
     {
       "prompt_id": "P4",

@@ -137,8 +137,9 @@ def test_prompt_manifest_includes_exactly_p1_through_p5():
     assert "反向漏失检查" in P1P5Prompts.system("P2")
     assert "P1 未登记" in P1P5Prompts.system("P2")
     assert "topic_assignments 可以为空" in P1P5Prompts.system("P2")
-    assert "最多执行 3 次搜索" in P1P5Prompts.system("P3")
-    assert "不得因“只找到部分结果”就提前输出" in P1P5Prompts.system("P3")
+    assert "每个任务只调用一次 Kimi Search Pro" in P1P5Prompts.system("P3")
+    assert "不再调用模型做二次规划或判断" in P1P5Prompts.system("P3")
+    assert "任何空结果都不得伪造来源" in P1P5Prompts.system("P3")
     assert "不修改、重写" in P1P5Prompts.system("P5")
     assert "每次输入只包含一张 P4 主卡" in P1P5Prompts.system("P5")
     assert "missing_content" in P1P5Prompts.system("P5")
@@ -303,7 +304,7 @@ def test_p3_accepts_provider_version_constraint_alias_without_new_search(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_p3_program_schedules_three_task_derived_searches_without_legal_hardcoding(tmp_path):
+async def test_p3_executes_one_search_pro_request_for_each_p2_research_need(tmp_path):
     from audio_memory.analysis.beta8_p1_p5_pipeline import P1P5Pipeline
     from audio_memory.analysis.beta8_writing_store import WritingLimits
     pipeline = P1P5Pipeline(
@@ -332,23 +333,15 @@ async def test_p3_program_schedules_three_task_derived_searches_without_legal_ha
 
     result = await pipeline._focused_research(public, {"task_key": "r"})
 
-    assert len(calls) == 3
-    assert [call[0]["task_key"] for call in calls] == [
-        "r__direct_answer", "r__execution_conditions", "r__gap_check",
-    ]
-    assert all(call[0]["max_search_tool_calls"] == 1 for call in calls)
-    assert all(call[2] == 2 for call in calls)
-    combined_questions = "\n".join(call[0]["question"] for call in calls)
-    assert "官方景区与场馆页面优先" in combined_questions
-    assert "找到活动特色、开放预约和交通限制" in combined_questions
-    assert "法律" not in combined_questions
-    assert "司法管辖区" not in combined_questions
-    assert "执法" not in combined_questions
-    assert result["focused_task_count"] == 3
+    assert len(calls) == 1
+    assert calls[0][0] == public
+    assert calls[0][1] == {"task_key": "r"}
+    assert calls[0][2] == 1
+    assert result["focused_task_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_p3_stops_after_a_focused_search_satisfies_the_original_stop_condition(tmp_path):
+async def test_p3_keeps_one_request_when_search_pro_returns_sufficient(tmp_path):
     from audio_memory.analysis.beta8_p1_p5_pipeline import P1P5Pipeline
     from audio_memory.analysis.beta8_writing_store import WritingLimits
 
@@ -377,13 +370,13 @@ async def test_p3_stops_after_a_focused_search_satisfies_the_original_stop_condi
 
     result = await pipeline._focused_research(public, {"task_key": "r"})
 
-    assert calls == ["r__direct_answer"]
+    assert calls == ["r"]
     assert result["status"] == "sufficient"
     assert result["focused_task_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_p3_deduplicates_same_verified_source_across_focused_searches(tmp_path):
+async def test_p3_preserves_verified_sources_from_the_single_search_pro_result(tmp_path):
     from audio_memory.analysis.beta8_p1_p5_pipeline import P1P5Pipeline
     from audio_memory.analysis.beta8_writing_store import WritingLimits
     from audio_memory.prompts.beta8_pipeline_schema import stable_source_id
@@ -397,13 +390,12 @@ async def test_p3_deduplicates_same_verified_source_across_focused_searches(tmp_
     )
 
     async def research(public_task, task, *, request_limit):
-        suffix = public_task["task_key"].rsplit("__", 1)[-1]
         return {
             "task_key": task["task_key"],
             "status": "partial",
-            "answer": suffix,
+            "answer": "已取得页面片段",
             "findings": [{
-                "statement": suffix,
+                "statement": "需预约",
                 "source_keys": ["official"],
                 "applicability": "当前行程",
                 "limitations": "以官方页面为准",
@@ -436,7 +428,81 @@ async def test_p3_deduplicates_same_verified_source_across_focused_searches(tmp_
     result = await pipeline._focused_research(public, {"task_key": "r"})
 
     assert len(result["sources"]) == 1
-    assert len(result["findings"]) == 3
+    assert len(result["findings"]) == 1
     assert {tuple(item["source_keys"]) for item in result["findings"]} == {
         (result["sources"][0]["local_source_key"],)
     }
+
+
+@pytest.mark.asyncio
+async def test_p3_verifies_search_pro_chunks_without_refetching_the_page(tmp_path):
+    from audio_memory.analysis.beta8_p1_p5_pipeline import P1P5Pipeline
+    from audio_memory.analysis.beta8_writing_store import WritingLimits, WritingStore
+
+    class MustNotFetch:
+        async def fetch(self, url):
+            pytest.fail(f"Search Pro evidence must not be refetched: {url}")
+
+    pipeline = P1P5Pipeline(
+        output_dir=tmp_path, transport=Scripted(),
+        limits=WritingLimits(allow_paid=True, max_requests=10),
+        provider_id="deepseek", model_id="deepseek-v4-pro",
+        source_fetcher=MustNotFetch(),
+    )
+    pipeline.store = WritingStore(tmp_path, {"test": "search-pro-proof"})
+    candidate = {
+        "task_key": "r1", "status": "partial", "answer": "已取得片段",
+        "findings": [], "unresolved_questions": [],
+        "sources": [{
+            "local_source_key": "search_pro_1", "title": "官方指南",
+            "url": "https://example.com/guide?utm_source=test",
+            "publisher": "官方网站", "published_at": "2026-09-19", "version": None,
+            "access_level": "original_text", "quote": "需提前预约。",
+            "locator": None, "context_note": "开放提示",
+            "retrieval_provenance": "kimi_search_pro",
+            "retrieved_text": "每日 09:00 开放，需提前预约。儿童须由成人陪同。",
+        }],
+    }
+
+    result = await pipeline._verify_research(candidate)
+
+    source = result["sources"][0]
+    assert source["quote_verified"] is True
+    assert source["verified_quote"] == "需提前预约。"
+    assert source["url"] == "https://example.com/guide"
+    assert source["fetch"]["retrieval_method"] == "kimi_search_pro"
+    assert source["fetch"]["content_sha256"]
+    repeated = await pipeline._verify_research(candidate)
+    assert repeated["sources"][0]["fetch"] == source["fetch"]
+
+
+@pytest.mark.asyncio
+async def test_p3_rejects_a_search_pro_quote_missing_from_returned_chunks(tmp_path):
+    from audio_memory.analysis.beta8_p1_p5_pipeline import P1P5Pipeline
+    from audio_memory.analysis.beta8_writing_store import WritingLimits, WritingStore
+
+    pipeline = P1P5Pipeline(
+        output_dir=tmp_path, transport=Scripted(),
+        limits=WritingLimits(allow_paid=True, max_requests=10),
+        provider_id="deepseek", model_id="deepseek-v4-pro",
+    )
+    pipeline.store = WritingStore(tmp_path, {"test": "search-pro-mismatch"})
+    candidate = {
+        "task_key": "r1", "status": "partial", "answer": "已取得片段",
+        "findings": [], "unresolved_questions": [],
+        "sources": [{
+            "local_source_key": "search_pro_1", "title": "官方指南",
+            "url": "https://example.com/guide", "publisher": "官方网站",
+            "published_at": None, "version": None,
+            "access_level": "original_text", "quote": "需提前预约。",
+            "locator": None, "context_note": "开放提示",
+            "retrieval_provenance": "kimi_search_pro",
+            "retrieved_text": "每日 09:00 开放。",
+        }],
+    }
+
+    result = await pipeline._verify_research(candidate)
+
+    assert result["status"] == "failed"
+    assert result["sources"][0]["quote_verified"] is False
+    assert "No verified source text" in result["unresolved_questions"][-1]

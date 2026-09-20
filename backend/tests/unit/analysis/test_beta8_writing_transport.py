@@ -153,38 +153,26 @@ async def test_writing_uses_high_reasoning_and_scoring_disables_it(
 
 
 @pytest.mark.asyncio
-async def test_p3_preserves_supplied_prompt_and_native_tool_arguments() -> None:
+async def test_p3_calls_search_pro_once_and_returns_retrieved_page_chunks() -> None:
     requests: list[dict[str, object]] = []
     responses: list[object] = []
-    original_arguments = '{ "query": "official docs", "limit": 3 }'
 
     async def handle(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert request.extensions["timeout"]["read"] == 120
+        assert str(request.url) == "https://api.moonshot.cn/v1/tools/search_pro"
         requests.append(payload)
-        if len(requests) == 1:
-            return httpx.Response(200, json={
-                "choices": [{
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "tool-1",
-                            "type": "builtin_function",
-                            "function": {
-                                "name": "$web_search",
-                                "arguments": original_arguments,
-                            },
-                        }],
-                    },
-                }],
-                "usage": {"prompt_tokens": 20, "completion_tokens": 5},
-            })
         return httpx.Response(200, json={
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {"role": "assistant", "content": '{"status":"success"}'},
+            "search_results": [{
+                "title": "官方开放指南",
+                "url": "https://example.com/guide?utm_source=test",
+                "site_name": "官方网站",
+                "date": "2026-09-19",
+                "snippet": "预约与开放提示",
+                "chunks": [
+                    {"text": "周一至周日 09:00–18:00 开放，需提前预约。", "score": 1.23},
+                    {"text": "儿童需由成人陪同入场。", "score": 1.01},
+                ],
             }]
         })
 
@@ -205,66 +193,68 @@ async def test_p3_preserves_supplied_prompt_and_native_tool_arguments() -> None:
             max_output_tokens=4096,
             before_request=before,
             after_response=after,
+            research_task={
+                "task_key": "research-1",
+                "question": "明天开放吗？",
+                "purpose": "安排亲子行程",
+                "public_context": "阿那亚",
+                "source_requirements": "官方页面",
+                "as_of": "2026-09-20",
+                "stop_condition": "确认开放时间和预约条件",
+                "source_limit": 3,
+            },
         )
 
-    assert raw == '{"status":"success"}'
-    assert len(requests) == 2
-    assert len(responses) == 2
+    value = json.loads(raw)
+    assert len(requests) == 1
+    assert len(responses) == 1
     assert keychain.reads == ["kimi"]
-    assert "usage" not in responses[1]
-    assert requests[0]["messages"] == [
-        {"role": "system", "content": "EXACT COMPILED P3 SYSTEM"},
-        {"role": "user", "content": '{"task_key":"research-1"}'},
-    ]
-    assert "exact four-line" not in json.dumps(requests[0], ensure_ascii=False)
-    assert requests[1]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "tool-1",
-        "name": "$web_search",
-        "content": original_arguments,
+    assert requests[0] == {
+        "text_query": (
+            "阿那亚 明天开放吗？ 用于安排亲子行程。"
+            "条件：官方页面。截止日期：2026-09-20。"
+            "需满足：确认开放时间和预约条件。"
+        ),
+        "limit": 3,
+        "timeout_seconds": 60,
     }
+    assert value["task_key"] == "research-1"
+    assert value["status"] == "partial"
+    assert value["findings"] == []
+    assert value["sources"][0]["access_level"] == "original_text"
+    assert value["sources"][0]["quote"] == "周一至周日 09:00–18:00 开放，需提前预约。"
+    assert value["sources"][0]["retrieval_provenance"] == "kimi_search_pro"
+    assert "儿童需由成人陪同入场" in value["sources"][0]["retrieved_text"]
 
 
 @pytest.mark.asyncio
-async def test_budget_hook_stops_before_a_native_continuation_request() -> None:
+async def test_p3_search_pro_makes_no_automatic_retry_after_failure() -> None:
     posts = 0
     hook_calls = 0
 
     async def handle(request: httpx.Request) -> httpx.Response:
         nonlocal posts
         posts += 1
-        return httpx.Response(200, json={
-            "choices": [{
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": f"tool-{posts}",
-                        "type": "builtin_function",
-                        "function": {"name": "$web_search", "arguments": "{}"},
-                    }],
-                },
-            }]
-        })
+        return httpx.Response(503, text="temporary failure")
 
     async def before(payload: dict[str, object]) -> None:
         nonlocal hook_calls
         hook_calls += 1
-        if hook_calls == 2:
-            raise RuntimeError("request budget exhausted")
 
     async def after(body: object) -> None:
         return None
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        with pytest.raises(RuntimeError, match="request budget exhausted"):
+        with pytest.raises(ProviderAnalysisError) as raised:
             await WritingTransport(ConfiguredKeychain(), client).complete(
                 stage="P3", system="P3", user="{}", provider_id="kimi",
                 model_id="kimi-k2.6", max_output_tokens=100,
                 before_request=before, after_response=after,
+                research_task={"task_key": "r1", "question": "test"},
             )
 
-    assert hook_calls == 2
+    assert raised.value.code == "provider_unavailable"
+    assert hook_calls == 1
     assert posts == 1
 
 
@@ -382,45 +372,31 @@ async def test_malformed_http_body_keeps_status_and_raw_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_search_stops_after_eight_actual_responses() -> None:
-    posts = 0
-    responses = 0
+async def test_search_pro_empty_results_fail_closed_without_invented_sources() -> None:
 
     async def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal posts
-        posts += 1
-        return httpx.Response(200, json={
-            "choices": [{
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": f"tool-{posts}",
-                        "type": "builtin_function",
-                        "function": {"name": "$web_search", "arguments": "{}"},
-                    }],
-                },
-            }]
-        })
+        return httpx.Response(200, json={"search_results": []})
 
     async def before(payload: dict[str, object]) -> None:
         return None
 
     async def after(body: object) -> None:
-        nonlocal responses
-        responses += 1
+        return None
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        with pytest.raises(ProviderAnalysisError) as raised:
-            await WritingTransport(ConfiguredKeychain(), client).complete(
-                stage="P3", system="P3", user="{}", provider_id="kimi",
-                model_id="kimi-k2.6", max_output_tokens=100,
-                before_request=before, after_response=after,
-            )
+        raw = await WritingTransport(ConfiguredKeychain(), client).complete(
+            stage="P3", system="P3", user="{}", provider_id="kimi",
+            model_id="kimi-k2.6", max_output_tokens=100,
+            before_request=before, after_response=after,
+            research_task={"task_key": "r1", "question": "unknown"},
+        )
 
-    assert raised.value.code == "native_search_round_limit"
-    assert posts == 8
-    assert responses == 8
+    assert json.loads(raw) == {
+        "task_key": "r1", "status": "not_found",
+        "answer": "未取得可追溯的网页原文片段。",
+        "findings": [], "sources": [],
+        "unresolved_questions": ["搜索未返回可用的网页原文片段。"],
+    }
 
 
 async def public_resolver(host: str) -> list[str]:

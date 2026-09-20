@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import socket
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -15,7 +16,6 @@ import httpx
 from audio_memory.analysis.errors import ProviderAnalysisError
 from audio_memory.analysis.beta8_writing_stream import receive_report
 from audio_memory.providers.adapters.deepseek import DeepSeekAdapter
-from audio_memory.providers.adapters.kimi import KimiAdapter
 from audio_memory.providers.keychain import KeychainStatus
 from audio_memory.providers.types import PROVIDER_CONFIGS
 
@@ -44,16 +44,15 @@ class WritingTransport:
     """One-attempt transport for the writing-only Beta 8 stages."""
 
     _REPORT_STAGES = frozenset({"P1", "P2", "P4", "P5"})
-    _NATIVE_SEARCH_ROUNDS = 8
     _REPORT_TIMEOUT_SECONDS = 900
     _SEARCH_TIMEOUT_SECONDS = 120
+    _SEARCH_PRO_TIMEOUT_SECONDS = 60
 
     def __init__(self, keychain: _Keychain, client: httpx.AsyncClient) -> None:
         self._keychain = keychain
         self._client = client
         self._adapters = {
             "deepseek": DeepSeekAdapter(PROVIDER_CONFIGS["deepseek"]),
-            "kimi": KimiAdapter(PROVIDER_CONFIGS["kimi"]),
         }
 
     async def complete(
@@ -68,15 +67,13 @@ class WritingTransport:
         before_request: RequestHook,
         after_response: ResponseHook,
         on_progress: ResponseHook | None = None,
+        research_task: Mapping[str, object] | None = None,
     ) -> str:
         self._validate_route(stage, provider_id, model_id, max_output_tokens)
         secret = self._credential(provider_id)
         if stage == "P3":
-            return await self._complete_native_search(
-                system=system,
-                user=user,
-                model_id=model_id,
-                max_output_tokens=max_output_tokens,
+            return await self._complete_search_pro(
+                research_task=research_task,
                 secret=secret,
                 before_request=before_request,
                 after_response=after_response,
@@ -195,72 +192,138 @@ class WritingTransport:
             error.http_status_code = http_status
             raise
 
-    async def _complete_native_search(
+    async def _complete_search_pro(
         self,
         *,
-        system: str,
-        user: str,
-        model_id: str,
-        max_output_tokens: int,
+        research_task: Mapping[str, object] | None,
         secret: bytes,
         before_request: RequestHook,
         after_response: ResponseHook,
     ) -> str:
-        adapter = self._adapters["kimi"]
-        messages: list[dict[str, object]] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        for _ in range(self._NATIVE_SEARCH_ROUNDS):
-            payload = adapter.native_search_payload(
-                model_id=model_id, messages=messages, queries=()
+        if not isinstance(research_task, Mapping):
+            raise ProviderAnalysisError(
+                "Research task is unavailable", code="model_response_invalid"
             )
-            payload["max_tokens"] = max_output_tokens
-            payload = adapter.analysis_payload(payload)
-            payload_messages = payload.get("messages")
-            if not isinstance(payload_messages, list):
-                raise ProviderAnalysisError(
-                    "Provider search conversation is invalid",
-                    code="model_response_invalid",
-                )
-            body, http_status = await self._post(
-                "kimi",
-                payload,
-                secret,
-                before_request,
-                after_response,
-                timeout_seconds=self._SEARCH_TIMEOUT_SECONDS,
+        task_key = research_task.get("task_key")
+        question = research_task.get("question")
+        if not isinstance(task_key, str) or not task_key or not isinstance(question, str) or not question.strip():
+            raise ProviderAnalysisError(
+                "Research task is invalid", code="model_response_invalid"
             )
-            try:
-                tool_messages = adapter.native_search_tool_messages(body)
-                if tool_messages is not None:
-                    messages = [*payload_messages, *tool_messages]
-                    continue
-                result = adapter.extract_result(body)
-                if not adapter.native_search_completed(body):
-                    try:
-                        return self._accept_result(result.text, result.finish_reason)
-                    except ProviderAnalysisError as error:
-                        error.http_status_code = http_status
-                        raise
-            except ProviderAnalysisError as error:
-                if not hasattr(error, "http_status_code"):
-                    error.http_status_code = http_status
-                raise
-            except (TypeError, ValueError) as exc:
-                error = ProviderAnalysisError(
-                    "Provider returned an invalid response",
-                    code="model_response_invalid",
-                )
-                error.http_status_code = http_status
-                raise error from exc
-            return result.text
-        error = ProviderAnalysisError(
-            "Provider search exceeded its continuation limit",
-            code="native_search_round_limit",
+        payload = {
+            "text_query": self._search_query(research_task),
+            "limit": self._search_limit(research_task.get("source_limit")),
+            "timeout_seconds": self._SEARCH_PRO_TIMEOUT_SECONDS,
+        }
+        endpoint = self._search_pro_endpoint()
+        body, _http_status = await self._post(
+            "kimi", payload, secret, before_request, after_response,
+            timeout_seconds=self._SEARCH_TIMEOUT_SECONDS, endpoint=endpoint,
         )
-        error.http_status_code = http_status
-        raise error
+        try:
+            return json.dumps(
+                self._search_pro_result(task_key, body),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ProviderAnalysisError(
+                "Provider returned an invalid search response",
+                code="model_response_invalid",
+            ) from exc
+
+    @staticmethod
+    def _search_limit(value: object) -> int:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return min(20, max(1, value))
+        return 5
+
+    @staticmethod
+    def _task_text(task: Mapping[str, object], key: str) -> str:
+        value = task.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    @classmethod
+    def _search_query(cls, task: Mapping[str, object]) -> str:
+        context = cls._task_text(task, "public_context")
+        question = cls._task_text(task, "question")
+        prefix = f"{context} {question}" if context else question
+        parts = [prefix]
+        purpose = cls._task_text(task, "purpose")
+        requirements = cls._task_text(task, "source_requirements")
+        as_of = cls._task_text(task, "as_of")
+        jurisdiction = cls._task_text(task, "jurisdiction")
+        version = cls._task_text(task, "version_constraint")
+        stop_condition = cls._task_text(task, "stop_condition")
+        if purpose:
+            parts.append(f"用于{purpose}。")
+        if requirements:
+            parts.append(f"条件：{requirements}。")
+        if as_of:
+            parts.append(f"截止日期：{as_of}。")
+        if jurisdiction:
+            parts.append(f"适用地区：{jurisdiction}。")
+        if version:
+            parts.append(f"版本要求：{version}。")
+        if stop_condition:
+            parts.append(f"需满足：{stop_condition}。")
+        return " ".join(parts[:2]) + "".join(parts[2:])
+
+    @staticmethod
+    def _search_pro_endpoint() -> str:
+        configured = urlsplit(PROVIDER_CONFIGS["kimi"].endpoint)
+        return urlunsplit((configured.scheme, configured.netloc, "/v1/tools/search_pro", "", ""))
+
+    @staticmethod
+    def _search_pro_result(task_key: str, body: object) -> dict[str, object]:
+        if not isinstance(body, Mapping) or not isinstance(body.get("search_results"), list):
+            raise ValueError("search_results is missing")
+        sources: list[dict[str, object]] = []
+        for result in body["search_results"]:
+            if not isinstance(result, Mapping):
+                continue
+            title, url = result.get("title"), result.get("url")
+            chunks = result.get("chunks")
+            if not isinstance(title, str) or not title.strip() or not isinstance(url, str) or not url.strip() or not isinstance(chunks, list):
+                continue
+            texts = [
+                chunk["text"].strip() for chunk in chunks
+                if isinstance(chunk, Mapping) and isinstance(chunk.get("text"), str) and chunk["text"].strip()
+            ]
+            if not texts:
+                continue
+            ordinal = len(sources) + 1
+            sources.append({
+                "local_source_key": f"search_pro_{ordinal}",
+                "title": title.strip(),
+                "url": url.strip(),
+                "publisher": result.get("site_name") if isinstance(result.get("site_name"), str) else None,
+                "published_at": result.get("date") if isinstance(result.get("date"), str) else None,
+                "version": None,
+                "access_level": "original_text",
+                "quote": texts[0],
+                "locator": None,
+                "context_note": result.get("snippet") if isinstance(result.get("snippet"), str) else "Kimi Search Pro 返回的网页原文片段。",
+                "retrieval_provenance": "kimi_search_pro",
+                "retrieved_text": "\n\n".join(texts),
+            })
+        if not sources:
+            return {
+                "task_key": task_key,
+                "status": "not_found",
+                "answer": "未取得可追溯的网页原文片段。",
+                "findings": [],
+                "sources": [],
+                "unresolved_questions": ["搜索未返回可用的网页原文片段。"],
+            }
+        return {
+            "task_key": task_key,
+            "status": "partial",
+            "answer": f"取得 {len(sources)} 个可追溯来源的网页原文片段，由 P4 结合原始任务完成判断。",
+            "findings": [],
+            "sources": sources,
+            "unresolved_questions": [],
+        }
 
     async def _post(
         self,
@@ -271,6 +334,7 @@ class WritingTransport:
         after_response: ResponseHook,
         *,
         timeout_seconds: float,
+        endpoint: str | None = None,
     ) -> tuple[object, int]:
         try:
             authorization = secret.decode("utf-8")
@@ -283,7 +347,7 @@ class WritingTransport:
         await before_request(payload)
         try:
             response = await self._client.post(
-                PROVIDER_CONFIGS[provider_id].endpoint,
+                endpoint or PROVIDER_CONFIGS[provider_id].endpoint,
                 headers={
                     "Authorization": f"Bearer {authorization}",
                     "Content-Type": "application/json",

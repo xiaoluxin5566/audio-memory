@@ -680,14 +680,7 @@ def test_two_layer_paid_failure_shapes_normalize_without_special_cases(
     ]
 
 
-def test_latest_preserved_paid_response_is_rejected_as_the_old_contract() -> None:
-    raw_path = (
-        Path(__file__).resolve().parents[4]
-        / "outputs/beta8-indexed-v1"
-        / "run-2c5b6376-e12f-4c58-94bd-8c47968ad654"
-        / "quarantine"
-        / "event_index-07eb01a5-99c9-4bf6-b14d-1efea9eb73ff.provider-response.json"
-    )
-
+def test_event_index_draft_rejects_the_old_activity_sessions_contract() -> None:
+    old_contract = valid_index_payload()
     with pytest.raises(ValidationError):
-        Beta8EventIndexDraft.model_validate_json(raw_path.read_text(encoding="utf-8"))
+        Beta8EventIndexDraft.model_validate_json(json.dumps(old_contract))

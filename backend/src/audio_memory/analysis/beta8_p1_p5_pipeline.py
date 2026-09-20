@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from audio_memory.analysis.beta8_p1_p5_evidence import P1P5EvidenceCatalog
@@ -325,7 +327,7 @@ class P1P5Pipeline:
                 provider_id=self.search_provider_id if stage == "P3" else self.provider_id,
                 model_id=self.search_model_id if stage == "P3" else self.model_id,
                 max_output_tokens=self._output_tokens(stage), before_request=before, after_response=after,
-                on_progress=progress)
+                on_progress=progress, research_task=data if stage == "P3" else None)
             try:
                 value = json.loads(raw)
                 if not isinstance(value, dict):
@@ -381,6 +383,8 @@ class P1P5Pipeline:
         keys = set()
         for source in value["sources"]:
             source = dict(source) if isinstance(source, dict) else source
+            if not isinstance(source, dict):
+                raise ValueError("Research source fields are incomplete")
             # Kimi sometimes mirrors the input task's `version_constraint`
             # field in a source row. It is a lossless alias for the output
             # contract's `version`, so normalize the field name locally while
@@ -388,8 +392,16 @@ class P1P5Pipeline:
             if isinstance(source, dict) and "version" not in source and "version_constraint" in source:
                 source["version"] = source.pop("version_constraint")
             required = {"local_source_key", "title", "url", "publisher", "published_at", "version", "access_level", "quote", "locator", "context_note"}
-            if not isinstance(source, dict) or set(source) != required or not isinstance(source["url"], str):
+            search_pro_fields = {"retrieval_provenance", "retrieved_text"}
+            allowed_fields = required | search_pro_fields if source.get("retrieval_provenance") == "kimi_search_pro" else required
+            if set(source) != allowed_fields or not isinstance(source["url"], str):
                 raise ValueError("Research source fields are incomplete")
+            if source.get("retrieval_provenance") == "kimi_search_pro" and (
+                not isinstance(source.get("retrieved_text"), str)
+                or not source["retrieved_text"].strip()
+                or source["access_level"] != "original_text"
+            ):
+                raise ValueError("Search Pro source text is invalid")
             if not source["local_source_key"] or source["local_source_key"] in keys:
                 raise ValueError("Research source key is missing or duplicated")
             keys.add(source["local_source_key"])
@@ -435,94 +447,15 @@ class P1P5Pipeline:
         return await self._verify_research(candidate)
 
     async def _focused_research(self, public_task, task):
-        source_requirements = str(public_task.get("source_requirements") or "可靠的一手或权威来源").strip()
-        stop_condition = str(public_task.get("stop_condition") or "足以直接回答原问题").strip()
-        scopes = [
-            (
-                "direct_answer",
-                f"直接回答原问题。来源要求：{source_requirements}。优先取得能支持核心事实的原始页面，不用搜索摘要代替正文。",
-            ),
-            (
-                "execution_conditions",
-                "只查找会改变实际判断或行动的当前条件与限制，例如适用对象、时间、地点、版本、开放或预约、费用、交通、风险和例外；仅保留与原问题相关的项目。",
-            ),
-            (
-                "gap_check",
-                f"围绕停止条件补齐前两次可能遗漏的事实，并寻找独立权威来源或反证。停止条件：{stop_condition}。不得扩大原问题。",
-            ),
-        ]
-        outcomes = []
-        for suffix, focus in scopes:
-            sub_key = f"{task['task_key']}__{suffix}"
-            sub_task = dict(task, task_key=sub_key)
-            sub_public = dict(
-                public_task,
-                task_key=sub_key,
-                question=f"{public_task['question']}\n本子任务焦点：{focus}",
-                focus_scope=focus,
-                max_search_tool_calls=1,
-            )
-            outcome = await self._research_task(
-                sub_public, sub_task, request_limit=2,
-            )
-            outcomes.append(outcome)
-            if outcome.get("status") == "sufficient":
-                break
-
-        combined_sources, combined_findings, answers, unresolved = [], [], [], []
-        source_key_by_id = {}
-        for ordinal, outcome in enumerate(outcomes, start=1):
-            prefix = f"focus{ordinal}_"
-            key_map = {}
-            for source in outcome.get("sources", []):
-                local_key = source["local_source_key"]
-                source_id = source["source_id"]
-                combined_key = source_key_by_id.get(source_id)
-                if combined_key is None:
-                    combined_key = prefix + local_key
-                    source_key_by_id[source_id] = combined_key
-                    combined_sources.append(dict(
-                        source, local_source_key=combined_key,
-                    ))
-                key_map[local_key] = combined_key
-            for finding in outcome.get("findings", []):
-                keys = finding.get("source_keys", [])
-                if all(key in key_map for key in keys):
-                    combined_findings.append(dict(
-                        finding, source_keys=[key_map[key] for key in keys],
-                    ))
-            if outcome.get("answer"):
-                answers.append(str(outcome["answer"]))
-            unresolved.extend(str(x) for x in outcome.get("unresolved_questions", []))
-
-        combined_sources.sort(key=lambda source: bool(source.get("quote_verified")), reverse=True)
-        selected = combined_sources[:self.limits.source_limit]
-        selected_keys = {source["local_source_key"] for source in selected}
-        combined_findings = [
-            finding for finding in combined_findings
-            if set(finding["source_keys"]) <= selected_keys
-        ]
-        verified_count = sum(bool(source.get("quote_verified")) for source in selected)
-        if any(outcome.get("status") == "sufficient" for outcome in outcomes):
-            combined_status = "sufficient"
-        elif verified_count:
-            combined_status = "partial"
-        elif outcomes and all(outcome.get("status") == "not_found" for outcome in outcomes):
-            combined_status = "not_found"
-        elif outcomes and all(outcome.get("status") == "invalid_task" for outcome in outcomes):
-            combined_status = "invalid_task"
-        else:
-            combined_status = "failed"
+        outcome = await self._research_task(public_task, task, request_limit=1)
         return {
-            "task_key": task["task_key"],
-            "status": combined_status,
-            "answer": "\n\n".join(answers) if answers else "三个聚焦子任务均未取得可用结果。",
-            "findings": combined_findings,
-            "sources": selected,
-            "unresolved_questions": unresolved,
-            "execution_status": "focused_search_complete",
-            "focused_task_count": len(outcomes),
-            "verified_source_count": verified_count,
+            **outcome,
+            "execution_status": "search_pro_complete",
+            "focused_task_count": 1,
+            "verified_source_count": sum(
+                bool(source.get("quote_verified"))
+                for source in outcome.get("sources", [])
+            ),
         }
 
     async def _verify_research(self, candidate):
@@ -536,6 +469,20 @@ class P1P5Pipeline:
                 if digest(fetched["payload"]) != fetched["sha256"]:
                     raise WritingStopped("corrupt source cache")
                 fetched = fetched["payload"]
+            elif source.get("retrieval_provenance") == "kimi_search_pro":
+                text = source["retrieved_text"]
+                fetched = {
+                    "status": 200,
+                    "url": source["url"],
+                    "final_url": source["url"],
+                    "text": text,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "content_sha256": sha256(text.encode("utf-8")).hexdigest(),
+                    "error": None,
+                    "safety_reason": None,
+                    "retrieval_method": "kimi_search_pro",
+                }
+                self.store.write(f"sources/{cache_key}.json", {"payload": fetched, "sha256": digest(fetched)})
             else:
                 if not self.limits.allow_paid:
                     raise WritingStopped("source retrieval disabled in cache-only run")
@@ -548,7 +495,7 @@ class P1P5Pipeline:
             verified["full_source_artifact"] = str(path)
             result["sources"].append(verified)
         verified_count = sum(bool(source.get("quote_verified")) for source in result["sources"])
-        if candidate["status"] == "sufficient" and (not verified_count or verified_count != len(candidate["sources"])):
+        if candidate["sources"] and verified_count != len(candidate["sources"]):
             result["candidate_status"] = candidate["status"]
             result["status"] = "partial" if verified_count else "failed"
             result["unresolved_questions"] = list(candidate["unresolved_questions"]) + ["No verified source text was obtained, or some candidate excerpts could not be verified."]

@@ -407,10 +407,12 @@ class WritingStore:
 
     def metrics(self) -> dict:
         rows = self.requests()
-        def total(*names, stage=None):
+        def total(*names, stage=None, exclude_stage=None):
             values = []
             for row in rows:
                 if stage is not None and row.get("stage") != stage:
+                    continue
+                if exclude_stage is not None and row.get("stage") == exclude_stage:
                     continue
                 response = row.get("response")
                 usage = response.get("usage") if isinstance(response, dict) else None
@@ -424,6 +426,13 @@ class WritingStore:
         tool_calls = 0
         for row in rows:
             response = row.get("response")
+            if (
+                row.get("stage") == "P3"
+                and isinstance(response, dict)
+                and isinstance(response.get("search_results"), list)
+            ):
+                tool_calls += 1
+                continue
             choices = response.get("choices") if isinstance(response, dict) else None
             if not isinstance(choices, list):
                 continue
@@ -442,8 +451,12 @@ class WritingStore:
             "search_model_request_count": sum(row["stage"] == "P3" for row in rows),
             "search_tool_call_count": tool_calls,
             "unresolved_request_count": sum(row["status"] == "dispatching" for row in rows),
-            "input_tokens": total("prompt_tokens", "input_tokens"),
-            "output_tokens": total("completion_tokens", "output_tokens"),
+            "input_tokens": total(
+                "prompt_tokens", "input_tokens", exclude_stage="P3"
+            ),
+            "output_tokens": total(
+                "completion_tokens", "output_tokens", exclude_stage="P3"
+            ),
             "search_input_tokens": total(
                 "prompt_tokens", "input_tokens", stage="P3"
             ),
@@ -451,5 +464,5 @@ class WritingStore:
                 "completion_tokens", "output_tokens", stage="P3"
             ),
             "scoring_model_request_count": 0,
-            "counting_note": "Dispatch intents without a received response retain uncertain billing; upper bounds are not measured tokens.",
+            "counting_note": "Search Pro calls are counted as search tool calls and do not report model tokens. Dispatch intents without a received response retain uncertain billing; upper bounds are not measured tokens.",
         }
