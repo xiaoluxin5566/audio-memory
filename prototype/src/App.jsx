@@ -22,6 +22,7 @@ import { CardAssessment, WritingDraftStatus } from './components/CardAssessment.
 import { WritingV1PreviewStatus } from './components/WritingV1PreviewStatus.jsx';
 import { getReanalysisView, isActiveReanalysis } from './api/state.js';
 import { buildReportEventMap } from './reportPresentation.js';
+import { asrErrorMessage } from './asrErrors.js';
 import './styles.css';
 
 const VOLCANO_ASR_API_KEY_URL = 'https://console.volcengine.com/speech/new/setting/apikeys';
@@ -714,7 +715,7 @@ function AsrModal({ state, refresh, onClose, onToast }) {
       onToast('火山语音 API 已配置并校验通过');
       onClose();
     } catch (failure) {
-      setError(failure.message || '校验失败，请检查 API Key');
+      setError(asrErrorMessage(failure, '校验失败，请检查 API Key'));
     } finally {
       setSaving(false);
     }
@@ -728,7 +729,7 @@ function AsrModal({ state, refresh, onClose, onToast }) {
       onToast('火山语音连接可用');
       onClose();
     } catch (failure) {
-      setError(failure.message || '连接不可用，请更新 API Key');
+      setError(asrErrorMessage(failure, '连接不可用，请更新 API Key'));
     } finally {
       setSaving(false);
     }
