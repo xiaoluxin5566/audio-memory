@@ -172,7 +172,9 @@ async function installJobApi(page) {
 
 test('completed batch retries a transient feed refresh before clearing the job', async ({ page }) => {
   const completedFeedReads = await installJobApi(page)
+  const providersReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/providers/validate-configured')
   await page.goto('/')
+  await providersReady
 
   await page.locator('input[type=file]').setInputFiles({
     name: 'meeting.mp3',
