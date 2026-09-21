@@ -209,6 +209,10 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
+    if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/jobs' && request.method() === 'POST') {
       return route.fulfill({ json: { id: 'job-pause', stage: 'uploading' } })
     }
@@ -227,7 +231,9 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
     }
     return route.fulfill({ status: 404, json: { detail: 'not found' } })
   })
+  const providersReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/providers/validate-configured')
   await page.goto('/')
+  await providersReady
 
   await page.locator('input[type=file]').setInputFiles([
     { name: 'first.mp3', mimeType: 'audio/mpeg', buffer: Buffer.from('first') },
@@ -235,8 +241,8 @@ test('unsupported file pauses later uploads and removing it resumes the queue', 
     { name: 'third.aac', mimeType: 'audio/aac', buffer: Buffer.from('third') },
   ])
 
+  await expect.poll(() => uploadCalls).toBe(2)
   await expect(page.getByText('不支持该文件格式，请上传 MP3、AAC 格式文件')).toBeVisible()
-  expect(uploadCalls).toBe(2)
   await page.getByRole('button', { name: '移除 broken.wav' }).click()
   await expect(page.getByText('third.aac')).toBeVisible()
   await expect(page.getByText('third.aac').locator('..')).toContainText('上传完成')
