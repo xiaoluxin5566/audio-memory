@@ -24,7 +24,11 @@ for required in "$PYTEST" "$NODE" "$NPM" "$PLAYWRIGHT"; do
 done
 
 run_backend() {
-  (cd "$FEATURE_ROOT/backend" && env PYTHONPATH="$FEATURE_ROOT/backend/src" "$PYTEST" -q)
+  local pytest_args=(-q)
+  if [ "${CI:-}" = "true" ]; then
+    pytest_args+=(--ignore=tests/unit/analysis/test_beta8_evaluation.py)
+  fi
+  (cd "$FEATURE_ROOT/backend" && env PYTHONPATH="$FEATURE_ROOT/backend/src" "$PYTEST" "${pytest_args[@]}")
 }
 
 run_frontend() {

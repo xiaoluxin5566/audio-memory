@@ -144,6 +144,9 @@ async function installJobApi(page) {
     if (pathname === '/api/history') return route.fulfill({ json: completed ? completedHistory : { days: [] } })
     if (pathname === '/api/prompts') return route.fulfill({ json: { prompts: [] } })
     if (pathname === '/api/settings/analysis') return route.fulfill({ json: { prevent_sleep: true, sleep_prevention_status: 'inactive' } })
+    if (pathname === '/api/jobs/active') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: activeProviders })
     if (pathname === '/api/jobs' && request.method() === 'POST') {
       return route.fulfill({ json: { id: 'job-1', stage: 'uploading' } })
     }

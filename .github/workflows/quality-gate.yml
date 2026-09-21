@@ -8,11 +8,19 @@ on:
 jobs:
   check:
     name: ${{ matrix.gate }}
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        gate: [backend, frontend, browser, runtime-isolation]
+        include:
+          - gate: backend
+            os: macos-15
+          - gate: frontend
+            os: ubuntu-latest
+          - gate: browser
+            os: ubuntu-latest
+          - gate: runtime-isolation
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -22,7 +30,13 @@ jobs:
           cache: npm
           cache-dependency-path: prototype/package-lock.json
       - name: Install backend dependencies
+        if: matrix.gate != 'backend'
         run: uv sync --project backend --frozen --extra database
+      - name: Install backend macOS dependencies
+        if: matrix.gate == 'backend'
+        run: |
+          uv sync --project backend --frozen --extra database --extra diarization
+          command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Install frontend dependencies
         working-directory: prototype
         run: npm ci
