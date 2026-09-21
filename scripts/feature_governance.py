@@ -1108,7 +1108,7 @@ class ReleaseService:
             or evidence.model_id != "deepseek-v4-pro"
             or evidence.transcript_segments <= 0
             or evidence.version_status != "completed"
-            or evidence.published_card_count != 1
+            or evidence.published_card_count <= 0
         ):
             raise GovernanceError("封板报告未完整生成。")
         return self.store.save_smoke(evidence)

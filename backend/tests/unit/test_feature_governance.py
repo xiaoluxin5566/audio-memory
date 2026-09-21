@@ -669,6 +669,21 @@ def test_release_publish_requires_smoke_for_exact_built_archive(
     ) == manifest
 
 
+def test_release_smoke_accepts_multiple_published_cards(
+    git_repository: Path,
+) -> None:
+    release, manifest, _, archive = built_candidate(git_repository)
+    evidence = replace(
+        valid_smoke_evidence(manifest, archive, release.repository.head_commit),
+        published_card_count=4,
+    )
+
+    receipt = release.record_smoke(manifest, archive, evidence)
+
+    assert receipt.is_file()
+    assert release.store.load_smoke(manifest.target_version).published_card_count == 4
+
+
 def test_release_publish_rejects_archive_changed_after_smoke(
     git_repository: Path,
 ) -> None:
