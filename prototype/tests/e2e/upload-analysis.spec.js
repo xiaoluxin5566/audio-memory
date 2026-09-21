@@ -50,7 +50,9 @@ test('available but inactive providers require choosing the current model before
     availableButInactiveProviders,
     { json: { id: 'must-not-create', stage: 'uploading' } },
   )
+  const providersReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/providers/validate-configured')
   await page.goto('/')
+  await providersReady
 
   await page.locator('input[type=file]').setInputFiles({
     name: 'meeting.mp3',
@@ -64,11 +66,13 @@ test('available but inactive providers require choosing the current model before
 })
 
 test('job creation failure is visible instead of looking like a dropped file was ignored', async ({ page }) => {
-  await installUploadPrerequisites(page, activeProviders, {
+  const createJobCalls = await installUploadPrerequisites(page, activeProviders, {
     status: 409,
     json: { detail: { code: 'configuration_required', message: '请选择当前分析模型' } },
   })
+  const providersReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/providers/validate-configured')
   await page.goto('/')
+  await providersReady
 
   await page.locator('input[type=file]').setInputFiles({
     name: 'meeting.mp3',
@@ -76,6 +80,7 @@ test('job creation failure is visible instead of looking like a dropped file was
     buffer: Buffer.from('browser acceptance audio'),
   })
 
+  await expect.poll(createJobCalls).toBe(1)
   await expect(page.getByRole('status')).toHaveText('请选择当前分析模型')
 })
 

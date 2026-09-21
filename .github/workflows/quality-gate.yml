@@ -35,7 +35,7 @@ jobs:
       - name: Install backend macOS dependencies
         if: matrix.gate == 'backend'
         run: |
-          uv sync --project backend --frozen --extra database --extra diarization
+          uv sync --project backend --frozen --extra database --extra macos --extra transcription --extra diarization
           command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Install frontend dependencies
         working-directory: prototype

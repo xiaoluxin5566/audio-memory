@@ -29,7 +29,9 @@ async function installApi(page, { initiallyEnabled = false, initialStatus = 'ina
     if (pathname === '/api/asr') return route.fulfill({ json: { provider_id: 'volcano', display_name: '火山语音', resource_id: 'volc.seedasr.auc', state: 'available', last_validated_at: '2026-08-23T10:00:00Z', error_code: null } })
     if (pathname === '/api/feed') return route.fulfill({ json: { days: [], todos: [] } })
     if (pathname === '/api/history') return route.fulfill({ json: { days: [] } })
-    if (pathname === '/api/jobs/active') return route.fulfill({ json: null })
+    if (pathname === '/api/jobs/active') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/history/reanalysis-batches/current') return route.fulfill({ status: 204, body: '' })
+    if (pathname === '/api/providers/validate-configured') return route.fulfill({ json: providers })
     if (pathname === '/api/settings/analysis' && request.method() === 'GET') {
       return route.fulfill({ json: { prevent_sleep: enabled, sleep_prevention_status: initialStatus } })
     }
@@ -62,12 +64,15 @@ async function installApi(page, { initiallyEnabled = false, initialStatus = 'ina
 
 
 async function uploadOneFile(page) {
+  const settingsReady = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/settings/analysis')
   await page.goto('/')
+  await settingsReady
   await page.locator('input[type=file]').setInputFiles({
     name: 'meeting.mp3',
     mimeType: 'audio/mpeg',
     buffer: Buffer.from('audio'),
   })
+  await expect(page.getByRole('button', { name: '开始分析 1 个文件' })).toBeEnabled()
 }
 
 
