@@ -1,29 +1,55 @@
 # Audio Memory
 
-当前发布版本：`0.1.0-beta.7`。第一期仅支持 macOS Apple Silicon，属于小范围 Beta，请在重要使用前保留原始音频。
+当前发布版本：**`0.1.0-beta.8`**。仅支持 macOS Apple Silicon，属于小范围 Beta，请保留原始音频。
 
-Audio Memory 是面向 macOS Apple Silicon 的本地音频记忆 Demo。它在本机完成音频上传、MLX Whisper 转写、说话人分段、六场景结构化分析和历史重分析；原始音频不发送给模型厂商。
+[下载 Beta 8 发布包](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8) · [版本变化](CHANGELOG.md) · [隐私说明](PRIVACY.md)
+
+Audio Memory 是面向 macOS Apple Silicon 的音频记忆 Demo。本机保存音频、转写和报告；正常产品转写使用火山引擎豆包录音文件识别 2.0，报告使用 DeepSeek V4 Pro，按需使用 Kimi 搜索公开资料。云端处理涉及音频和文字传输，具体边界见下方说明。
+
+## Beta 8 功能
+
+长音频报告采用 P1–P5 链路：
+
+1. **P1 内容识别**：提取活动、主题、原文锚点和注意力信号。
+2. **P2 全局规划**：整合活动、决定报告卡片，并规划必要的外部搜索。
+3. **P3 按需搜索**：使用 Kimi 搜索公开资料，验证来源并保留搜索失败状态。
+4. **P4 分场景写作**：结合活动原文和规划要求，为每张卡片生成报告。
+5. **P5 逐卡评分**：评估事实、覆盖、深度、行动和表达；评分不自动改写报告。
+
+支持工作沟通、育儿家庭、内容消费、生活决策、自我成长、灵感洞察和健康状态七类场景，按内容动态生成多张卡片。报告详情提供评分、扣分项、资料来源和原音证据。说话人簇和情绪仅作为理解参考，不用于确认人物身份。
+
+历史重分析复用已保存的转写；转写完成后，整理或报告阶段失败可复用已有结果，避免重复转写。
 
 ## 运行环境
 
 - macOS，Apple Silicon（M 系列）
-- 发布包已自带 `ffmpeg` 和 `ffprobe`，用户无需安装 Homebrew
-- 发布包已自带 `uv`，用户无需预先安装 Python、uv、Node.js 或 npm
-- 安装器会准备应用私有的 Python 环境和本地模型
+- 发布包自带 `ffmpeg`、`ffprobe` 和 `uv`，无需预先安装 Homebrew、Python、uv、Node.js 或 npm
+- 安装器会准备应用私有的 Python 环境及随版本要求的依赖；安装与云端处理需要网络
 
 ## 安装与启动
 
-面向 Beta 用户的 GitHub Release 安装方式：
+从 [Beta 8 发布页](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8) 下载以下两个文件，放在同一目录：
+
+- `audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz`
+- `audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz.sha256`
+
+在该目录中先验证校验值；只有校验成功后才继续解压和安装：
 
 ```bash
-tar -xzf audio-memory-v0.1.0-beta.7-macos-arm64.tar.gz
-cd audio-memory-v0.1.0-beta.7
+shasum -a 256 -c audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz.sha256
+```
+
+```bash
+tar -xzf audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz
+cd audio-memory-v0.1.0-beta.8
 ./scripts/install-release.sh
 export PATH="$HOME/.local/bin:$PATH"
 audio-memory start
 ```
 
-安装器会把程序放到 `~/Library/Application Support/AudioMemory/app`，并在切换版本前校验随包音频组件。升级前备份数据库，但不会删除同目录下的历史音频、转写、报告、Prompt、反馈或 Keychain 配置。
+安装器将程序放到 `~/Library/Application Support/AudioMemory/app`，升级前备份数据库，并保留历史音频、转写、报告、Prompt、反馈和 Keychain 配置。
+
+首次使用需在应用中配置并校验 DeepSeek 内容分析 API 和火山语音 API；用户无需自行配置 OSS。正常产品转写只走豆包云端识别，不启动 Whisper。
 
 常用命令：
 
@@ -36,39 +62,22 @@ audio-memory logs
 audio-memory version
 ```
 
-源码开发环境仍可运行 `./scripts/install.sh` 和 `./scripts/start.sh`。
-发布构建人员先运行 `./scripts/build-ffmpeg-runtime.sh`，再运行 `./scripts/build-release.sh`。FFmpeg 来源与许可信息见 `THIRD_PARTY_NOTICES.md`。
-
-默认只监听 `127.0.0.1:8765`。安装脚本会准备前后端依赖、Whisper 模型和本地说话人分段模型。需要排查环境时运行：
-
-```bash
-./scripts/doctor.sh
-```
-
-诊断仅读，会检查模型、迁移、历史重分析恢复、本地会话安全和服务健康状态，不打印 API Key 或厂商原始响应。
+默认只监听 `127.0.0.1:8765`。诊断仅读，不打印 API Key 或厂商原始响应。
 
 ## 模型配置与隐私
 
-当前版本的模型配置只提供 DeepSeek V4 Pro。API Key 仅保存在 macOS Keychain；SQLite、Prompt、反馈文件和日志不保存明文 Key。音频、转写、卡片、画像和反馈位于本机 `~/Library/Application Support/AudioMemory`。
+- **音频转写**：音频会通过托管上传服务进入云端对象存储，供火山引擎豆包录音文件识别 2.0 读取和转写。
+- **报告分析**：生成报告所需的转写及上下文文字会发送给配置的 DeepSeek 服务；原始音频不作为报告模型输入。
+- **按需搜索**：默认使用 Kimi 搜索服务，只在规划需要外部资料时调用；搜索任务要求去标识化并限于公开资料。
+- **本机保存**：音频、转写、报告、Prompt、反馈和运行数据默认位于 `~/Library/Application Support/AudioMemory`。
+- **凭据保护**：API Key 保存在 macOS Keychain，数据库、日志、反馈文件和发布包不应包含明文 Key。
 
-历史重分析复用已保存的结构化转写，不重复运行 Whisper。待办过期后仅标红并在未完成区优先展示，不会自动完成。
+音频和相关文字会离开本机，因此应在上传前确认适合交由上述服务处理。完整说明见 [PRIVACY.md](PRIVACY.md)。
 
-完整隐私边界见 `PRIVACY.md`，版本变化见 `CHANGELOG.md`。
+## 源码开发与发布验收
 
-## 离线 Prompt 发布门禁
+源码开发环境需要 Python 3.12、`uv`、Node.js、npm 和音频处理组件，可运行 `./scripts/install.sh` 和 `./scripts/start.sh`。该安装脚本仍包含本地模型准备步骤；这不代表 Beta 8 正常产品转写使用本地模型。
 
-以下评测只读取仓库中的已保存 JSON 样例，不读取 Keychain，不调用任何外部模型：
+开发与发布流程以 [AGENTS.md](AGENTS.md) 和统一脚本为准。发布验收包括后端、前端、浏览器、运行环境隔离，以及对同一归档执行固定 MP3 + AAC 的真实转写和报告流程；真实流程会调用外部服务。Beta 8 的实际验证结果和归档校验值见 [发布记录](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8)。
 
-```bash
-cd backend
-UV_CACHE_DIR=../.uv-cache uv run python ../scripts/evaluate-prompts.py \
-  --fixture tests/fixtures/prompt-eval/multi-scene.json \
-  --fixture tests/fixtures/prompt-eval/negative-cases.json \
-  --fixture tests/fixtures/prompt-eval/injection.json
-```
-
-门禁验证 Schema、证据 ID、跨事件隔离、用户待办归属、过期状态、历史重分析零 Whisper 调用与零密钥泄漏。可选的 `--provider kimi|deepseek|openai` 模式只在显式选择后启动，凭据仅通过 macOS Keychain 读取；本地报告只保存模型、Prompt 版本、延迟、可用的 token 用量和聚合门禁指标，不保存转写、原始生成内容或密钥。该模式不是默认发布步骤，本次交付也未执行真实厂商请求。
-
-## 完整验收
-
-完整命令和通过标准见 `docs/qa/phase-1-acceptance.md`。其中包含安装烟雾测试、后端测试、前端单元/浏览器测试、生产构建、离线 Prompt 门禁和本地诊断。
+旧版离线 Prompt 样例门禁仍可用于对应契约回归，但不能替代 Beta 8 P1–P5 的测试或正式发布验收。历史第一阶段验收说明见 [docs/qa/phase-1-acceptance.md](docs/qa/phase-1-acceptance.md)。
