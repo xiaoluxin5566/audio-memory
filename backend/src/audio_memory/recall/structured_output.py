@@ -1,0 +1,1 @@
+RETURN_SYSTEM='本轮通过调用 submit_structured_result 返回结构化结果。此函数只提交JSON数据，不执行操作。严格遵守本轮Schema，完整返回所有required字段和要求的全部项目，不把完整结果误当修改列表。只有Schema允许的可选字段才可省略；需要null的字段按Schema返回null。标识必须使用输入真实值，不推定或补造内容。'
