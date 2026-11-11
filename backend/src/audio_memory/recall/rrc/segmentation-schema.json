@@ -1,0 +1,184 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "local_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string"
+          },
+          "scene": {
+            "type": "string",
+            "enum": [
+              "live"
+            ]
+          },
+          "boundary_reason": {
+            "type": "string"
+          },
+          "ranges": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "source_revision_id": {
+                  "type": "string",
+                  "const": "4e68a692-bae6-4ef3-8471-97ad98fa2252"
+                },
+                "start_segment_uid": {
+                  "type": "string",
+                  "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                },
+                "end_segment_uid": {
+                  "type": "string",
+                  "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                }
+              },
+              "required": [
+                "source_revision_id",
+                "start_segment_uid",
+                "end_segment_uid"
+              ]
+            },
+            "maxItems": 1
+          },
+          "sub_events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "local_key": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "boundary_reason": {
+                  "type": "string"
+                },
+                "ranges": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "source_revision_id": {
+                        "type": "string",
+                        "const": "4e68a692-bae6-4ef3-8471-97ad98fa2252"
+                      },
+                      "start_segment_uid": {
+                        "type": "string",
+                        "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                      },
+                      "end_segment_uid": {
+                        "type": "string",
+                        "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                      }
+                    },
+                    "required": [
+                      "source_revision_id",
+                      "start_segment_uid",
+                      "end_segment_uid"
+                    ]
+                  },
+                  "maxItems": 1
+                }
+              },
+              "required": [
+                "local_key",
+                "title",
+                "boundary_reason",
+                "ranges"
+              ]
+            }
+          }
+        },
+        "required": [
+          "local_key",
+          "title",
+          "topics",
+          "kind",
+          "scene",
+          "boundary_reason",
+          "ranges",
+          "sub_events"
+        ]
+      }
+    },
+    "fragments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "other"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "ranges": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "source_revision_id": {
+                  "type": "string",
+                  "const": "4e68a692-bae6-4ef3-8471-97ad98fa2252"
+                },
+                "start_segment_uid": {
+                  "type": "string",
+                  "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                },
+                "end_segment_uid": {
+                  "type": "string",
+                  "pattern": "^21fe5ac0ae2bb8a5:[0-9]+$"
+                }
+              },
+              "required": [
+                "source_revision_id",
+                "start_segment_uid",
+                "end_segment_uid"
+              ]
+            },
+            "maxItems": 1
+          }
+        },
+        "required": [
+          "kind",
+          "reason",
+          "ranges"
+        ]
+      }
+    }
+  },
+  "required": [
+    "events",
+    "fragments"
+  ]
+}

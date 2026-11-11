@@ -449,6 +449,8 @@ def create_app(
     app.include_router(content_router)
     app.include_router(reanalysis_router)
     app.include_router(settings_router)
+    from audio_memory.recall.rrc.api import page_router
+    app.include_router(page_router(resolved_paths.root / "rrc-sessions", None, None, resolved_runtime_config.keychain_service))
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -470,7 +472,7 @@ def create_app(
 
         @app.get("/{frontend_path:path}", include_in_schema=False)
         async def frontend(frontend_path: str) -> FileResponse:
-            if frontend_path not in {"", "history", "settings/prompts"}:
+            if frontend_path not in {"", "history", "recall", "settings/prompts"}:
                 raise HTTPException(status_code=404, detail="Not found")
             return FileResponse(resolved_frontend / "index.html")
 

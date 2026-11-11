@@ -1,12 +1,18 @@
 # Audio Memory
 
-当前发布版本：**`0.1.0-beta.8`**。仅支持 macOS Apple Silicon，属于小范围 Beta，请保留原始音频。
+当前发布版本：**`0.1.0-beta.9`**。仅支持 macOS Apple Silicon，属于小范围 Beta，请保留原始音频。
 
-[下载 Beta 8 发布包](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8) · [版本变化](CHANGELOG.md) · [隐私说明](PRIVACY.md)
+[下载 Beta 9 发布包](https://github.com/xiaoluxin5566/audio-memory/releases/download/v0.1.0-beta.9/audio-memory-v0.1.0-beta.9-macos-arm64.tar.gz) · [版本变化](CHANGELOG.md) · [隐私说明](PRIVACY.md)
 
 Audio Memory 是面向 macOS Apple Silicon 的音频记忆 Demo。本机保存音频、转写和报告；正常产品转写使用火山引擎豆包录音文件识别 2.0，报告使用 DeepSeek V4 Pro，按需使用 Kimi 搜索公开资料。云端处理涉及音频和文字传输，具体边界见下方说明。
 
-## Beta 8 功能
+## Beta 9 内容回溯
+
+打开「内容回溯」，选择录制时间并上传逐字稿。索引就绪后可以提问；需要更多线索时，页面会等待你的回复，再继续原问题。展开答案的原文引用即可核对。替换或删除逐字稿后，旧版本退出检索。
+
+回溯需要访问公司模型网关，并在 macOS 钥匙串中配置通用密码，服务为 `Audio Memory`，账户为 `recall:corporate:volcengine-deepseek-v4_1-flash`。密码为获授权的公司网关凭据。导入和查询时，模型服务会处理逐字稿、问题、对话和相关证据。运行提示词见 [RRC 源码](backend/src/audio_memory/recall/rrc)。
+
+## 长音频报告
 
 长音频报告采用 P1–P5 链路：
 
@@ -28,20 +34,20 @@ Audio Memory 是面向 macOS Apple Silicon 的音频记忆 Demo。本机保存�
 
 ## 安装与启动
 
-从 [Beta 8 发布页](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8) 下载以下两个文件，放在同一目录：
+从 [Beta 9 发布页](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.9) 下载以下两个文件，放在同一目录：
 
-- `audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz`
-- `audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz.sha256`
+- `audio-memory-v0.1.0-beta.9-macos-arm64.tar.gz`
+- `audio-memory-v0.1.0-beta.9-macos-arm64.tar.gz.sha256`
 
 在该目录中先验证校验值；只有校验成功后才继续解压和安装：
 
 ```bash
-shasum -a 256 -c audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz.sha256
+shasum -a 256 -c audio-memory-v0.1.0-beta.9-macos-arm64.tar.gz.sha256
 ```
 
 ```bash
-tar -xzf audio-memory-v0.1.0-beta.8-macos-arm64.tar.gz
-cd audio-memory-v0.1.0-beta.8
+tar -xzf audio-memory-v0.1.0-beta.9-macos-arm64.tar.gz
+cd audio-memory-v0.1.0-beta.9
 ./scripts/install-release.sh
 export PATH="$HOME/.local/bin:$PATH"
 audio-memory start
@@ -76,8 +82,8 @@ audio-memory version
 
 ## 源码开发与发布验收
 
-源码开发环境需要 Python 3.12、`uv`、Node.js、npm 和音频处理组件，可运行 `./scripts/install.sh` 和 `./scripts/start.sh`。该安装脚本仍包含本地模型准备步骤；这不代表 Beta 8 正常产品转写使用本地模型。
+源码开发环境需要 Python 3.12、`uv`、Node.js、npm 和音频处理组件，可运行 `./scripts/install.sh` 和 `./scripts/start.sh`。该安装脚本仍包含本地模型准备步骤；这不代表 Beta 9 正常产品转写使用本地模型。
 
-开发与发布流程以 [AGENTS.md](AGENTS.md) 和统一脚本为准。发布验收包括后端、前端、浏览器、运行环境隔离，以及对同一归档执行固定 MP3 + AAC 的真实转写和报告流程；真实流程会调用外部服务。Beta 8 的实际验证结果和归档校验值见 [发布记录](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.8)。
+开发与发布流程以 [AGENTS.md](AGENTS.md) 和统一脚本为准。发布验收包括后端、前端、浏览器、运行环境隔离，以及对同一归档执行固定 MP3 + AAC 的真实转写和报告流程；真实流程会调用外部服务。Beta 9 的实际验证结果和归档校验值见 [发布记录](https://github.com/xiaoluxin5566/audio-memory/releases/tag/v0.1.0-beta.9)。
 
-旧版离线 Prompt 样例门禁仍可用于对应契约回归，但不能替代 Beta 8 P1–P5 的测试或正式发布验收。历史第一阶段验收说明见 [docs/qa/phase-1-acceptance.md](docs/qa/phase-1-acceptance.md)。
+旧版离线 Prompt 样例门禁仍可用于对应契约回归，但不能替代 Beta 9 P1–P5 的测试或正式发布验收。历史第一阶段验收说明见 [docs/qa/phase-1-acceptance.md](docs/qa/phase-1-acceptance.md)。
