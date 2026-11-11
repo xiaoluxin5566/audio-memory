@@ -27,8 +27,9 @@ import './styles.css';
 
 const VOLCANO_ASR_API_KEY_URL = 'https://console.volcengine.com/speech/new/setting/apikeys';
 const INTERRUPTION_NOTICE_VERSION_KEY = 'audio-memory.analysis-interruption-notice-version';
-const ROUTES = { '/': 'feed', '/history': 'history' };
-const ROUTE_PATHS = { feed: '/', history: '/history' };
+import { RecallPage } from './components/RecallPage.jsx';
+const ROUTES = { '/': 'feed', '/history': 'history', '/recall': 'recall' };
+const ROUTE_PATHS = { feed: '/', history: '/history', recall: '/recall' };
 const sceneClass = {
   analysis: 'analysis', meeting: 'meeting', parenting: 'parenting', content: 'content',
   growth: 'growth', inspiration: 'inspiration', work_communication: 'meeting',
@@ -435,6 +436,7 @@ export function App() {
           </main>
         </div>
       )}
+      {route === 'recall' && <RecallPage />}
       {route === 'history' && <History state={state} />}
       {providerOpen && <ProviderModal state={state} refresh={providerState.refresh} onClose={() => setProviderOpen(false)} onToast={setToast} />}
       {asrOpen && <AsrModal state={asrState} refresh={refreshAsr} onClose={() => setAsrOpen(false)} onToast={setToast} />}
@@ -462,7 +464,7 @@ function CancelAnalysisModal({ cancelling, onClose, onConfirm }) {
 }
 
 function Topbar({ route, onNavigate, reanalysis, onReanalyze, onClear, environment }) {
-  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div>{environment?.label && <span className="runtime-environment-badge">{environment.label}</span>}</div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
+  return <header className="topbar"><div className="brand"><div className="brand-mark">AM</div><div><b>Audio Memory</b><span>本地音频智能分析</span></div>{environment?.label && <span className="runtime-environment-badge">{environment.label}</span>}</div><div className="top-actions"><nav>{[['feed', '信息流'], ['history', '音频历史'], ['recall', '内容回溯']].map(([id, label]) => <button key={id} className={route === id ? 'active' : ''} onClick={() => onNavigate(id)}>{label}</button>)}</nav><button className="secondary reanalysis-entry" disabled={reanalysis.state === 'disabled' || reanalysis.state === 'stopping'} onClick={onReanalyze}>{reanalysis.buttonLabel}</button><button className="danger-ghost" disabled={!reanalysis.canClearHistory} onClick={onClear}>清除所有历史</button></div></header>;
 }
 
 function UploadFile({ file, onRemove }) {
