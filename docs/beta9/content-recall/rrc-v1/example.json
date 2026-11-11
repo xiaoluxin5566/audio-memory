@@ -1,0 +1,114 @@
+{
+  "card": {
+    "sheet_row": 1,
+    "question": "蓝色测试箱放在哪里？",
+    "as_of": "2026-01-10",
+    "followup": "",
+    "required_slots": []
+  },
+  "documents": [
+    {
+      "id": "demo-a",
+      "date": "2026-01-09",
+      "text": "蓝色测试箱放在二楼资料室。",
+      "vector": [
+        1,
+        0
+      ]
+    },
+    {
+      "id": "demo-b",
+      "date": "2026-01-09",
+      "text": "红色圆盘已经清点。",
+      "vector": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": "demo-c",
+      "date": "2026-01-08",
+      "text": "蓝色测试箱放在楼下。",
+      "vector": [
+        1,
+        0
+      ]
+    }
+  ],
+  "query_vectors": {
+    "蓝色测试箱放在哪里？": [
+      1.0,
+      0.0
+    ]
+  },
+  "expected_selection": [
+    0,
+    1
+  ],
+  "expected_answer": "在二楼资料室。",
+  "responses": {
+    "slots1": {
+      "response": {
+        "action": "retrieve",
+        "start_date": "2026-01-09",
+        "end_date": "2026-01-09"
+      }
+    },
+    "request0": {
+      "response": {
+        "action": "retrieve",
+        "query": "蓝色测试箱放在哪里？"
+      }
+    },
+    "react1": {
+      "requires": {
+        "remaining": 4,
+        "passages": "片0 来源demo-a 事件demo-a 起点2026-01-09T10:00:00\nL1 +0 示例 蓝色测试箱放在二楼资料室。\n\n片1 来源demo-b 事件demo-b 起点2026-01-09T10:00:00\nL2 +0 示例 红色圆盘已经清点。"
+      },
+      "response": {
+        "action": "finish",
+        "evidence_status": "found",
+        "events": [
+          {
+            "event_id": "demo-a",
+            "time": "10:00",
+            "point": "蓝色测试箱放在二楼资料室。",
+            "lines": [
+              "L1"
+            ]
+          }
+        ]
+      }
+    },
+    "answer": {
+      "requires": {
+        "package": {
+          "evidence": [
+            {
+              "event_id": "demo-a",
+              "time": "10:00",
+              "point": "蓝色测试箱放在二楼资料室。",
+              "lines": {
+                "demo-a:0": "2026-01-09T10:00:00 示例 蓝色测试箱放在二楼资料室。"
+              }
+            }
+          ],
+          "status": "found",
+          "gaps": []
+        }
+      },
+      "response": {
+        "answer": "在二楼资料室。",
+        "support": [
+          {
+            "claim": "在二楼资料室。",
+            "anchors": [
+              "demo-a:0"
+            ]
+          }
+        ],
+        "unresolved": []
+      }
+    }
+  }
+}

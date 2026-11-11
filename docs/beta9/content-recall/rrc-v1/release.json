@@ -1,0 +1,33 @@
+{
+  "feature": "beta9 内容回溯",
+  "status": "定稿功能基线",
+  "version": "RRC v1",
+  "date": "2026-11-11",
+  "test_snapshot": {
+    "name": "音频AON-RRC 测试基线1",
+    "implementation": "音频AON-RAG 基线1 + 澄清接续和工程恢复",
+    "original_answers": 349,
+    "replayed_answers": 61,
+    "company_correct": 325,
+    "offline_correct_provisional": 317,
+    "scope": "冻结实际分阶段合并结果，非统一入口从头重跑。快照代码按原项目目录与索引使用。",
+    "sha256": {
+      "aon-rag-clarification-repair/comparison-410.json": "15babd57b3a8e45efd3d994a6e6730e0320d425a12eecad3f7cf23b4120cb572",
+      "aon-rag-clarification-repair/slots.txt": "b234835fb23e9772c73f920868d9d91ca954024af01993f8ed64fdbbff0403d3",
+      "aon-rag-clarification-repair/sheet-freeze.json": "444132d9a3abab037dbd3cd32064732a75da3c13b1ef610db3be9b12feed1944",
+      "aon-rag-clarification-repair/judge-only.json": "60d6e1cd7a2cbed4f1c029fcdf0349df1b5d1d5e23ee2774930e62c92a9cbabf",
+      "aon-rag-clarification-repair/batch.py": "a1b5798503756a87a2b3581aa52273ae8ebf1ac9962b3e1dd014a85a3f562653",
+      "aon-rag-clarification-repair/cards.json": "ceaa7b7612b64fa9df18c71dca00ebaca3fdc0c6eb3180c4c01bce6df17c1263",
+      "aon-rag-clarification-repair/answer.txt": "4d0ec5dc2a85850396fdd9ba524822555bf1c730fdc0f77752a5ed4dce0842c4",
+      "aon-rag-clarification-repair/offline-full-410.json": "5ecf7f2a518f995047751d9508bc8becb7dd30b7d3ae573918cea323a940ed59",
+      "aon-rag-clarification-repair/rows.json": "8d487c3d70c780fef0d0c9c801744de69f0585d392993b4a4e74320f5e803a59",
+      "aon-rag-clarification-repair/react.txt": "2c22bd294d29bd5aa1bd5a59220bef49eee6155c9800bb2a918fcfc7eac3bcae",
+      "aon-rag-clarification-repair/grade.py": "bd884b3ff28e0b346595a5b0584728b177b6cbff05252471ae19d0f368ab993e",
+      "aon-rag-clarification-repair/recover.py": "1c6c5bee3906de738bf81b93b59c6c64c51526cf84a57ef305d3abdb236fefab",
+      "aon-rag-clarification-repair/run_repair.py": "d7d6b07ee60bb8bd7b1a1d57df16abec9d15fa690bc677691cdbfe1834fcd68e",
+      "aon-rag-baseline-1/batch.py": "fa7f082ac5823fd35f4ded5efdc8935ec8a53a9d005c68f70fbf7e740a593dcd",
+      "aon-rag-baseline-1/manifest.json": "0bd93060ff5e541cf0e0195d1557d76438fc4b6d55bc68617ebf96c306115d83"
+    }
+  },
+  "publication": "源码与提示词归档；测试语料、评测明细、索引及运行依赖由原实验环境提供"
+}
