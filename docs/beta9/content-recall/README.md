@@ -13,3 +13,17 @@ Sheet2 共 410 题，274 道直答、136 道澄清。冻结答卷由原批 349 �
 ## 复核范围
 
 本目录提供原批、澄清修复、恢复及评分阶段的源码快照和三份实际提示词。release.json 保存完整测试快照的 SHA-256，包括由原实验环境保管的输入、索引清单及答卷指纹。运行源码需在原项目目录结构中配套公司接口、运行依赖及经授权的语料和索引。
+
+## 干净检出的离线验收
+
+使用 Python 3.12 和 NumPy（冻结运行环境为 2.4.6）。从仓库根目录运行：
+
+```sh
+python3.12 -m venv /tmp/rrc-venv
+/tmp/rrc-venv/bin/pip install -r docs/beta9/content-recall/rrc-v1/runtime/requirements.txt
+/tmp/rrc-venv/bin/python -B docs/beta9/content-recall/rrc-v1/runtime/replay.py
+```
+
+已有相同依赖时，可直接使用该解释器执行最后一条。安装好依赖后验收只读本地文件。程序检查三个系统提示词 SHA-256，创建虚构的三条发言及测试向量，按日期过滤、BM25、余弦和 RRF 实际检索，再用合成模型输出走 ReAct 原文交包及独立回答。预期窗口顺序为 [0, 1]，最终答案为“在二楼资料室。”。回放校验实际阅读原文、行锚点及送入回答阶段的证据包。
+
+可运行入口为 runtime/replay.py。两个以 aon-rag 开头的子目录保留历史实验源码与原始哈希，供比对。离线入口已独立于原工程、公司凭据和 .runtime 目录。私有实验可通过 --index 指定 chunks.json、blocks.json、meta.sqlite、vectors-{起始行}.npy 所在目录，通过 --sources 指定 sources.json 与 sources/<id>/source.json 所在目录，通过 --fixture 指定题卡、分阶段响应及查询向量（格式见 example.json），--output 指向空目录保存中间输入和最终结果。历史原始回执需在授权环境整理为 fixture；完整线上请求及410题的建库、评审属于原实验环境。
