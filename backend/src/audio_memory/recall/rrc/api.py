@@ -116,10 +116,10 @@ def page_router(root: Path, index_dir: Path | None, sources: Path | None, keycha
     async def status():
         return dict(configured=True,can_query=bool(index.chunks),ready_retrievable_count=len(index.chunks),
                     ready_event_count=len({(w['sid'],e) for w in index.chunks for e in w['ids']}),
-                    strategy='rrc-v1',scope_label='RRC v1 · 已就绪逐字稿索引')
+                    strategy='rrc-v4',scope_label='RRC-2（响应速度优化）')
 
     @router.post('/sessions',status_code=201)
-    async def create(strategy: Literal['rrc-v1','rrc-v3','rrc-v4']='rrc-v1'):
+    async def create(strategy: Literal['rrc-v1','rrc-v3','rrc-v4']='rrc-v4'):
         sid=uuid4()
         save_json(session_path(sid),dict(session_id=str(sid),strategy=strategy,turns=[]))
         return dict(session_id=sid)

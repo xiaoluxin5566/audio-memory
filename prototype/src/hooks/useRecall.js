@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { recallApi } from '../api/recall.js';
-const KEY = 'audio-memory-recall-session';
+const KEY = 'audio-memory-recall-session-rrc2';
 export function useRecall() {
   const [sessionId, setSessionId] = useState(() => localStorage.getItem(KEY));
   const [turns, setTurns] = useState([]);
