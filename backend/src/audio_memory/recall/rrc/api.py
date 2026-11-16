@@ -9,6 +9,9 @@ from .uploads import Uploads, build
 from ..clients import CorporateChatClient
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+from .v3 import engine as v3_engine
+from .v4 import status as v4_status
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -116,9 +119,9 @@ def page_router(root: Path, index_dir: Path | None, sources: Path | None, keycha
                     strategy='rrc-v1',scope_label='RRC v1 · 已就绪逐字稿索引')
 
     @router.post('/sessions',status_code=201)
-    async def create():
+    async def create(strategy: Literal['rrc-v1','rrc-v3','rrc-v4']='rrc-v1'):
         sid=uuid4()
-        save_json(session_path(sid),dict(session_id=str(sid),turns=[]))
+        save_json(session_path(sid),dict(session_id=str(sid),strategy=strategy,turns=[]))
         return dict(session_id=sid)
 
     @router.get('/sessions/{sid}')
@@ -135,6 +138,7 @@ def page_router(root: Path, index_dir: Path | None, sources: Path | None, keycha
                 if turn['message_id']==payload.client_message_id:
                     if turn['question']!=payload.question:raise HTTPException(409)
                     return dict(turn_id=turn['turn_id'],status=turn['status'])
+            strategy=state.get('strategy','rrc-v1')
             prev=state['turns'][-1] if state['turns'] else None
             resume=prev and prev['answer']['answer_status']=='needs_clarification'
             now=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
@@ -150,13 +154,20 @@ def page_router(root: Path, index_dir: Path | None, sources: Path | None, keycha
                 encoder=EmbeddingClient(token,http,provider='corporate_apihub',endpoint=CORPORATE_EMBEDDING_ENDPOINT,revision='rrc-v1',dimension=None,model=CORPORATE_EMBEDDING_MODEL,corporate=True)
                 async def model(stage,prompt,data):
                     body=dict(model=CHAT_MODEL,max_tokens=16384,enable_thinking=True,thinking_budget=4096,reasoning_effort='low',parallel_tool_calls=False,response_format={'type':'json_object'},messages=[dict(role='system',content=prompt),dict(role='user',content='输入 JSON：\n'+json.dumps(data,ensure_ascii=False))])
+                    if strategy in ('rrc-v3','rrc-v4'):
+                        body.update(enable_thinking=False)
+                        body.pop('thinking_budget');body.pop('reasoning_effort')
                     res=await http.post(CHAT_ENDPOINT,json=body,headers={'X-CHJ-GWToken':token,'BCS-APIHub-RequestId':str(uuid4())})
                     res.raise_for_status();reply=res.json()
                     calls.append(dict(stage=stage,usage=reply.get('usage')))
+                    if strategy in ('rrc-v3','rrc-v4') and reply['choices'][0].get('finish_reason')!='stop':
+                        raise ValueError('incomplete_model_output')
                     obj=parse_model_object(reply['choices'][0]['message']['content'])
                     save_json(folder/(stage+'.json'),obj)
                     return obj
-                result=await engine.run(dialogue,now,rounds,model,encoder,folder)
+                runner=v3_engine if strategy in ('rrc-v3','rrc-v4') else engine
+                options=dict(reader_prompt=v4_status.prompt,v4=True) if strategy=='rrc-v4' else {}
+                result=await runner.run(dialogue,now,rounds,model,encoder,folder,**options)
             citations=[]
             if result['status']=='awaiting_user':
                 text=result['questions'][-1]['question'];status='needs_clarification'
@@ -178,7 +189,9 @@ def page_router(root: Path, index_dir: Path | None, sources: Path | None, keycha
                 for k in anchors:
                     source,position=k.rsplit(':',1);seg=index.sources[source]['segments'][int(position)]
                     citations.append(dict(source_revision_id=source,start_segment_uid=seg['uid'],end_segment_uid=seg['uid'],quote=seg['text'],recorded_date=lines[k][:10]))
-            turn=dict(turn_id=tid,question=payload.question,message_id=payload.client_message_id,status='completed',strategy='rrc-v1',answer=dict(text=text,answer_status=status,citations=citations))
+            turn=dict(turn_id=tid,question=payload.question,message_id=payload.client_message_id,status='completed',strategy=strategy,answer=dict(text=text,answer_status=status,citations=citations))
+            if strategy=='rrc-v4':
+                turn['answer'].update(v4_status.describe(result, citations))
             save_json(folder/'turn.json',turn)
             save_json(folder/'trace.json',dict(dialogue=dialogue,rounds=result['rounds'],calls=calls,elapsed=time.monotonic()-start))
             state.update(dialogue=dialogue,rounds=result['rounds']);state['turns'].append(turn)
