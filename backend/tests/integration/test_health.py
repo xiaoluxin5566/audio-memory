@@ -448,7 +448,8 @@ async def test_development_database_rechecks_reused_connection_before_sql(
         project_root=tmp_path / "project",
         environ={"AUDIO_MEMORY_PROFILE": "development"},
     )
-    app = create_app(runtime_config=runtime_config)
+    # Keep background storage and credential startup out of this database write audit.
+    app = create_app(runtime_config=runtime_config, validate_connections_on_startup=False)
     database_path = app.state.runtime_config.paths.database
     protected_database = tmp_path / "production-audio-memory.sqlite3"
 
@@ -491,7 +492,8 @@ async def test_development_database_rechecks_pool_checkout_after_hardlink(
         project_root=tmp_path / "project",
         environ={"AUDIO_MEMORY_PROFILE": "development"},
     )
-    app = create_app(runtime_config=runtime_config)
+    # Keep background storage and credential startup out of this database write audit.
+    app = create_app(runtime_config=runtime_config, validate_connections_on_startup=False)
     database_path = app.state.runtime_config.paths.database
     protected_database = tmp_path / "production-pooled.sqlite3"
 
