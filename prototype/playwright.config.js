@@ -8,7 +8,7 @@ export default defineConfig({
   timeout: 20_000,
   use: {
     baseURL,
-    channel: 'chrome',
+    channel: process.env.CI ? undefined : 'chrome',
     headless: true,
   },
   webServer: {
