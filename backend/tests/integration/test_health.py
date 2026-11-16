@@ -460,6 +460,10 @@ async def test_development_database_rechecks_reused_connection_before_sql(
         # statement and makes the assertion race-dependent.
         await app.state.reanalysis_worker.close()
         await app.state.analysis_task_coordinator.close()
+        # Flush committed setup pages before taking the byte-for-byte snapshot.
+        # SQLite can otherwise copy them from WAL on connection teardown.
+        with sqlite3.connect(database_path) as checkpoint:
+            assert checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
         async with app.state.database.session() as session:
             await session.execute(text("SELECT 1"))
             os.link(database_path, protected_database)
